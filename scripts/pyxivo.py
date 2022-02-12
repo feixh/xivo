@@ -21,7 +21,10 @@ parser.add_argument(
 parser.add_argument(
     '-seq', default='room6', help='short tag for the seuqence name')
 parser.add_argument(
-    '-cam_id', default=0, type=int, help='specify which camera to use')
+    '-cam_id', default=0, type=int, help='specify which camera to use (for TUM VI dataset)')
+parser.add_argument(
+    '-sen', default="tango_top", type=str, help="specify which camera to use (COSYVIO dataset)"
+)
 parser.add_argument(
     '-out_dir', default='.', help='output directory to save results')
 parser.add_argument(
@@ -41,11 +44,23 @@ def main(args):
     # CHOOSE SAVERS
     ########################################
     if args.mode == 'eval':
-        saver = savers.EvalModeSaver(args)
+        if args.dataset == 'tumvi':
+            saver = savers.TUMVIEvalModeSaver(args)
+        elif args.dataset == 'cosyvio':
+            saver = savers.COSYVIOEvalModeSaver(args)
+        elif args.dataset == 'xivo':
+            saver = savers.XIVOEvalModeSaver(args)
     elif args.mode == 'dump':
-        saver = savers.DumpModeSaver(args)
+        if args.dataset == 'tumvi':
+            saver = savers.TUMVIDumpModeSaver(args)
+        elif args.dataset == 'cosyvio':
+            saver = savers.COSYVIODumpModeSaver(args)
+        elif args.dataset == 'xivo':
+            saver = savers.XIVODumpModeSaver(args)
+    elif args.mode == 'runOnly':
+        pass
     else:
-        raise ValueError('mode=[eval|dump]')
+        raise ValueError('mode=[eval|dump|dumpCov|runOnly]')
 
     ########################################
     # LOAD DATA
@@ -60,14 +75,27 @@ def main(args):
         img_dir = os.path.join(args.root, args.seq, 'cam0', 'data')
 
         imu_path = os.path.join(args.root, args.seq, 'imu0', 'data.csv')
+    elif args.dataset == "cosyvio":
+        img_dir = os.path.join(args.root, 'data', args.sen, args.seq, 'frames')
+        imu_path = os.path.join(args.root, 'data', args.sen, args.seq, 'data.csv')
     else:
         raise ValueError('unknown dataset argument; choose from tumvi or xivo')
 
     data = []
 
-    for p in glob.glob(os.path.join(img_dir, '*.png')):
-        ts = int(os.path.basename(p)[:-4])
-        data.append((ts, p))
+    if args.dataset in ['tumvi', 'xivo', 'carla', 'alphred', 'sabr']:
+        for p in glob.glob(os.path.join(img_dir, '*.png')):
+            ts = int(os.path.basename(p)[:-4])
+            data.append((ts, p))
+    elif args.dataset == 'cosyvio':
+        img_filelist = os.path.join(img_dir, 'data.csv')
+        with open(img_filelist, 'r') as fid:
+            for l in fid.readlines():
+                if l[0].isdigit():
+                    larr = l.strip().split(',')
+                    ts = int(larr[0])
+                    png_file = os.path.join(img_dir, larr[1])
+                    data.append((ts,png_file))
 
     with open(imu_path, 'r') as fid:
         for l in fid.readlines():
