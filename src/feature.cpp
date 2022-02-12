@@ -618,8 +618,32 @@ void Feature::Triangulate(const SE3 &gsb, const SE3 &gbc,
   Vec2 xc1 = CameraManager::instance()->UnProject(front());
   Vec2 xc2 = CameraManager::instance()->UnProject(back());
   SE3 g12 = (ref_->gsb() * gbc).inv() * (gsb * gbc);
-  Vec3 Xc1 = options.method == 1 ? Triangulate1(g12, xc1, xc2)
-                                 : Triangulate2(g12, xc1, xc2);
+
+  // Vec3 Xc1 = options.method == 3 ? Triangulate1(g12, xc1, xc2)
+  //                                : Triangulate2(g12, xc1, xc2);
+
+  Vec3 Xc1;
+
+  if(options.method == 1)
+  {
+    Xc1 = Triangulate1(g12, xc1, xc2);
+  }
+
+  else if(options.method == 2)
+  {
+    Xc1 = Triangulate2(g12, xc1, xc2);
+  }
+
+  else if(options.method == 3)
+  {
+    Xc1 = Triangulate1(g12, xc1, xc2);
+  }
+
+  else
+  {
+    std::cout << "[ERROR] Incorrect Method for Triangulation:" << options.method << std::endl;
+    exit(1);
+  }
 
   if (auto z = Xc1(2); z < options.zmin || z > options.zmax) {
     // triangulated depth is not great

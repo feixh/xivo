@@ -130,7 +130,7 @@
 
   // pre-subfilter triangulation options
   "triangulation": {
-    "method": 1,
+    "method": 5,
     "zmin": 0.05,
     "zmax": 5.0
   },
