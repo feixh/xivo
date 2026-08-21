@@ -263,7 +263,14 @@ void Estimator::AdaptInitialDepth() {
     std::vector<number_t> depth(depth_features.size());
     std::transform(depth_features.begin(), depth_features.end(), depth.begin(),
                    [](FeaturePtr f) { return f->z(); });
-    number_t median_depth = depth[depth.size() >> 1];
+    // `depth` has to be (partially) ordered before the middle element is the
+    // median. Without this, `median_depth` was whatever depth happened to sit
+    // in the middle of the graph's traversal order -- an arbitrary feature, not
+    // a robust statistic. With `median_weight` at 0.99 the initial depth handed
+    // to every new feature was then essentially that arbitrary value.
+    auto mid = depth.begin() + depth.size() / 2;
+    std::nth_element(depth.begin(), mid, depth.end());
+    number_t median_depth = *mid;
 
     if (median_depth < min_z_ || median_depth > max_z_) {
       VLOG(0) << "Median depth out of bounds: " << median_depth;
