@@ -71,6 +71,35 @@ public:
   bool Triangulate(const Vec2 &xc0, const Vec2 &xc1, Vec3 *Xc0,
                    number_t *gap = nullptr) const;
 
+  /** Triangulate from *pixel* observations, and report how uncertain the
+   * resulting log-depth is.
+   *
+   * `xp0`/`xp1` are pixel coordinates in cameras 0 and 1; both are unprojected
+   * internally, so callers do not need to know the distortion models.
+   *
+   * `log_depth_std` receives the standard deviation of log(z) implied by a
+   * `sigma_px` matching error on the right observation. It is obtained by
+   * re-triangulating with the right observation displaced by `sigma_px` pixels
+   * and taking the change in log-depth, rather than from the rectified-stereo
+   * formula sigma_z = z^2 sigma_d / (f b). The closed form needs a single focal
+   * length, and on a 190-degree fisheye the effective focal length varies
+   * substantially across the field, so a constant f would understate the
+   * uncertainty at the periphery -- exactly where matches are worst. The
+   * numerical version is exact for whatever camera model is configured and
+   * costs one extra triangulation.
+   *
+   * log-depth is the right space for this because that is how features are
+   * parameterized (`x_(2) = log z`), so the value drops straight into the
+   * feature's covariance without a further Jacobian.
+   *
+   * Returns false if either triangulation fails (degenerate parallax or a point
+   * behind a camera), in which case no output is written.
+   */
+  bool TriangulateFromPixels(const Vec2 &xp0, const Vec2 &xp1,
+                             number_t sigma_px, Vec3 *Xc0,
+                             number_t *log_depth_std,
+                             number_t *gap = nullptr) const;
+
   /** Angular epipolar residual, in radians.
    *
    * For a fisheye rig the epipolar constraint is not a straight line in pixel

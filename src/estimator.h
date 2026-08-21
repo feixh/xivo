@@ -230,6 +230,16 @@ public:
   int num_stereo_rejected_disparity() const {
     return Tracker::instance()->num_stereo_rejected_disparity();
   };
+  /** Cumulative outcomes of stereo depth seeding; see `StereoSeedDepth`. */
+  int num_stereo_init_ok() const { return num_stereo_init_ok_; };
+  int num_stereo_init_no_match() const { return num_stereo_init_no_match_; };
+  int num_stereo_init_rejected() const { return num_stereo_init_rejected_; };
+  int num_stereo_init_rej_degenerate() const {
+    return num_stereo_init_rej_degenerate_;
+  };
+  int num_stereo_init_rej_gap() const { return num_stereo_init_rej_gap_; };
+  int num_stereo_init_rej_range() const { return num_stereo_init_rej_range_; };
+  int num_stereo_init_rej_std() const { return num_stereo_init_rej_std_; };
   MatX3 InstateFeaturePositions(int n_output) const;
   MatX3 InstateFeaturePositions() const;
   MatX6 InstateFeatureCovs(int n_output) const;
@@ -340,6 +350,13 @@ private:
   void ZeroGaugeXYAddFeatures();
   void AddFeaturesWithInGroups();
   void AddGroupOfFeatures(int free_group_slots);
+  /** Metric depth for a just-created feature from its stereo pair.
+   *
+   * Returns false -- and leaves the caller to use the monocular prior -- when
+   * stereo seeding is disabled, when this feature has no right match on the
+   * current frame, or when the triangulation fails any of its gates. The three
+   * outcomes are counted separately so a poor seed rate can be attributed. */
+  bool StereoSeedDepth(FeaturePtr f, number_t *z, number_t *std_z);
   void InitializeJustCreatedTracks(GroupPtr g,
                                    std::list<FeaturePtr> &tracks);
   void AssociateTrackedFeaturesWithGroup(GroupPtr g,
@@ -500,6 +517,43 @@ private:
   /** Default subfilter covariance for each feature's (1/Z)-coordinate at
    *  initialization when triangulation is poor.*/
   number_t init_std_z_badtri_;
+
+  ////////////////////////////////////////
+  // Stereo depth initialization (M4)
+  ////////////////////////////////////////
+  /** Whether to seed a new feature's depth by triangulating its stereo pair
+   *  instead of using `init_z_`. Off unless `stereo_init.enable` is set. */
+  bool stereo_init_{false};
+  /** Assumed left->right matching error, in pixels. Sets how tight the seeded
+   *  log-depth covariance is; see `StereoRig::TriangulateFromPixels`. */
+  number_t stereo_init_sigma_px_;
+  /** Reject a triangulation whose two rays miss each other by more than this
+   *  many metres. A large gap means the match is inconsistent with the rig
+   *  geometry even if it passed the tracker's epipolar gate. */
+  number_t stereo_init_max_gap_;
+  /** Clamp on the seeded log-depth std. The floor stops a very close, very
+   *  well-conditioned feature from being seeded so confidently that the filter
+   *  cannot correct a calibration error; the ceiling means "no better than the
+   *  monocular prior", at which point there is no reason to prefer stereo. */
+  number_t stereo_init_min_std_z_;
+  number_t stereo_init_max_std_z_;
+  /** Let the two-frame temporal triangulation overwrite a stereo-seeded depth.
+   *
+   * Off by default, and that default is the whole point: `Feature::Triangulate`
+   * rewrites `x_` without touching `P_`, so allowing it pairs a temporal depth
+   * with the stereo's covariance. Exposed as a knob only so the choice stays
+   * measurable without a rebuild; see notes-stereo/m4-stereo-depth-init.md. */
+  bool stereo_init_allow_retriangulation_{false};
+  /** Diagnostics: how often the stereo seed was used vs fell back. The four
+   *  `rej_` counters partition `num_stereo_init_rejected_` by cause, which is
+   *  what makes a low seed rate attributable rather than merely visible. */
+  int num_stereo_init_ok_{0};
+  int num_stereo_init_no_match_{0};
+  int num_stereo_init_rejected_{0};
+  int num_stereo_init_rej_degenerate_{0};
+  int num_stereo_init_rej_gap_{0};
+  int num_stereo_init_rej_range_{0};
+  int num_stereo_init_rej_std_{0};
 
   /** The minimum depth that a feature can be given when it is first
    *  created. (i.e. minimum value of `init_z_`) */

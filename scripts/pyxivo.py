@@ -198,6 +198,9 @@ def main(args):
     #########################################
     # this is wrapped in a try/finally block so that data will save even when
     # we hit an exception (namely, KeyboardInterrupt)
+    # Bound before the try so a constructor failure surfaces as itself rather
+    # than as a NameError from the finally block.
+    estimator = None
     try:
         estimator = pyxivo.Estimator(args.cfg, viewer_cfg, args.seq, False)
         for i, (ts, content) in enumerate(data):
@@ -219,8 +222,42 @@ def main(args):
                     saver.onVisionUpdate(estimator, datum=(ts, content))
 
     finally:
+        if stereo and estimator is not None:
+            print_stereo_stats(estimator)
         if args.mode != 'runOnly':
             saver.onResultsReady()
+
+
+def print_stereo_stats(estimator):
+    """Summarize left->right matching and stereo depth seeding.
+
+    Printed at the end of every stereo run so the numbers land in the eval logs
+    alongside the ATE, rather than needing a separate harness to recover them.
+    """
+    frames = estimator.num_stereo_frames()
+    attempted = estimator.num_stereo_attempted()
+    matched = estimator.num_stereo_matched()
+    print('stereo: {} frames, {} match attempts, {} matched ({:.1f}%)'.format(
+        frames, attempted, matched,
+        100.0 * matched / attempted if attempted else 0.0))
+    print('stereo: rejected klt={} epipolar={} circular={} disparity={}'.format(
+        estimator.num_stereo_rejected_klt(),
+        estimator.num_stereo_rejected_epipolar(),
+        estimator.num_stereo_rejected_circular(),
+        estimator.num_stereo_rejected_disparity()))
+    ok = estimator.num_stereo_init_ok()
+    no_match = estimator.num_stereo_init_no_match()
+    rejected = estimator.num_stereo_init_rejected()
+    total = ok + no_match + rejected
+    print('stereo_init: {} seeded, {} no-match, {} rejected '
+          '({:.1f}% of {} new features seeded)'.format(
+              ok, no_match, rejected,
+              100.0 * ok / total if total else 0.0, total))
+    print('stereo_init: rejected degenerate={} gap={} range={} std={}'.format(
+        estimator.num_stereo_init_rej_degenerate(),
+        estimator.num_stereo_init_rej_gap(),
+        estimator.num_stereo_init_rej_range(),
+        estimator.num_stereo_init_rej_std()))
 
 
 if __name__ == '__main__':

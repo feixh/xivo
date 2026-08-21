@@ -377,9 +377,6 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
 
 
 void Tracker::MatchStereo() {
-  num_stereo_matched_ = 0;
-  num_stereo_attempted_ = 0;
-
   // Every feature starts the frame with no right observation, so `has_right()`
   // can only ever mean "matched in the current frame". Without this, a feature
   // that matched at frame k and failed at k+1 would feed the filter a stale
@@ -408,7 +405,7 @@ void Tracker::MatchStereo() {
     vf.push_back(f);
     pts_l.emplace_back(xp(0), xp(1));
   }
-  num_stereo_attempted_ = static_cast<int>(vf.size());
+  num_stereo_attempted_ += static_cast<int>(vf.size());
   if (vf.empty()) {
     return;
   }

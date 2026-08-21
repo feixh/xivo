@@ -203,6 +203,18 @@ public:
    * `has_right()`. */
   const Vec2 &xp_r() const { return xp_r_; }
 
+  /** True once this feature's depth was seeded by stereo triangulation.
+   *
+   * Consumed by `Estimator::ProcessTracks` to suppress the two-frame *temporal*
+   * pre-subfilter triangulation. That path rewrites `x_` but leaves `P_`
+   * untouched, so letting it run on a stereo-seeded feature would pair a depth
+   * the stereo never vouched for with the tight covariance the stereo earned --
+   * strictly worse than either estimate alone. The stereo baseline (101 mm,
+   * known from calibration) also beats the inter-frame baseline of a slow
+   * handheld rig at 20 Hz, so there is nothing to gain by overwriting. */
+  void SetStereoSeeded() { stereo_seeded_ = true; }
+  bool stereo_seeded() const { return stereo_seeded_; }
+
   ////////////////////////////////////////
   // OOS Jacobians accessors
   ////////////////////////////////////////
@@ -320,6 +332,8 @@ private:
    * found. Reset every stereo frame; see `SetRightObs`. */
   Vec2 xp_r_;
   bool has_right_{false};
+  /** Sticky for the lifetime of the feature, unlike `has_right_`. */
+  bool stereo_seeded_{false};
 
   /** 3D coordinates of the feature with respect to the current camera frame. */
   Vec3 Xc_;

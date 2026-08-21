@@ -78,6 +78,7 @@ void Feature::Reset(number_t x, number_t y) {
   // whichever feature previously occupied this slot.
   xp_r_ << -1, -1;
   has_right_ = false;
+  stereo_seeded_ = false;
   J_.setZero();
   inn_ << 0, 0;
   outlier_counter_ = 0;

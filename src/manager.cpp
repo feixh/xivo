@@ -9,6 +9,7 @@
 #include "feature.h"
 #include "geometry.h"
 #include "group.h"
+#include "stereo.h"
 #include "tracker.h"
 #include "mapper.h"
 #include "camera_manager.h"
@@ -225,8 +226,12 @@ void Estimator::ProcessTracks(const timestamp_t &ts,
       CHECK(!f->instate());
 #endif
       // perform triangulation if we've observed the feature exactly twice
-      // so far 
-      if (triangulate_pre_subfilter_ && f->size() == 2) {
+      // so far. Skipped for stereo-seeded features: `Triangulate` rewrites
+      // `x_` without touching `P_`, so it would replace the stereo depth with a
+      // two-frame temporal estimate while keeping the stereo's tight
+      // covariance. See `Feature::stereo_seeded()`.
+      if (triangulate_pre_subfilter_ && f->size() == 2 &&
+          (!f->stereo_seeded() || stereo_init_allow_retriangulation_)) {
         f->Triangulate(gsb(), gbc(), triangulate_options_);
       }
 
@@ -585,6 +590,63 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
 
 
 
+bool Estimator::StereoSeedDepth(FeaturePtr f, number_t *z, number_t *std_z) {
+  if (!stereo_init_) {
+    return false;
+  }
+  if (!f->has_right()) {
+    // No right match this frame. Not an error: the tracker rejects ~2% of
+    // observations, and the feature simply falls back to the monocular prior.
+    ++num_stereo_init_no_match_;
+    return false;
+  }
+
+  auto rig = StereoRig::instance();
+  Vec3 Xc0;
+  number_t log_depth_std, gap;
+  // Feature::Initialize takes its bearing from back(), the most recent
+  // observation, so the left pixel used here must be the same one.
+  if (!rig->TriangulateFromPixels(f->back(), f->xp_r(), stereo_init_sigma_px_,
+                                  &Xc0, &log_depth_std, &gap)) {
+    ++num_stereo_init_rejected_;
+    ++num_stereo_init_rej_degenerate_;
+    return false;
+  }
+
+  // The rays should very nearly intersect. They will not exactly, because of
+  // matching error and calibration error, but a large miss means the match is
+  // inconsistent with the rig geometry -- something the tracker's epipolar gate
+  // can let through, since a point can lie on the epipolar line at the wrong
+  // place along it.
+  if (gap > stereo_init_max_gap_) {
+    ++num_stereo_init_rejected_;
+    ++num_stereo_init_rej_gap_;
+    return false;
+  }
+
+  // Respect the same depth window the rest of the estimator uses; a seed
+  // outside it would be rejected as an instate candidate anyway.
+  if (!(Xc0(2) > min_z_ && Xc0(2) < max_z_)) {
+    ++num_stereo_init_rejected_;
+    ++num_stereo_init_rej_range_;
+    return false;
+  }
+
+  // If stereo cannot beat the monocular prior for this feature there is no
+  // reason to prefer it, so treat "worse than max_std_z" as a rejection rather
+  // than clamping it and pretending the seed is informative.
+  if (log_depth_std > stereo_init_max_std_z_) {
+    ++num_stereo_init_rejected_;
+    ++num_stereo_init_rej_std_;
+    return false;
+  }
+
+  *z = Xc0(2);
+  *std_z = std::max(log_depth_std, stereo_init_min_std_z_);
+  ++num_stereo_init_ok_;
+  return true;
+}
+
 void Estimator::InitializeJustCreatedTracks(GroupPtr g,
                                             std::list<FeaturePtr> &tracks)
 {
@@ -600,7 +662,17 @@ void Estimator::InitializeJustCreatedTracks(GroupPtr g,
     CHECK(f->ref() == nullptr);
 #endif
     f->SetRef(g);
-    if (triangulate_pre_subfilter_ && !f->TriangulationSuccessful()) {
+    number_t stereo_z, stereo_std_z;
+    if (StereoSeedDepth(f, &stereo_z, &stereo_std_z)) {
+      // A metric depth from the stereo pair, available on the feature's very
+      // first frame. The monocular path has to wait for the subfilter to
+      // triangulate across several frames of motion, and until then carries a
+      // depth prior of init_z_ with a log-depth std of 1.0 -- a factor of e in
+      // either direction. Seeding removes that wait and, more importantly,
+      // supplies scale that does not have to be recovered from the IMU.
+      f->Initialize(stereo_z, {init_std_x_, init_std_y_, stereo_std_z});
+      f->SetStereoSeeded();
+    } else if (triangulate_pre_subfilter_ && !f->TriangulationSuccessful()) {
       f->Initialize(init_z_, {init_std_x_badtri_, init_std_y_badtri_, init_std_z_badtri_});
     } else if (sim_initialize_depths_) {
       f->Initialize(ids_to_depths_[f->id()], {init_std_x_, init_std_y_, init_std_z_});

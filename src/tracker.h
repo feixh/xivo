@@ -109,6 +109,8 @@ private:
   int num_outliers_rejected_ = 0;
   int num_failed_to_track_ = 0;
   int num_new_detections_ = 0;
+  // All of these are cumulative over the whole run, deliberately: a mix of
+  // per-frame and run-total counters makes any ratio computed from them wrong.
   int num_stereo_frames_ = 0;
   int num_stereo_matched_ = 0;
   int num_stereo_attempted_ = 0;

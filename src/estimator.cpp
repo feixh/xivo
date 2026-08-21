@@ -363,6 +363,21 @@ Estimator::Estimator(const Json::Value &cfg)
   init_std_z_badtri_ = cfg_["initial_std_z_badtri"].asDouble();
   LOG(INFO) << "Initial covariance for features loaded";
 
+  // /////////////////////////////
+  // Stereo depth initialization
+  // /////////////////////////////
+  auto stereo_init_cfg = cfg_["stereo_init"];
+  stereo_init_ = stereo_init_cfg.get("enable", false).asBool();
+  stereo_init_sigma_px_ = stereo_init_cfg.get("sigma_px", 0.5).asDouble();
+  stereo_init_max_gap_ = stereo_init_cfg.get("max_gap", 0.10).asDouble();
+  stereo_init_min_std_z_ = stereo_init_cfg.get("min_std_z", 0.01).asDouble();
+  stereo_init_max_std_z_ = stereo_init_cfg.get("max_std_z", 1.0).asDouble();
+  stereo_init_allow_retriangulation_ =
+      stereo_init_cfg.get("allow_retriangulation", false).asBool();
+  if (stereo_init_ && !StereoRig::enabled()) {
+    LOG(FATAL) << "stereo_init.enable is set but no stereo rig is configured";
+  }
+
   MeasurementUpdateInitialized_ = false;
 
   // /////////////////////////////

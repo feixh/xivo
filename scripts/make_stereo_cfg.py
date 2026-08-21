@@ -83,6 +83,28 @@ def main():
     cfg['camera1_cfg'] = camera_block(cams['cam1'], '512-cam1 (from camchain)')
     cfg['stereo'] = True
 
+    # Seed a new feature's depth from its stereo pair instead of `initial_z`.
+    # See notes-stereo/m4-stereo-depth-init.md for how these were chosen.
+    cfg['stereo_init'] = {
+        "comment": "metric depth at first observation; see notes-stereo/m4",
+        "enable": True,
+        # Assumed left->right match error, in pixels, used to propagate a
+        # log-depth std. Swept over [0.10, 1.0] on all six rooms: a broad
+        # optimum near 0.15, clearly worse at >=0.5. Note this is *tighter*
+        # than a defensible estimate of true sub-pixel KLT error -- it is
+        # acting partly as a tuning knob on how much the filter trusts the
+        # seed. See notes-stereo/m4-stereo-depth-init.md.
+        "sigma_px": 0.15,
+        # Metres; reject a triangulation whose rays miss by more than this.
+        # Measured to be non-binding at 0.10 (raising it to 0.30 gives a
+        # byte-identical trajectory), and tightening it to 0.02 hurts. Kept as
+        # insurance against a miscalibrated rig rather than as a live gate.
+        "max_gap": 0.10,
+        # clamp on the seeded log-depth std
+        "min_std_z": 0.01,
+        "max_std_z": 1.0,
+    }
+
     # Left->right matching gates. Defaults live here rather than only in
     # tracker.cpp so a sweep can override them without a rebuild; see
     # notes-stereo/m3-stereo-tracking.md for how each was chosen.

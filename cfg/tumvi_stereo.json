@@ -382,6 +382,14 @@
     ]
   },
   "stereo": true,
+  "stereo_init": {
+    "comment": "metric depth at first observation; see notes-stereo/m4",
+    "enable": true,
+    "sigma_px": 0.15,
+    "max_gap": 0.1,
+    "min_std_z": 0.01,
+    "max_std_z": 1.0
+  },
   "stereo_cfg": {
     "comment": "T_cn_cnm1 from camchain.yaml: maps a point cam0 -> cam1",
     "T_c1c0": [

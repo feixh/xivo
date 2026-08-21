@@ -351,6 +351,24 @@ public:
     return estimator_->num_stereo_rejected_disparity();
   }
 
+  int num_stereo_init_ok() { return estimator_->num_stereo_init_ok(); }
+
+  int num_stereo_init_no_match() {
+    return estimator_->num_stereo_init_no_match();
+  }
+
+  int num_stereo_init_rejected() {
+    return estimator_->num_stereo_init_rejected();
+  }
+  int num_stereo_init_rej_degenerate() {
+    return estimator_->num_stereo_init_rej_degenerate();
+  }
+  int num_stereo_init_rej_gap() { return estimator_->num_stereo_init_rej_gap(); }
+  int num_stereo_init_rej_range() {
+    return estimator_->num_stereo_init_rej_range();
+  }
+  int num_stereo_init_rej_std() { return estimator_->num_stereo_init_rej_std(); }
+
   bool StereoEnabled() { return StereoRig::enabled(); }
 
   bool UsingLoopClosure() {
@@ -442,6 +460,13 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("num_stereo_rejected_epipolar", &EstimatorWrapper::num_stereo_rejected_epipolar)
       .def("num_stereo_rejected_circular", &EstimatorWrapper::num_stereo_rejected_circular)
       .def("num_stereo_rejected_disparity", &EstimatorWrapper::num_stereo_rejected_disparity)
+      .def("num_stereo_init_ok", &EstimatorWrapper::num_stereo_init_ok)
+      .def("num_stereo_init_no_match", &EstimatorWrapper::num_stereo_init_no_match)
+      .def("num_stereo_init_rejected", &EstimatorWrapper::num_stereo_init_rejected)
+      .def("num_stereo_init_rej_degenerate", &EstimatorWrapper::num_stereo_init_rej_degenerate)
+      .def("num_stereo_init_rej_gap", &EstimatorWrapper::num_stereo_init_rej_gap)
+      .def("num_stereo_init_rej_range", &EstimatorWrapper::num_stereo_init_rej_range)
+      .def("num_stereo_init_rej_std", &EstimatorWrapper::num_stereo_init_rej_std)
       .def("StereoEnabled", &EstimatorWrapper::StereoEnabled)
       .def("UsingLoopClosure", &EstimatorWrapper::UsingLoopClosure)
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)
