@@ -685,8 +685,15 @@ void Feature::FillJacobianBlock(MatX &H, int offset) {
   int goff = kGroupBegin + 6 * ref_->sind();
   int foff = kFeatureBegin + 3 * sind();
 
+  // Both of these used to be written to `goff`, so the rotation block was
+  // overwritten by the translation Jacobian and the translation block at
+  // `goff + 3` was left at zero (`H` is zeroed once per update in
+  // `FilterUpdate`). Every stacked measurement therefore saw a wrong reference-
+  // group rotation Jacobian and no translation Jacobian at all. `J_` itself was
+  // always correct -- only this copy was broken, which is why
+  // `unitTests_Jacobians` never caught it.
   H.block<2, 3>(offset, goff) = J_.block<2, 3>(0, goff);
-  H.block<2, 3>(offset, goff) = J_.block<2, 3>(0, goff + 3);
+  H.block<2, 3>(offset, goff + 3) = J_.block<2, 3>(0, goff + 3);
   H.block<2, 3>(offset, foff) = J_.block<2, 3>(0, foff);
 
 #ifdef USE_ONLINE_CAMERA_CALIB

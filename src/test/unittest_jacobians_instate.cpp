@@ -509,3 +509,58 @@ TEST_F(InstateJacobiansTest, Cg) {
 }
 #endif
 #endif
+/** Regression test for `Feature::FillJacobianBlock`.
+ *
+ * `ComputeJacobian` fills the 2 x kFullSize row block `J_`; `FillJacobianBlock`
+ * copies the non-zero blocks of `J_` into the stacked measurement Jacobian `H`
+ * used by `Estimator::FilterUpdate`. Every block must land at the *same* column
+ * offset it occupies in `J_`.
+ *
+ * This used to be false for the reference group: the rotation block and the
+ * translation block were both written to `goff`, so the rotation columns held
+ * the translation Jacobian and the translation columns stayed zero. The
+ * existing tests all check `J_` (or `cache_`), never the copy, so nothing
+ * caught it.
+ */
+TEST_F(InstateJacobiansTest, FillJacobianBlockCopiesEveryBlock) {
+    const int offset = 4;  // a non-zero row offset, as in a real stacked update
+    MatX H(offset + 2, kFullSize);
+    H.setZero();
+
+    f->FillJacobianBlock(H, offset);
+
+    const int goff = kGroupBegin + 6 * f->ref_->sind();
+    const int foff = kFeatureBegin + 3 * f->sind();
+
+    // Compare a 2x3 block of H against the same columns of J_. Wrapped in a
+    // lambda because the commas in block<2, 3> would be read as macro argument
+    // separators inside EXPECT_*.
+    auto block_matches = [&](int col) {
+      return H.block(offset, col, 2, 3).isApprox(f->J_.block(0, col, 2, 3));
+    };
+
+    // Rows above the block must be untouched.
+    EXPECT_TRUE(H.topRows(offset).isZero());
+
+    // Every block ComputeJacobian wrote must be copied to the same columns.
+    EXPECT_TRUE(block_matches(Index::Wsb));
+    EXPECT_TRUE(block_matches(Index::Tsb));
+    EXPECT_TRUE(block_matches(Index::Wbc));
+    EXPECT_TRUE(block_matches(Index::Tbc));
+    EXPECT_TRUE(block_matches(foff));
+
+    // The reference-group pose: rotation at goff, translation at goff + 3.
+    // The second of these is what the bug got wrong.
+    EXPECT_TRUE(block_matches(goff));
+    EXPECT_TRUE(block_matches(goff + 3));
+
+    // Guard against the two group blocks being equal (or zero) for a degenerate
+    // reason, which would let the old bug pass the assertions above.
+    EXPECT_FALSE(f->J_.block(0, goff, 2, 3).isApprox(
+        f->J_.block(0, goff + 3, 2, 3)));
+    EXPECT_FALSE(f->J_.block(0, goff + 3, 2, 3).isZero());
+
+    // The whole row block must equal J_: this also catches a block written to
+    // the wrong offset that the named checks above do not cover.
+    EXPECT_TRUE(H.middleRows(offset, 2).isApprox(f->J_));
+}
