@@ -82,6 +82,23 @@ def main():
     cfg['camera_cfg'] = camera_block(cams['cam0'], '512-cam0 (from camchain)')
     cfg['camera1_cfg'] = camera_block(cams['cam1'], '512-cam1 (from camchain)')
     cfg['stereo'] = True
+
+    # Left->right matching gates. Defaults live here rather than only in
+    # tracker.cpp so a sweep can override them without a rebuild; see
+    # notes-stereo/m3-stereo-tracking.md for how each was chosen.
+    cfg.setdefault('tracker_cfg', {})
+    if isinstance(cfg['tracker_cfg'], dict):
+        cfg['tracker_cfg']['stereo_matching'] = {
+            "comment": "gates on the left->right KLT match; see notes-stereo/m3",
+            # radians of angular epipolar miss
+            "epipolar_thresh": 0.005,
+            # pixels of left->right->left round-trip error
+            "circular_thresh": 1.0,
+            # pixels; below this there is no usable parallax
+            "min_disparity": 1.0,
+            # pixels; a 10 cm baseline cannot produce more than this
+            "max_disparity": 150.0,
+        }
     # kalibr's T_cn_cnm1 maps cam(n-1) -> cam(n), i.e. cam0 -> cam1 here, which
     # is exactly what StereoRig's "T_c1c0" key expects.
     cfg['stereo_cfg'] = {

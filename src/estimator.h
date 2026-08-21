@@ -212,6 +212,24 @@ public:
   int num_stereo_frames() const {
     return Tracker::instance()->num_stereo_frames();
   };
+  int num_stereo_matched() const {
+    return Tracker::instance()->num_stereo_matched();
+  };
+  int num_stereo_attempted() const {
+    return Tracker::instance()->num_stereo_attempted();
+  };
+  int num_stereo_rejected_klt() const {
+    return Tracker::instance()->num_stereo_rejected_klt();
+  };
+  int num_stereo_rejected_epipolar() const {
+    return Tracker::instance()->num_stereo_rejected_epipolar();
+  };
+  int num_stereo_rejected_circular() const {
+    return Tracker::instance()->num_stereo_rejected_circular();
+  };
+  int num_stereo_rejected_disparity() const {
+    return Tracker::instance()->num_stereo_rejected_disparity();
+  };
   MatX3 InstateFeaturePositions(int n_output) const;
   MatX3 InstateFeaturePositions() const;
   MatX6 InstateFeatureCovs(int n_output) const;

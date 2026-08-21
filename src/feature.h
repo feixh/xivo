@@ -182,6 +182,28 @@ public:
   void ResetPred() { pred_ << -1, -1; }
 
   ////////////////////////////////////////
+  // Stereo: the right camera's observation of this feature
+  ////////////////////////////////////////
+  /** Record a right-camera observation for the current frame, in *pixels*.
+   *
+   * Only the current frame's right observation is kept. Unlike the left track
+   * (a full history in `Track`), the right observation is consumed by the
+   * update at the timestamp it was made and never revisited, so keeping a
+   * history would cost memory for nothing. */
+  void SetRightObs(const Vec2 &xp_r) {
+    xp_r_ = xp_r;
+    has_right_ = true;
+  }
+  /** Forget the right observation. Called at the start of each stereo frame, so
+   * `has_right()` always refers to the *current* frame and a stale match from a
+   * previous frame can never be fed to the filter. */
+  void ClearRightObs() { has_right_ = false; }
+  bool has_right() const { return has_right_; }
+  /** Right-camera pixel observation for the current frame; only meaningful when
+   * `has_right()`. */
+  const Vec2 &xp_r() const { return xp_r_; }
+
+  ////////////////////////////////////////
   // OOS Jacobians accessors
   ////////////////////////////////////////
   VecX ro() const { return oos_.inn.head(oos_jac_counter_); }
@@ -293,6 +315,11 @@ private:
   /** Predicted pixel coordinates - computed right before the `Estimator` class's
    *  measurement update step in `Feature::Predict`. */
   Vec2 pred_;
+
+  /** Right-camera pixel observation for the current frame, and whether one was
+   * found. Reset every stereo frame; see `SetRightObs`. */
+  Vec2 xp_r_;
+  bool has_right_{false};
 
   /** 3D coordinates of the feature with respect to the current camera frame. */
   Vec3 Xc_;

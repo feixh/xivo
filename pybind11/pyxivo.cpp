@@ -331,6 +331,26 @@ public:
 
   int num_stereo_frames() { return estimator_->num_stereo_frames(); }
 
+  int num_stereo_matched() { return estimator_->num_stereo_matched(); }
+
+  int num_stereo_attempted() { return estimator_->num_stereo_attempted(); }
+
+  int num_stereo_rejected_klt() {
+    return estimator_->num_stereo_rejected_klt();
+  }
+
+  int num_stereo_rejected_epipolar() {
+    return estimator_->num_stereo_rejected_epipolar();
+  }
+
+  int num_stereo_rejected_circular() {
+    return estimator_->num_stereo_rejected_circular();
+  }
+
+  int num_stereo_rejected_disparity() {
+    return estimator_->num_stereo_rejected_disparity();
+  }
+
   bool StereoEnabled() { return StereoRig::enabled(); }
 
   bool UsingLoopClosure() {
@@ -416,6 +436,12 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("num_tracker_failed_to_track", &EstimatorWrapper::num_tracker_failed_to_track)
       .def("num_tracker_new_detections", &EstimatorWrapper::num_tracker_new_detections)
       .def("num_stereo_frames", &EstimatorWrapper::num_stereo_frames)
+      .def("num_stereo_matched", &EstimatorWrapper::num_stereo_matched)
+      .def("num_stereo_attempted", &EstimatorWrapper::num_stereo_attempted)
+      .def("num_stereo_rejected_klt", &EstimatorWrapper::num_stereo_rejected_klt)
+      .def("num_stereo_rejected_epipolar", &EstimatorWrapper::num_stereo_rejected_epipolar)
+      .def("num_stereo_rejected_circular", &EstimatorWrapper::num_stereo_rejected_circular)
+      .def("num_stereo_rejected_disparity", &EstimatorWrapper::num_stereo_rejected_disparity)
       .def("StereoEnabled", &EstimatorWrapper::StereoEnabled)
       .def("UsingLoopClosure", &EstimatorWrapper::UsingLoopClosure)
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)

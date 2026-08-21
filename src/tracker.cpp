@@ -10,6 +10,7 @@
 #include "opencv2/calib3d.hpp"
 
 #include "feature.h"
+#include "stereo.h"
 #include "tracker.h"
 #include "visualize.h"
 
@@ -157,6 +158,20 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
   max_level_ = klt_cfg.get("max_level", 4).asInt();
   max_iter_ = klt_cfg.get("max_iter", 15).asInt();
   eps_ = klt_cfg.get("eps", 0.01).asDouble();
+
+  // Stereo left->right matching. Defaults are chosen for TUM-VI's 512x512
+  // fisheye pair (~101 mm baseline, fx ~= 191 px); see
+  // notes-stereo/m3-stereo-tracking.md for how each was picked.
+  auto stereo_cfg = cfg_["stereo_matching"];
+  stereo_epipolar_thresh_ =
+      stereo_cfg.get("epipolar_thresh", 0.005).asDouble();
+  stereo_circular_thresh_ =
+      stereo_cfg.get("circular_thresh", 1.0).asDouble();
+  stereo_min_disparity_ = stereo_cfg.get("min_disparity", 1.0).asDouble();
+  stereo_max_disparity_ = stereo_cfg.get("max_disparity", 150.0).asDouble();
+  // The right search reuses the temporal KLT window/levels unless overridden.
+  stereo_win_size_ = stereo_cfg.get("win_size", win_size_).asInt();
+  stereo_max_level_ = stereo_cfg.get("max_level", max_level_).asInt();
 
   std::string detector_type = cfg_.get("detector", "FAST").asString();
   LOG(INFO) << "detector type=" << detector_type;
@@ -352,10 +367,130 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
   img_r_ = image_r;
   ++num_stereo_frames_;
 
-  // Left-image temporal tracking, unchanged. Right-image matching is added in
-  // M3; until then this is exactly the monocular path and the trajectories must
-  // agree bit for bit.
+  // Left-image temporal tracking is exactly the monocular path: the stereo run
+  // reaches this point having done bit-identical work to a mono run.
   Update(image);
+
+  // Then attach a right observation to whichever left features survived.
+  MatchStereo();
+}
+
+
+void Tracker::MatchStereo() {
+  num_stereo_matched_ = 0;
+  num_stereo_attempted_ = 0;
+
+  // Every feature starts the frame with no right observation, so `has_right()`
+  // can only ever mean "matched in the current frame". Without this, a feature
+  // that matched at frame k and failed at k+1 would feed the filter a stale
+  // observation paired with a fresh left one -- a large, silent inconsistency.
+  for (auto f : features_) {
+    f->ClearRightObs();
+  }
+
+  auto rig = StereoRig::instance();
+  if (rig == nullptr) {
+    return;
+  }
+
+  // Only features that were successfully tracked (or just created) this frame
+  // have a meaningful current-frame pixel location.
+  std::vector<FeaturePtr> vf;
+  std::vector<cv::Point2f> pts_l;
+  vf.reserve(features_.size());
+  pts_l.reserve(features_.size());
+  for (auto f : features_) {
+    auto st = f->track_status();
+    if (st != TrackStatus::TRACKED && st != TrackStatus::CREATED) {
+      continue;
+    }
+    const Vec2 &xp = f->xp();
+    vf.push_back(f);
+    pts_l.emplace_back(xp(0), xp(1));
+  }
+  num_stereo_attempted_ = static_cast<int>(vf.size());
+  if (vf.empty()) {
+    return;
+  }
+
+  std::vector<cv::Mat> pyr_l, pyr_r;
+  cv::buildOpticalFlowPyramid(img_, pyr_l,
+                              cv::Size(stereo_win_size_, stereo_win_size_),
+                              stereo_max_level_);
+  cv::buildOpticalFlowPyramid(img_r_, pyr_r,
+                              cv::Size(stereo_win_size_, stereo_win_size_),
+                              stereo_max_level_);
+
+  cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
+                            max_iter_, eps_);
+
+  // Left -> right. No initial-flow hint is given: the disparity of a feature
+  // depends on its unknown depth, so seeding with the left location (which
+  // OPTFLOW_USE_INITIAL_FLOW would do) is already the best guess available.
+  std::vector<cv::Point2f> pts_r;
+  std::vector<uint8_t> status_lr;
+  std::vector<float> err_lr;
+  cv::calcOpticalFlowPyrLK(pyr_l, pyr_r, pts_l, pts_r, status_lr, err_lr,
+                           cv::Size(stereo_win_size_, stereo_win_size_),
+                           stereo_max_level_, criteria);
+
+  // Right -> left, for the circular-consistency check. Running it on the whole
+  // batch is cheaper than filtering first and re-entering OpenCV, and the
+  // rejected entries are simply ignored below.
+  std::vector<cv::Point2f> pts_l_back;
+  std::vector<uint8_t> status_rl;
+  std::vector<float> err_rl;
+  cv::calcOpticalFlowPyrLK(pyr_r, pyr_l, pts_r, pts_l_back, status_rl, err_rl,
+                           cv::Size(stereo_win_size_, stereo_win_size_),
+                           stereo_max_level_, criteria);
+
+  auto cam_l = Camera::instance(0);
+  auto cam_r = Camera::instance(1);
+
+  for (size_t i = 0; i < vf.size(); ++i) {
+    if (!status_lr[i] || !status_rl[i]) {
+      ++num_stereo_rejected_klt_;
+      continue;
+    }
+    // Outside the right image (KLT will happily report a point past the border).
+    if (pts_r[i].x < 0 || pts_r[i].y < 0 || pts_r[i].x >= img_r_.cols ||
+        pts_r[i].y >= img_r_.rows) {
+      ++num_stereo_rejected_klt_;
+      continue;
+    }
+
+    const number_t dx = pts_r[i].x - pts_l[i].x;
+    const number_t dy = pts_r[i].y - pts_l[i].y;
+    const number_t disparity = std::sqrt(dx * dx + dy * dy);
+    if (disparity < stereo_min_disparity_ ||
+        disparity > stereo_max_disparity_) {
+      ++num_stereo_rejected_disparity_;
+      continue;
+    }
+
+    // Circular consistency: the round trip must land back where it started.
+    // This is the single most effective filter against repeated texture, since
+    // an aliased match is usually not symmetric.
+    const number_t bx = pts_l_back[i].x - pts_l[i].x;
+    const number_t by = pts_l_back[i].y - pts_l[i].y;
+    if (std::sqrt(bx * bx + by * by) > stereo_circular_thresh_) {
+      ++num_stereo_rejected_circular_;
+      continue;
+    }
+
+    // Epipolar check on unprojected bearings. Doing it in normalized
+    // coordinates (not pixels) is what makes a single threshold valid across
+    // the whole fisheye field.
+    Vec2 xc_l = cam_l->UnProject(Vec2{pts_l[i].x, pts_l[i].y});
+    Vec2 xc_r = cam_r->UnProject(Vec2{pts_r[i].x, pts_r[i].y});
+    if (rig->EpipolarResidual(xc_l, xc_r) > stereo_epipolar_thresh_) {
+      ++num_stereo_rejected_epipolar_;
+      continue;
+    }
+
+    vf[i]->SetRightObs(Vec2{pts_r[i].x, pts_r[i].y});
+    ++num_stereo_matched_;
+  }
 }
 
 

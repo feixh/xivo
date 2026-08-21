@@ -73,6 +73,11 @@ void Feature::Reset(number_t x, number_t y) {
   Track::Reset(x, y);
   x_ << x, y, 2.0;
   pred_ << -1, -1;
+  // Features are recycled from the memory pool, so this must be cleared here
+  // too: otherwise a fresh feature could inherit the right observation of
+  // whichever feature previously occupied this slot.
+  xp_r_ << -1, -1;
+  has_right_ = false;
   J_.setZero();
   inn_ << 0, 0;
   outlier_counter_ = 0;

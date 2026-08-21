@@ -338,6 +338,13 @@
       "scaleNormalized": true,
       "patternScale": 22.0,
       "nOctaves": 4
+    },
+    "stereo_matching": {
+      "comment": "gates on the left->right KLT match; see notes-stereo/m3",
+      "epipolar_thresh": 0.005,
+      "circular_thresh": 1.0,
+      "min_disparity": 1.0,
+      "max_disparity": 150.0
     }
   },
   "mapper_cfg": {
