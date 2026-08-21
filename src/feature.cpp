@@ -752,7 +752,14 @@ void Feature::Triangulate(const SE3 &gsb, const SE3 &gbc,
     return;
   }
 
-  if (auto z = Xc1(2); z < options.zmin || z > options.zmax) {
+  // Written as a negated "is good" test, not "is bad": with `z < zmin ||
+  // z > zmax` a NaN depth passed (every comparison against NaN is false) and
+  // fell into the success branch, which set x_ to NaN, x_(2) to log(NaN), and
+  // triangulation_successful_ to true. ClampLogDepth cannot rescue that either.
+  // The NaN then propagated into J_, inn_ and the covariance update, and MH
+  // gating could not reject it.
+  if (auto z = Xc1(2); !(std::isfinite(z) && z >= options.zmin &&
+                         z <= options.zmax && Xc1.allFinite())) {
     // triangulated depth is not great
     // stick to the constant depth
     num_bad_triangulations_++;

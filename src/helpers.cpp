@@ -122,10 +122,18 @@ bool DirectLinearTransformSVD(const SE3 &g12, const Vec2 &xc1, const Vec2 &xc2, 
   Eigen::JacobiSVD<Mat4> svd(A, Eigen::ComputeFullV);
   auto V = svd.matrixV();
 
+  // V(3,3) -> 0 for a point at infinity, i.e. a zero-parallax pair -- routine
+  // for a nearly static or purely rotating camera. Dividing anyway produced
+  // inf/NaN and `return true` reported it as a good triangulation; the caller's
+  // only sanity check is a zmin/zmax range test, which NaN passes (every
+  // comparison against NaN is false).
+  if (std::abs(V(3, 3)) < 1e-10) {
+    return false;
+  }
   X << V(0, 3), V(1, 3), V(2, 3);
   X /= V(3, 3);
 
-  return true;
+  return X.allFinite();
 }
 
 bool DirectLinearTransformAvg(const SE3 &g12, const Vec2 &xc1, const Vec2 &xc2, Vec3 &X) {
@@ -145,12 +153,17 @@ bool DirectLinearTransformAvg(const SE3 &g12, const Vec2 &xc1, const Vec2 &xc2, 
   A(1, 0) = f1.dot(f2_unrotated);
   A(0, 1) = -A(1, 0);
   A(1, 1) = -f2_unrotated.dot(f2_unrotated);
+  // A is singular when the two bearings are parallel (zero parallax);
+  // `A.inverse()` returns inf/NaN rather than failing.
+  if (std::abs(A.determinant()) < 1e-12) {
+    return false;
+  }
   Vec2 lambda = A.inverse() * b;
   Vec3 xm = lambda(0) * f1;
   Vec3 xn = t12 + lambda(1) * f2_unrotated;
   X = (xm + xn) / 2.0;
 
-  return true;
+  return X.allFinite();
 }
 
 
@@ -297,7 +310,15 @@ bool LinfAngular(const SE3 &g01, const Vec2 &xc0, const Vec2 &xc1, Vec3 &X, floa
   Vec3 n_a = (m0_hat + m1_hat).cross(t10);
   Vec3 n_b = (m0_hat - m1_hat).cross(t10);
 
-  Vec3 n_prime_hat = n_a.norm() >= n_b.norm() ? n_a : n_b;
+  // `m - (m.n)n` is a projection onto the plane perpendicular to n only if n is
+  // a *unit* vector. n_a/n_b are raw cross products with norms far from 1, so
+  // without normalizing this over/under-corrected by ||n||^2. L1Angular and
+  // L2Angular both use unit normals.
+  Vec3 n_prime_hat = (n_a.norm() >= n_b.norm() ? n_a : n_b);
+  if (n_prime_hat.norm() < 1e-10) {
+    return false; // degenerate: both bearings parallel to the baseline
+  }
+  n_prime_hat.normalize();
 
   Vec3 m0_prime = m0 - m0.dot(n_prime_hat) * n_prime_hat;
   Vec3 m1_prime = m1 - m1.dot(n_prime_hat) * n_prime_hat;
@@ -324,6 +345,16 @@ bool LinfAngular(const SE3 &g01, const Vec2 &xc0, const Vec2 &xc1, Vec3 &X, floa
 }
 
 
+/** acos with its argument clamped to [-1, 1]. Ratios of floating-point dot
+ * products and norms routinely land 1-2 ulp outside the domain, where acos
+ * returns NaN. Returns NaN only if the input is already NaN. */
+static float SafeAcos(float c) {
+  if (std::isnan(c)) {
+    return c;
+  }
+  return std::acos(std::clamp(c, -1.0f, 1.0f));
+}
+
 bool check_cheirality(const Vec3 &z, const Vec3 &t, const Vec3 &f1_prime, const Vec3 &Rf0_prime)
 {
 
@@ -343,12 +374,16 @@ bool check_cheirality(const Vec3 &z, const Vec3 &t, const Vec3 &f1_prime, const 
 bool check_angular_reprojection(const Vec3 &Rf0, const Vec3 &Rf0_prime, const Vec3 &f1, const Vec3 &f1_prime, float max_theta_thresh)
 {
 
-  float theta0 = acos(Rf0.dot(Rf0_prime) / (Rf0.norm() * Rf0_prime.norm()));
-  float theta1 = acos(f1.dot(f1_prime) / (f1.norm() * f1_prime.norm()));
+  // The cosine has to be clamped: these methods leave one of the two bearings
+  // *unchanged* by construction, so the ratio is 1 + O(ulp) and unclamped acos
+  // returns NaN. std::max(NaN, x) returns NaN, and `NaN > thresh` is false --
+  // so the gate silently accepted the outlier it was there to reject.
+  float theta0 = SafeAcos(Rf0.dot(Rf0_prime) / (Rf0.norm() * Rf0_prime.norm()));
+  float theta1 = SafeAcos(f1.dot(f1_prime) / (f1.norm() * f1_prime.norm()));
 
   float max_theta = std::max(theta0, theta1);
 
-  if(max_theta > max_theta_thresh)
+  if(!std::isfinite(max_theta) || max_theta > max_theta_thresh)
   {
     LOG(WARNING) << "[WARNING] angular reprojection error in triangulation";
     return false;
@@ -359,9 +394,10 @@ bool check_angular_reprojection(const Vec3 &Rf0, const Vec3 &Rf0_prime, const Ve
 bool check_parallax(const Vec3 &Rf0_prime, const Vec3 &f1_prime, float beta_thresh)
 {
 
-  float beta = acos(f1_prime.dot(Rf0_prime) / (f1_prime.norm() * Rf0_prime.norm()));
+  float beta = SafeAcos(f1_prime.dot(Rf0_prime) /
+                        (f1_prime.norm() * Rf0_prime.norm()));
 
-  if(beta < beta_thresh)
+  if(!std::isfinite(beta) || beta < beta_thresh)
   {
     LOG(WARNING) << "[WARNING] parallax error in triangulation " << beta;
     return false;

@@ -353,8 +353,18 @@ Estimator::Estimator(const Json::Value &cfg)
   init_std_z_ = cfg_["initial_std_z"].asDouble();
   min_z_ = cfg_["min_depth"].asDouble();
   max_z_ = cfg_["max_depth"].asDouble();
-  init_std_x_badtri_ = cfg_["initial_std_x_badtri"].asDouble();
-  init_std_y_badtri_ = cfg_["initial_std_y_badtri"].asDouble();
+  // Same pixels -> normalized-camera-coordinate conversion as the non-badtri
+  // pair above. These feed exactly the same sink -- Feature::Initialize, i.e.
+  // the covariance of x_ = (X/Z, Y/Z, log Z), whose first two components are
+  // normalized, not pixels -- and the configs give the two sets identical
+  // values, so they must be interpreted identically. Without the division the
+  // x/y variance was off by fl^2 ~ 3.6e4. This is not a corner case: the badtri
+  // branch in InitializeJustCreatedTracks is taken 100% of the time, because a
+  // feature there has exactly one observation and Triangulate needs two.
+  init_std_x_badtri_ =
+    cfg_["initial_std_x_badtri"].asDouble() / Camera::instance()->GetFocalLength();
+  init_std_y_badtri_ =
+    cfg_["initial_std_y_badtri"].asDouble() / Camera::instance()->GetFocalLength();
   init_std_z_badtri_ = cfg_["initial_std_z_badtri"].asDouble();
   LOG(INFO) << "Initial covariance for features loaded";
 
@@ -370,7 +380,7 @@ Estimator::Estimator(const Json::Value &cfg)
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
   feature_owner_change_cov_factor_ =
-    cfg_.get("filter_owner_change_cov_factor", 1.5).asDouble();
+    cfg_.get("feature_owner_change_cov_factor", 1.5).asDouble();
   strict_criteria_timesteps_ = cfg_.get("strict_criteria_timesteps", 5).asInt();
 
   // Feature Gauge Options
@@ -644,7 +654,14 @@ void Estimator::ComputeMotionJacobianAt(
   Mat3 dV_dWsb = -Rsb * SO3::hat(accel_calib);
   Mat3 dV_dba = -Rsb;
 
-  Mat3 dV_dWsg = -Rsb * SO3::hat(g_); // effective dimension: 3x2, since Wg is 2-dim
+  // Rsg, not Rsb. The error state perturbs on the RIGHT (core.h: `Rsg *= dRsg`),
+  // so d/dd [Rsg*exp(d)*g] = -Rsg*hat(g)*d. Rsb does not appear in the gravity
+  // term of Vdot at all. The two agree only while Rsb == I (t=0), which is
+  // presumably how this survived; from then on the column was rotated by
+  // Rsb*Rsg' relative to the truth. Every neighbouring block uses the same
+  // right-perturbation convention (dV_dWsb = -Rsb*hat(accel_calib) for the
+  // Rsb*accel_calib term), which is what makes this one the odd man out.
+  Mat3 dV_dWsg = -X.Rsg.matrix() * SO3::hat(g_); // effective dim 3x2, Wg is 2-dim
   // Mat2 dWg_dWg = Mat2::Identity();
 
   F_.setZero(); // wipe out the delta added to F in the previous step
