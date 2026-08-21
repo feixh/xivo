@@ -1,10 +1,24 @@
 import argparse
+import json
 import os, glob
+import re
 
 import sys
 sys.path.insert(0, 'lib')
 import pyxivo
 import savers
+
+
+def is_stereo_cfg(cfg_path):
+    """True if the estimator config asks for stereo.
+
+    The config is the single source of truth for stereo-vs-mono; there is no
+    command-line flag, so a config and a run mode cannot disagree. XIVO's configs
+    permit // comments, which json.loads does not, so strip them first.
+    """
+    with open(cfg_path) as f:
+        text = re.sub(r'(?m)//.*$', '', f.read())
+    return bool(json.loads(text).get('stereo', False))
 
 
 
@@ -78,12 +92,18 @@ def main(args):
     ########################################
     # LOAD DATA
     ########################################
+    stereo = is_stereo_cfg(args.cfg)
+    img_dir_r = None
     if args.dataset == 'tumvi':
         img_dir = os.path.join(args.root, 'dataset-{}_512_16'.format(args.seq),
                                'mav0', 'cam{}'.format(args.cam_id), 'data')
 
         imu_path = os.path.join(args.root, 'dataset-{}_512_16'.format(args.seq),
                                 'mav0', 'imu0', 'data.csv')
+        if stereo:
+            img_dir_r = os.path.join(
+                args.root, 'dataset-{}_512_16'.format(args.seq), 'mav0',
+                'cam{}'.format(1 - args.cam_id), 'data')
     elif args.dataset == 'cosyvio':
         img_dir = os.path.join(args.root, 'data', args.sen, args.seq, 'frames')
         imu_path = os.path.join(args.root, 'data', args.sen, args.seq, 'data.csv')
@@ -96,11 +116,30 @@ def main(args):
     else:
         raise ValueError('unknown dataset argument; choose from tumvi, xivo, cosyvio, carla')
 
+    if stereo and img_dir_r is None:
+        raise ValueError(
+            'config {} requests stereo, but dataset {} has no stereo pair '
+            'configured'.format(args.cfg, args.dataset))
+
     data = []
+
+    # Stereo: map each left timestamp to its right-image path. TUM-VI names both
+    # files after the (shared, hardware-triggered) timestamp, so pairing is exact
+    # -- but the pairing is still built by *checking the right file exists*, not
+    # by assuming it does, so a partial download shows up as dropped frames
+    # rather than as a crash mid-run.
+    right_of = {}
+    if stereo:
+        right_ts = {int(os.path.basename(p)[:-4]): p
+                    for p in glob.glob(os.path.join(img_dir_r, '*.png'))}
 
     if args.dataset in ['tumvi', 'xivo', 'carla', 'void']:
         for p in glob.glob(os.path.join(img_dir, '*.png')):
             ts = int(os.path.basename(p)[:-4])
+            if stereo:
+                if ts not in right_ts:
+                    continue
+                right_of[ts] = right_ts[ts]
             data.append((ts, p))
     elif args.dataset == 'cosyvio':
         img_filelist = os.path.join(img_dir, 'data.csv')
@@ -122,6 +161,18 @@ def main(args):
                 data.append((ts, (w, t)))
 
     data.sort(key=lambda tup: tup[0])
+
+    if stereo:
+        n_left = len(glob.glob(os.path.join(img_dir, '*.png')))
+        print('stereo: {} pairs from {} left / {} right frames'.format(
+            len(right_of), n_left, len(right_ts)))
+        if len(right_of) < n_left:
+            print('stereo: WARNING dropped {} left frames with no right '
+                  'partner'.format(n_left - len(right_of)))
+        if not right_of:
+            raise ValueError(
+                'stereo requested but no timestamp matched between {} and '
+                '{}'.format(img_dir, img_dir_r))
 
     ########################################
     # INITIALIZE ESTIMATOR
@@ -157,7 +208,10 @@ def main(args):
                 estimator.InertialMeas(ts, gyro[0], gyro[1], gyro[2], accel[0],
                                     accel[1], accel[2])
             else:
-                estimator.VisualMeas(ts, content)
+                if stereo:
+                    estimator.VisualMeasStereo(ts, content, right_of[ts])
+                else:
+                    estimator.VisualMeas(ts, content)
                 if estimator.UsingLoopClosure():
                     estimator.CloseLoop()
                 estimator.Visualize()

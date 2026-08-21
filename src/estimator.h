@@ -57,6 +57,19 @@ private:
   cv::Mat img_;
 };
 
+/** A synchronized stereo pair. `img_` is the left/primary image -- the same one
+ * `Visual` would carry -- so the two paths differ only by the extra right
+ * image. */
+class VisualStereo : public Message {
+public:
+  VisualStereo(const timestamp_t &ts, const cv::Mat &img, const cv::Mat &img_r)
+      : Message{ts}, img_{img}, img_r_{img_r} {}
+  void Execute(EstimatorPtr est);
+
+private:
+  cv::Mat img_, img_r_;
+};
+
 class VisualTrackerOnly : public Message {
 public:
   VisualTrackerOnly(const timestamp_t &ts, const cv::Mat &img) : Message{ts}, img_{img} {}
@@ -114,6 +127,7 @@ private:
 
 class Estimator : public Component<Estimator, State> {
   friend class internal::Visual;
+  friend class internal::VisualStereo;
   friend class internal::VisualTrackerOnly;
   friend class internal::VisualPointCloud;
   friend class internal::VisualPointCloudTrackerOnly;
@@ -133,6 +147,13 @@ public:
   void InertialMeas(const timestamp_t &ts, const Vec3 &gyro, const Vec3 &accel);
   // perform tracking/matching to generate tracks
   void VisualMeas(const timestamp_t &ts_raw, const cv::Mat &img);
+  /** Same as `VisualMeas`, for a synchronized stereo pair.
+   *
+   * Requires a stereo rig to have been configured ("stereo": true); calling it
+   * on a monocular system is fatal rather than a silent fall-back to the left
+   * image alone, which would look like a merely-disappointing stereo result. */
+  void VisualMeasStereo(const timestamp_t &ts_raw, const cv::Mat &img,
+                        const cv::Mat &img_r);
   // perform tracking/matching for feature tracker only application
   void VisualMeasTrackerOnly(const timestamp_t &ts_raw, const cv::Mat &img);
 
@@ -188,6 +209,9 @@ public:
   int num_tracker_new_detections() const {
     return Tracker::instance()->num_new_detections();
   };
+  int num_stereo_frames() const {
+    return Tracker::instance()->num_stereo_frames();
+  };
   MatX3 InstateFeaturePositions(int n_output) const;
   MatX3 InstateFeaturePositions() const;
   MatX6 InstateFeatureCovs(int n_output) const;
@@ -241,6 +265,10 @@ private:
   /** Top-level function for state prediction and update when an image
    *  packet arrives */
   void VisualMeasInternal(const timestamp_t &ts, const cv::Mat &img);
+
+  /** Stereo counterpart of `VisualMeasInternal`. */
+  void VisualMeasStereoInternal(const timestamp_t &ts, const cv::Mat &img,
+                                const cv::Mat &img_r);
 
   /** Top-level function for update when an image packet arrives for
    * feature tracker*/

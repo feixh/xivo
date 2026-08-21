@@ -16,6 +16,7 @@
 #include "tracker.h"
 #include "helpers.h"
 #include "mapper.h"
+#include "stereo.h"
 
 #ifdef USE_G2O
 #include "optimizer.h"
@@ -57,6 +58,10 @@ void Inertial::Execute(Estimator *est) {
 }
 
 void Visual::Execute(Estimator *est) { est->VisualMeasInternal(ts_, img_); }
+
+void VisualStereo::Execute(Estimator *est) {
+  est->VisualMeasStereoInternal(ts_, img_, img_r_);
+}
 
 void VisualTrackerOnly::Execute(Estimator *est) { est->VisualMeasInternalTrackerOnly(ts_, img_); }
 
@@ -959,6 +964,31 @@ void Estimator::VisualMeas(const timestamp_t &ts_raw, const cv::Mat &img) {
   }
 }
 
+void Estimator::VisualMeasStereo(const timestamp_t &ts_raw, const cv::Mat &img,
+                                 const cv::Mat &img_r) {
+  if (!StereoRig::enabled()) {
+    LOG(FATAL) << "VisualMeasStereo called but no stereo rig is configured; "
+                  "set \"stereo\": true in the config";
+  }
+  timestamp_t ts{ts_raw};
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+  if (X_.td >= 0) {
+    ts += timestamp_t(uint64_t(X_.td * 1e9)); // seconds -> nanoseconds
+  } else {
+    ts -= timestamp_t(uint64_t(-X_.td * 1e9)); // seconds -> nanoseconds
+  }
+#endif
+  // The rig is hardware-triggered, so one td correction applies to both images.
+  if (async_run_) {
+    std::scoped_lock lck(buf_.mtx);
+    buf_.push_back(std::make_unique<internal::VisualStereo>(ts, img, img_r));
+    MaintainBuffer();
+  } else {
+    buf_.push_back(std::make_unique<internal::VisualStereo>(ts, img, img_r));
+    MaintainBuffer();
+  }
+}
+
 void Estimator::VisualMeasTrackerOnly(const timestamp_t &ts_raw, const cv::Mat &img) {
   timestamp_t ts{ts_raw};
 #ifdef USE_ONLINE_TEMPORAL_CALIB
@@ -1129,6 +1159,54 @@ void Estimator::VisualMeasInternal(const timestamp_t &ts, const cv::Mat &img) {
     // track features
     timer_.Tick("track");
     tracker->Update(img);
+    timer_.Tock("track");
+    // process features
+    timer_.Tick("process-tracks");
+    UpdateStep(ts, tracker->features_);
+    timer_.Tock("process-tracks");
+
+    if (gauge_group_ == -1) {
+      SwitchRefGroup();
+    }
+  }
+  timer_.Tock("visual-meas");
+}
+
+
+void Estimator::VisualMeasStereoInternal(const timestamp_t &ts,
+                                         const cv::Mat &img,
+                                         const cv::Mat &img_r) {
+  // Deliberately mirrors VisualMeasInternal step for step. The only difference
+  // is `tracker->UpdateStereo(img, img_r)` in place of `tracker->Update(img)`:
+  // propagation, prediction and the update step are shared, so a divergence
+  // between the mono and stereo trajectories can only come from tracking or
+  // from what the update step makes of the right observations.
+  if (!GoodTimestamp(ts)) {
+    std::cout << "Dropping a visual frame because its timestamp was delayed too far back in the past. Make MESSAGE_BUFFER_SIZE bigger." << std::endl;
+    return;
+  }
+  if (simulation_) {
+    throw std::invalid_argument(
+        "function VisualMeasStereo cannot be called in simulation");
+  }
+
+  ++vision_counter_;
+  timer_.Tick("visual-meas");
+  UpdateSystemClock(ts);
+  if (vision_initialized_) {
+    // propagate state upto current timestamp
+    Propagate(true);
+    if (use_canvas_) {
+      // Only the left image is drawn: the canvas geometry (and everything that
+      // reads it) is in left-camera pixels.
+      Canvas::instance()->Update(img);
+    }
+    // measurement prediction for feature tracking
+    auto tracker = Tracker::instance();
+    Predict(tracker->features_);
+    // track features
+    timer_.Tick("track");
+    tracker->UpdateStereo(img, img_r);
     timer_.Tock("track");
     // process features
     timer_.Tick("process-tracks");

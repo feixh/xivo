@@ -183,6 +183,15 @@ add_executable(unitTests_stereo
 target_link_libraries(unitTests_stereo xest ${deps} gtest gtest_main)
 add_test(NAME Stereo COMMAND unitTests_stereo)
 
+# The loader lives in xapp, so this one links the application library too.
+# jsoncpp is repeated after ${deps}: `common` sits after `jsoncpp` in that list
+# and pulls in Json symbols, which a single-pass static link cannot resolve
+# backwards.
+add_executable(unitTests_stereo_loader
+               test/unittest_stereo_loader.cpp)
+target_link_libraries(unitTests_stereo_loader ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME StereoLoader COMMAND unitTests_stereo_loader)
+
 if (BUILD_G2O)
   message(INFO ${libxivo})
   add_executable(test_optimizer test/test_optimizer.cpp)

@@ -340,6 +340,25 @@ void Tracker::Update(const cv::Mat &image) {
 }
 
 
+void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
+  if (image_r.empty()) {
+    LOG(FATAL) << "UpdateStereo called with an empty right image";
+  }
+  if (image_r.rows != image.rows || image_r.cols != image.cols) {
+    LOG(FATAL) << "stereo images differ in size: left " << image.cols << "x"
+               << image.rows << " vs right " << image_r.cols << "x"
+               << image_r.rows;
+  }
+  img_r_ = image_r;
+  ++num_stereo_frames_;
+
+  // Left-image temporal tracking, unchanged. Right-image matching is added in
+  // M3; until then this is exactly the monocular path and the trajectories must
+  // agree bit for bit.
+  Update(image);
+}
+
+
 void Tracker::UpdateMatch(const cv::Mat &image) {
   img_ = image.clone();
   if (cfg_.get("normalize", false).asBool()) {

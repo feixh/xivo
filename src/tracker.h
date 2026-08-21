@@ -38,6 +38,20 @@ public:
 
   void Update(const cv::Mat &img);
 
+  /** Stereo counterpart of `Update`.
+   *
+   * Temporal tracking on the left image is bit-for-bit the same work `Update`
+   * does; the right image is used only to attach a second observation to each
+   * surviving left feature. As of M2 the right image is merely validated and
+   * counted -- left->right matching arrives in M3 -- so a stereo run must
+   * currently produce a trajectory identical to the monocular one. That
+   * equality is the regression gate for the whole data path.
+   */
+  void UpdateStereo(const cv::Mat &img, const cv::Mat &img_r);
+
+  /** Number of frames for which a right image was received. */
+  int num_stereo_frames() const { return num_stereo_frames_; }
+
   void UpdatePointCloud(const VecXi &feature_ids, const MatX2 &xps);
 
   /** Called by function `CreateSystem` to force extraction of descriptors when
@@ -76,8 +90,11 @@ private:
   int num_outliers_rejected_ = 0;
   int num_failed_to_track_ = 0;
   int num_new_detections_ = 0;
+  int num_stereo_frames_ = 0;
 
   cv::Mat img_;
+  /** Right image of the current stereo pair; empty on monocular runs. */
+  cv::Mat img_r_;
 
   /** Last computed LK pyramid */
   std::vector<cv::Mat> pyramid_;

@@ -5,6 +5,7 @@
 
 #include "estimator.h"
 #include "camera_manager.h"
+#include "stereo.h"
 #include "opencv2/core/eigen.hpp"
 #include "opencv2/highgui/highgui.hpp"
 #include "utils.h"
@@ -109,6 +110,30 @@ public:
 
     if (viewer_) {
       auto disp = Canvas::instance()->display();
+      if (!disp.empty()) {
+        LOG(INFO) << "Display image is ready";
+        viewer_->Update(disp);
+      }
+    }
+  }
+
+  void VisualMeasStereo(uint64_t ts, std::string &image_path,
+                        std::string &image_path_r) {
+
+    auto image = cv::imread(image_path);
+    auto image_r = cv::imread(image_path_r);
+    if (image.empty()) {
+      LOG(FATAL) << "failed to read left image " << image_path;
+    }
+    if (image_r.empty()) {
+      LOG(FATAL) << "failed to read right image " << image_path_r;
+    }
+
+    estimator_->VisualMeasStereo(timestamp_t{ts}, image, image_r);
+
+    if (viewer_) {
+      auto disp = Canvas::instance()->display();
+
       if (!disp.empty()) {
         LOG(INFO) << "Display image is ready";
         viewer_->Update(disp);
@@ -304,6 +329,10 @@ public:
 
   int num_tracker_new_detections() { return estimator_->num_tracker_new_detections(); }
 
+  int num_stereo_frames() { return estimator_->num_stereo_frames(); }
+
+  bool StereoEnabled() { return StereoRig::enabled(); }
+
   bool UsingLoopClosure() {
     return estimator_->UsingLoopClosure();
   }
@@ -337,6 +366,7 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("InertialMeas", &EstimatorWrapper::InertialMeas)
       .def("VisualMeas", py::overload_cast<uint64_t, std::string &>(&EstimatorWrapper::VisualMeas))
       .def("VisualMeas", py::overload_cast<uint64_t, py::array_t<unsigned char, py::array::c_style | py::array::forcecast>>(&EstimatorWrapper::VisualMeas))
+      .def("VisualMeasStereo", &EstimatorWrapper::VisualMeasStereo)
       .def("VisualMeasTrackerOnly", py::overload_cast<uint64_t, std::string &>(&EstimatorWrapper::VisualMeasTrackerOnly))
       .def("VisualMeasTrackerOnly", py::overload_cast<uint64_t, py::array_t<unsigned char, py::array::c_style | py::array::forcecast>>(&EstimatorWrapper::VisualMeasTrackerOnly))
       .def("VisualMeasPointCloud", &EstimatorWrapper::VisualMeasPointCloud)
@@ -385,6 +415,8 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("num_tracker_outlier_rejected", &EstimatorWrapper::num_tracker_outlier_rejected)
       .def("num_tracker_failed_to_track", &EstimatorWrapper::num_tracker_failed_to_track)
       .def("num_tracker_new_detections", &EstimatorWrapper::num_tracker_new_detections)
+      .def("num_stereo_frames", &EstimatorWrapper::num_stereo_frames)
+      .def("StereoEnabled", &EstimatorWrapper::StereoEnabled)
       .def("UsingLoopClosure", &EstimatorWrapper::UsingLoopClosure)
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)
       .def("now", &EstimatorWrapper::now)
