@@ -110,7 +110,7 @@ class EvalModeSaver(BaseSaver):
             # format compatible with tumvi rgbd benchmark scripts
             self.results.append(
                 [now * 1e-9, Tsb[0], Tsb[1], Tsb[2], q[1], q[2], q[3], q[0]])
-        except np.linalg.linalg.LinAlgError:
+        except np.linalg.LinAlgError:
             pass
 
     def onResultsReady(self):
@@ -146,7 +146,7 @@ class DumpModeSaver(BaseSaver):
 
                 with open(self.resultsPath, 'w') as fid:
                     json.dump(self.results, fid, indent=2)
-            except np.linalg.linalg.LinAlgError:
+            except np.linalg.LinAlgError:
                 pass
 
     def onResultsReady(self):

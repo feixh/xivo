@@ -112,7 +112,7 @@ void Viewer::Update(const cv::Mat &image) {
     return;
 
   image_ = image.clone();
-  cv::cvtColor(image_, image_, CV_RGB2BGR);
+  cv::cvtColor(image_, image_, cv::COLOR_RGB2BGR);
   cv::flip(image_, image_, 0);
 
   int rows(image_.rows);

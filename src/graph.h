@@ -1,8 +1,11 @@
 // The feature-group visibility graph.
 // Author: Xiaohan Fei (feixh@cs.ucla.edu)
 #pragma once
+#include <cstdlib>
 #include <functional>
 #include <list>
+#include <random>
+#include <string>
 #include <unordered_map>
 
 #include "core.h"
@@ -104,7 +107,16 @@ public:
 private:
   Graph() {
     random_device = new std::random_device;
-    random_generator = new std::mt19937((*random_device)());
+    // Gauge-feature selection draws on this generator, so a fresh entropy seed
+    // makes every run of the same sequence produce a slightly different
+    // trajectory. Allow a fixed seed (XIVO_RANDOM_SEED) so that runs are
+    // reproducible; without it the original nondeterministic behaviour is kept.
+    if (const char *seed_str = std::getenv("XIVO_RANDOM_SEED")) {
+      random_generator = new std::mt19937(
+          static_cast<std::mt19937::result_type>(std::stoul(seed_str)));
+    } else {
+      random_generator = new std::mt19937((*random_device)());
+    }
   }
 
   Graph(const Graph&) = delete;

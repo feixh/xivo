@@ -71,7 +71,7 @@ void Canvas::Update(const cv::Mat &img) {
     return;
   }
   if (img.channels() == 1) {
-    cv::cvtColor(img, disp_, CV_GRAY2RGB);
+    cv::cvtColor(img, disp_, cv::COLOR_GRAY2RGB);
   } else {
     img.copyTo(disp_);
   }
@@ -167,96 +167,96 @@ void Canvas::OverlayStateInfo(const State &X, const IMUState &IMU,
 
   cv::putText(disp_, StrFormat("Tsb=[%0.4f, %0.4f, %0.4f]", X.Tsb(0),
                                      X.Tsb(1), X.Tsb(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("Vsb=[%0.4f, %0.4f, %0.4f]", X.Vsb(0),
                                      X.Vsb(1), X.Vsb(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   auto Wsb{X.Rsb.log()};
   cv::putText(disp_, StrFormat("Wsb=[%0.4f, %0.4f, %0.4f]", Wsb(0),
                                      Wsb(1), Wsb(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("Tbc=[%0.4f, %0.4f, %0.4f]", X.Tbc(0),
                                      X.Tbc(1), X.Tbc(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   auto Wbc{X.Rbc.log()};
   cv::putText(disp_, StrFormat("Wbc=[%0.4f, %0.4f, %0.4f]", Wbc(0),
                                      Wbc(1), Wbc(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   auto Wsg{X.Rsg.log()};
   cv::putText(disp_, StrFormat("Wsg=[%0.4f, %0.4f, %0.4f]", Wsg(0),
                                       Wsg(1), Wsg(2)),
-              cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+              cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
               kColorLakeBlue, thickness);
 
   if (print_bias_info) {
     cv::putText(disp_, StrFormat("bg=[%0.4f, %0.4f, %0.4f]", X.bg(0),
           X.bg(1), X.bg(2)),
-        cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+        cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
         kColorLakeBlue, thickness);
 
     cv::putText(disp_, StrFormat("ba=[%0.4f, %0.4f, %0.4f]", X.ba(0),
           X.ba(1), X.ba(2)),
-        cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+        cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
         kColorLakeBlue, thickness);
   }
 
 #ifdef USE_ONLINE_TEMPORAL_CALIB
   cv::putText(disp_, StrFormat("td=%0.4f", X.td),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 #endif
 
 #ifdef USE_ONLINE_IMU_CALIB
   cv::putText(disp_, StrFormat("Ca=[[%0.4f, %0.4f, %0.4f]", IMU.Ca(0,0),
                                IMU.Ca(0,1), IMU.Ca(0,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("    [%0.4f, %0.4f, %0.4f]", IMU.Ca(1,0),
                                IMU.Ca(1,1), IMU.Ca(1,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("    [%0.4f, %0.4f, %0.4f]]", IMU.Ca(2,0),
                                IMU.Ca(2,1), IMU.Ca(2,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("Cg=[[%0.4f, %0.4f, %0.4f]", IMU.Cg(0,0),
                                IMU.Cg(0,1), IMU.Cg(0,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("    [%0.4f, %0.4f, %0.4f]", IMU.Cg(1,0),
                                IMU.Cg(1,1), IMU.Cg(1,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("    [%0.4f, %0.4f, %0.4f]]", IMU.Cg(2,0),
                                IMU.Cg(2,1), IMU.Cg(2,2)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 #endif
 
 #ifdef USE_ONLINE_CAMERA_CALIB
   cv::putText(disp_, StrFormat("Cam=[[%0.4f, %0.4f, %0.4f, %0.4f]",
                                Cam(0), Cam(1), Cam(2), Cam(3)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 
   cv::putText(disp_, StrFormat("Cam=[[%0.4f, %0.4f, %0.4f, %0.4f, %0.4f]",
                                Cam(4), Cam(5), Cam(6), Cam(7), Cam(8)),
-      cv::Point(hspace, vspace * ++line_counter), CV_FONT_HERSHEY_PLAIN, font_scale,
+      cv::Point(hspace, vspace * ++line_counter), cv::FONT_HERSHEY_PLAIN, font_scale,
       kColorLakeBlue, thickness);
 #endif
 

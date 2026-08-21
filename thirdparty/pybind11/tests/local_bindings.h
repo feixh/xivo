@@ -1,12 +1,13 @@
 #pragma once
-#include <utility>
-
 #include "pybind11_tests.h"
 
+#include <utility>
+
 /// Simple class used to test py::local:
-template <int> class LocalBase {
+template <int>
+class LocalBase {
 public:
-    explicit LocalBase(int i) : i(i) { }
+    explicit LocalBase(int i) : i(i) {}
     int i = -1;
 };
 
@@ -24,8 +25,9 @@ using MixedLocalGlobal = LocalBase<4>;
 using MixedGlobalLocal = LocalBase<5>;
 
 /// Registered with py::module_local only in the secondary module:
-using ExternalType1 = LocalBase<6>;
-using ExternalType2 = LocalBase<7>;
+using ExternalType1 = LocalBase<6>; // default holder
+using ExternalType2 = LocalBase<7>; // held by std::shared_ptr
+using ExternalType3 = LocalBase<8>; // held by smart_holder
 
 using LocalVec = std::vector<LocalType>;
 using LocalVec2 = std::vector<NonLocal2>;
@@ -35,12 +37,12 @@ using NonLocalVec2 = std::vector<NonLocal2>;
 using NonLocalMap = std::unordered_map<std::string, NonLocalType>;
 using NonLocalMap2 = std::unordered_map<std::string, uint8_t>;
 
-
 // Exception that will be caught via the module local translator.
 class LocalException : public std::exception {
 public:
-    explicit LocalException(const char * m) : message{m} {}
-    const char * what() const noexcept override {return message.c_str();}
+    explicit LocalException(const char *m) : message{m} {}
+    const char *what() const noexcept override { return message.c_str(); }
+
 private:
     std::string message = "";
 };
@@ -48,28 +50,28 @@ private:
 // Exception that will be registered with register_local_exception_translator
 class LocalSimpleException : public std::exception {
 public:
-    explicit LocalSimpleException(const char * m) : message{m} {}
-    const char * what() const noexcept override {return message.c_str();}
+    explicit LocalSimpleException(const char *m) : message{m} {}
+    const char *what() const noexcept override { return message.c_str(); }
+
 private:
     std::string message = "";
 };
 
-PYBIND11_MAKE_OPAQUE(LocalVec);
-PYBIND11_MAKE_OPAQUE(LocalVec2);
-PYBIND11_MAKE_OPAQUE(LocalMap);
-PYBIND11_MAKE_OPAQUE(NonLocalVec);
-//PYBIND11_MAKE_OPAQUE(NonLocalVec2); // same type as LocalVec2
-PYBIND11_MAKE_OPAQUE(NonLocalMap);
-PYBIND11_MAKE_OPAQUE(NonLocalMap2);
-
+PYBIND11_MAKE_OPAQUE(LocalVec)
+PYBIND11_MAKE_OPAQUE(LocalVec2)
+PYBIND11_MAKE_OPAQUE(LocalMap)
+PYBIND11_MAKE_OPAQUE(NonLocalVec)
+// PYBIND11_MAKE_OPAQUE(NonLocalVec2) // same type as LocalVec2
+PYBIND11_MAKE_OPAQUE(NonLocalMap)
+PYBIND11_MAKE_OPAQUE(NonLocalMap2)
 
 // Simple bindings (used with the above):
-template <typename T, int Adjust = 0, typename... Args>
-py::class_<T> bind_local(Args && ...args) {
-    return py::class_<T>(std::forward<Args>(args)...)
+template <typename T, int Adjust = 0, typename Holder = std::unique_ptr<T>, typename... Args>
+py::class_<T, Holder> bind_local(Args &&...args) {
+    return py::class_<T, Holder>(std::forward<Args>(args)...)
         .def(py::init<int>())
         .def("get", [](T &i) { return i.i + Adjust; });
-};
+}
 
 // Simulate a foreign library base class (to match the example in the docs):
 namespace pets {
@@ -81,5 +83,11 @@ public:
 };
 } // namespace pets
 
-struct MixGL { int i; explicit MixGL(int i) : i{i} {} };
-struct MixGL2 { int i; explicit MixGL2(int i) : i{i} {} };
+struct MixGL {
+    int i;
+    explicit MixGL(int i) : i{i} {}
+};
+struct MixGL2 {
+    int i;
+    explicit MixGL2(int i) : i{i} {}
+};

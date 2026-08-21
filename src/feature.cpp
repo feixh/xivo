@@ -286,6 +286,7 @@ void Feature::SubfilterUpdate(const SE3 &gsb, const SE3 &gbc,
   Mat32 K = P_ * H.transpose() * S.inverse(); // kalman gain
 
   x_ += K * inn;
+  ClampLogDepth();
   Mat3 I_KH = Mat3::Identity() - K * H;
   P_ = I_KH * P_ * I_KH.transpose() + K * Rtri * K.transpose();
 
@@ -390,8 +391,20 @@ bool Feature::RefineDepth(const SE3 &gbc,
     auto delta = ldlt.solve(b);
     */
 
+    // H is rank-deficient when the views in `views` carry no parallax (e.g. a
+    // near-stationary camera), and the least-squares solve can then return
+    // non-finite values. Applying such a delta poisons x_ with NaN, which
+    // propagates into the filter state and eventually aborts in
+    // SO3_from_rotvec(). Treat it the same way as the NaN Hessian below:
+    // abandon the refinement for this feature.
+    if (anynan(delta)) {
+      VLOG(0) << StrFormat("feature #%d: nan in depth-refinement delta", id_);
+      return false;
+    }
+
     BackupState();
     x_ -= delta;
+    ClampLogDepth();
     res_norm0 = res_norm;
 
     // not much to progress

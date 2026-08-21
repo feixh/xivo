@@ -58,36 +58,31 @@ private:
     size_t utf8_remainder() const {
         const auto rbase = std::reverse_iterator<char *>(pbase());
         const auto rpptr = std::reverse_iterator<char *>(pptr());
-        auto is_ascii = [](char c) {
-            return (static_cast<unsigned char>(c) & 0x80) == 0x00;
-        };
-        auto is_leading = [](char c) {
-            return (static_cast<unsigned char>(c) & 0xC0) == 0xC0;
-        };
-        auto is_leading_2b = [](char c) {
-            return static_cast<unsigned char>(c) <= 0xDF;
-        };
-        auto is_leading_3b = [](char c) {
-            return static_cast<unsigned char>(c) <= 0xEF;
-        };
+        auto is_ascii = [](char c) { return (static_cast<unsigned char>(c) & 0x80) == 0x00; };
+        auto is_leading = [](char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0xC0; };
+        auto is_leading_2b = [](char c) { return static_cast<unsigned char>(c) <= 0xDF; };
+        auto is_leading_3b = [](char c) { return static_cast<unsigned char>(c) <= 0xEF; };
         // If the last character is ASCII, there are no incomplete code points
-        if (is_ascii(*rpptr))
+        if (is_ascii(*rpptr)) {
             return 0;
+        }
         // Otherwise, work back from the end of the buffer and find the first
         // UTF-8 leading byte
-        const auto rpend   = rbase - rpptr >= 3 ? rpptr + 3 : rbase;
+        const auto rpend = rbase - rpptr >= 3 ? rpptr + 3 : rbase;
         const auto leading = std::find_if(rpptr, rpend, is_leading);
-        if (leading == rbase)
+        if (leading == rbase) {
             return 0;
-        const auto dist    = static_cast<size_t>(leading - rpptr);
-        size_t remainder   = 0;
+        }
+        const auto dist = static_cast<size_t>(leading - rpptr);
+        size_t remainder = 0;
 
-        if (dist == 0)
+        if (dist == 0) {
             remainder = 1; // 1-byte code point is impossible
-        else if (dist == 1)
+        } else if (dist == 1) {
             remainder = is_leading_2b(*leading) ? 0 : dist + 1;
-        else if (dist == 2)
+        } else if (dist == 2) {
             remainder = is_leading_3b(*leading) ? 0 : dist + 1;
+        }
         // else if (dist >= 3), at least 4 bytes before encountering an UTF-8
         // leading byte, either no remainder or invalid UTF-8.
         // Invalid UTF-8 will cause an exception later when converting
@@ -100,45 +95,64 @@ private:
         if (pbase() != pptr()) { // If buffer is not empty
             gil_scoped_acquire tmp;
             // This subtraction cannot be negative, so dropping the sign.
-            auto size        = static_cast<size_t>(pptr() - pbase());
+            auto size = static_cast<size_t>(pptr() - pbase());
             size_t remainder = utf8_remainder();
 
             if (size > remainder) {
                 str line(pbase(), size - remainder);
-                pywrite(line);
+                pywrite(std::move(line));
                 pyflush();
             }
 
             // Copy the remainder at the end of the buffer to the beginning:
-            if (remainder > 0)
+            if (remainder > 0) {
                 std::memmove(pbase(), pptr() - remainder, remainder);
+            }
             setp(pbase(), epptr());
             pbump(static_cast<int>(remainder));
         }
         return 0;
     }
 
-    int sync() override {
-        return _sync();
-    }
+    int sync() override { return _sync(); }
 
 public:
+    // Minimum buffer size must accommodate the largest incomplete UTF-8 sequence
+    // (3 bytes) plus one position reserved for overflow(), i.e. 4 bytes total.
+    static constexpr size_t minimum_buffer_size = 4;
+
     explicit pythonbuf(const object &pyostream, size_t buffer_size = 1024)
-        : buf_size(buffer_size), d_buffer(new char[buf_size]), pywrite(pyostream.attr("write")),
+        : buf_size(buffer_size < minimum_buffer_size // ternary avoids C++14 std::max ODR-use of
+                                                     // static constexpr
+                       ? minimum_buffer_size
+                       : buffer_size),
+          d_buffer(new char[buf_size]), pywrite(pyostream.attr("write")),
           pyflush(pyostream.attr("flush")) {
         setp(d_buffer.get(), d_buffer.get() + buf_size - 1);
     }
 
-    pythonbuf(pythonbuf&&) = default;
+    pythonbuf(pythonbuf &&other) noexcept
+        : buf_size(other.buf_size), d_buffer(std::move(other.d_buffer)),
+          pywrite(std::move(other.pywrite)), pyflush(std::move(other.pyflush)) {
+        const auto pending = (other.pbase() != nullptr && other.pptr() != nullptr)
+                                 ? static_cast<int>(other.pptr() - other.pbase())
+                                 : 0;
+        if (d_buffer != nullptr) {
+            // Rebuild the put area from the transferred storage.
+            setp(d_buffer.get(), d_buffer.get() + buf_size - 1);
+            pbump(pending);
+        } else {
+            setp(nullptr, nullptr);
+        }
+        // Prevent the moved-from destructor from flushing through moved-out handles.
+        other.setp(nullptr, nullptr);
+    }
 
     /// Sync before destroy
-    ~pythonbuf() override {
-        _sync();
-    }
+    ~pythonbuf() override { _sync(); }
 };
 
 PYBIND11_NAMESPACE_END(detail)
-
 
 /** \rst
     This a move-only guard that redirects output.
@@ -160,7 +174,8 @@ PYBIND11_NAMESPACE_END(detail)
     .. code-block:: cpp
 
         {
-            py::scoped_ostream_redirect output{std::cerr, py::module::import("sys").attr("stderr")};
+            py::scoped_ostream_redirect output{
+                std::cerr, py::module::import("sys").attr("stderr")};
             std::cout << "Hello, World!";
         }
  \endrst */
@@ -169,6 +184,7 @@ protected:
     std::streambuf *old;
     std::ostream &costream;
     detail::pythonbuf buffer;
+    bool active = true;
 
 public:
     explicit scoped_ostream_redirect(std::ostream &costream = std::cout,
@@ -179,15 +195,24 @@ public:
     }
 
     ~scoped_ostream_redirect() {
-        costream.rdbuf(old);
+        if (active) {
+            costream.rdbuf(old);
+        }
     }
 
     scoped_ostream_redirect(const scoped_ostream_redirect &) = delete;
-    scoped_ostream_redirect(scoped_ostream_redirect &&other) = default;
+    // NOLINTNEXTLINE(performance-noexcept-move-constructor)
+    scoped_ostream_redirect(scoped_ostream_redirect &&other)
+        : old(other.old), costream(other.costream), buffer(std::move(other.buffer)),
+          active(other.active) {
+        if (active) {
+            costream.rdbuf(&buffer); // Re-point stream to our buffer
+            other.active = false;
+        }
+    }
     scoped_ostream_redirect &operator=(const scoped_ostream_redirect &) = delete;
     scoped_ostream_redirect &operator=(scoped_ostream_redirect &&) = delete;
 };
-
 
 /** \rst
     Like `scoped_ostream_redirect`, but redirects cerr by default. This class
@@ -208,7 +233,6 @@ public:
         : scoped_ostream_redirect(costream, pyostream) {}
 };
 
-
 PYBIND11_NAMESPACE_BEGIN(detail)
 
 // Class to redirect output as a context manager. C++ backend.
@@ -223,10 +247,12 @@ public:
         : do_stdout_(do_stdout), do_stderr_(do_stderr) {}
 
     void enter() {
-        if (do_stdout_)
+        if (do_stdout_) {
             redirect_stdout.reset(new scoped_ostream_redirect());
-        if (do_stderr_)
+        }
+        if (do_stderr_) {
             redirect_stderr.reset(new scoped_estream_redirect());
+        }
     }
 
     void exit() {

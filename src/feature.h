@@ -217,7 +217,30 @@ public:
                    const TriangulateOptions &options);
 
   void SetState(const Vec3 &x) { x_ = x; }
-  void UpdateState(const Vec3 &dx) { x_ += dx; }
+  void UpdateState(const Vec3 &dx) {
+    x_ += dx;
+    ClampLogDepth();
+  }
+
+  /** `x_(2)` is log-depth (see `unproject_logz`), so `Xc()` evaluates
+   * `exp(x_(2))`. An EKF correction is not bounded, and a badly conditioned
+   * update can push `x_(2)` far enough that `exp()` overflows to +/-inf. The
+   * resulting `inf * 0` in the measurement Jacobian is NaN, which then spreads
+   * through the whole filter state and eventually aborts inside Sophus when a
+   * quaternion is normalized. Saturate the log-depth to a range that keeps
+   * `exp()` (and its square, used when forming covariances) finite; a feature
+   * that hits this bound is hopeless anyway and gets dropped by the usual
+   * depth/innovation checks.
+   */
+  void ClampLogDepth() {
+    // exp(kMaxLogDepth)^2 stays well inside the double range.
+    constexpr number_t kMaxLogDepth = 80.0;
+    if (!(x_(2) > -kMaxLogDepth)) {
+      x_(2) = -kMaxLogDepth;
+    } else if (!(x_(2) < kMaxLogDepth)) {
+      x_(2) = kMaxLogDepth;
+    }
+  }
 
   /** Initial value of static variable `Feature::counter_`/smallest possible number
    *  used for feature IDs. Its purpose is so that feature IDs and group IDs never

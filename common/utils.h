@@ -91,9 +91,13 @@ RandomVector(number_t meanVal = 0.0, number_t stdVal = 1.0,
 };
 
 /// \brief detect if any compoennt of a matrix is nan
+/// NOTE: use the runtime rows()/cols() rather than Rows/ColsAtCompileTime:
+/// the latter are Eigen::Dynamic (-1) for dynamically sized types, which made
+/// the loops below body-less, so this silently returned false for every
+/// MatX/VecX it was handed.
 template <typename Derived> bool anynan(const Eigen::MatrixBase<Derived> &m) {
-  for (int i = 0; i < Derived::RowsAtCompileTime; ++i)
-    for (int j = 0; j < Derived::ColsAtCompileTime; ++j)
+  for (int i = 0; i < m.rows(); ++i)
+    for (int j = 0; j < m.cols(); ++j)
       if (std::isnan(m(i, j))) {
         return true;
       }

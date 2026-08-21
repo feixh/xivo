@@ -29,6 +29,11 @@
 
 #include <pangolin/config.h>
 
+// gcc >= 13 / libstdc++ no longer transitively includes <cstdint> from other
+// standard headers, so pull in the fixed-width integer types explicitly here.
+#include <cstdint>
+#include <cstddef>
+
 // Include portable printf-style format macros
 #define __STDC_FORMAT_MACROS
 

@@ -1,4 +1,7 @@
-# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import sys
+
 import pytest
 
 import env
@@ -12,12 +15,12 @@ def test_simple_string():
 
 def test_unicode_conversion():
     """Tests unicode conversion and error reporting."""
-    assert m.good_utf8_string() == u"Say utf8‽ 🎂 𝐀"
-    assert m.good_utf16_string() == u"b‽🎂𝐀z"
-    assert m.good_utf32_string() == u"a𝐀🎂‽z"
-    assert m.good_wchar_string() == u"a⸘𝐀z"
+    assert m.good_utf8_string() == "Say utf8‽ 🎂 𝐀"
+    assert m.good_utf16_string() == "b‽🎂𝐀z"
+    assert m.good_utf32_string() == "a𝐀🎂‽z"
+    assert m.good_wchar_string() == "a⸘𝐀z"
     if hasattr(m, "has_u8string"):
-        assert m.good_utf8_u8string() == u"Say utf8‽ 🎂 𝐀"
+        assert m.good_utf8_u8string() == "Say utf8‽ 🎂 𝐀"
 
     with pytest.raises(UnicodeDecodeError):
         m.bad_utf8_string()
@@ -25,7 +28,7 @@ def test_unicode_conversion():
     with pytest.raises(UnicodeDecodeError):
         m.bad_utf16_string()
 
-    # These are provided only if they actually fail (they don't when 32-bit and under Python 2.7)
+    # These are provided only if they actually fail (they don't when 32-bit)
     if hasattr(m, "bad_utf32_string"):
         with pytest.raises(UnicodeDecodeError):
             m.bad_utf32_string()
@@ -37,10 +40,10 @@ def test_unicode_conversion():
             m.bad_utf8_u8string()
 
     assert m.u8_Z() == "Z"
-    assert m.u8_eacute() == u"é"
-    assert m.u16_ibang() == u"‽"
-    assert m.u32_mathbfA() == u"𝐀"
-    assert m.wchar_heart() == u"♥"
+    assert m.u8_eacute() == "é"
+    assert m.u16_ibang() == "‽"
+    assert m.u32_mathbfA() == "𝐀"
+    assert m.wchar_heart() == "♥"
     if hasattr(m, "has_u8string"):
         assert m.u8_char8_Z() == "Z"
 
@@ -49,72 +52,72 @@ def test_single_char_arguments():
     """Tests failures for passing invalid inputs to char-accepting functions"""
 
     def toobig_message(r):
-        return "Character code point not in range({:#x})".format(r)
+        return f"Character code point not in range({r:#x})"
 
     toolong_message = "Expected a character, but multi-character string found"
 
-    assert m.ord_char(u"a") == 0x61  # simple ASCII
-    assert m.ord_char_lv(u"b") == 0x62
+    assert m.ord_char("a") == 0x61  # simple ASCII
+    assert m.ord_char_lv("b") == 0x62
     assert (
-        m.ord_char(u"é") == 0xE9
+        m.ord_char("é") == 0xE9
     )  # requires 2 bytes in utf-8, but can be stuffed in a char
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_char(u"Ā") == 0x100  # requires 2 bytes, doesn't fit in a char
+        assert m.ord_char("Ā") == 0x100  # requires 2 bytes, doesn't fit in a char
     assert str(excinfo.value) == toobig_message(0x100)
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_char(u"ab")
+        assert m.ord_char("ab")
     assert str(excinfo.value) == toolong_message
 
-    assert m.ord_char16(u"a") == 0x61
-    assert m.ord_char16(u"é") == 0xE9
-    assert m.ord_char16_lv(u"ê") == 0xEA
-    assert m.ord_char16(u"Ā") == 0x100
-    assert m.ord_char16(u"‽") == 0x203D
-    assert m.ord_char16(u"♥") == 0x2665
-    assert m.ord_char16_lv(u"♡") == 0x2661
+    assert m.ord_char16("a") == 0x61
+    assert m.ord_char16("é") == 0xE9
+    assert m.ord_char16_lv("ê") == 0xEA
+    assert m.ord_char16("Ā") == 0x100
+    assert m.ord_char16("‽") == 0x203D
+    assert m.ord_char16("♥") == 0x2665
+    assert m.ord_char16_lv("♡") == 0x2661
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_char16(u"🎂") == 0x1F382  # requires surrogate pair
+        assert m.ord_char16("🎂") == 0x1F382  # requires surrogate pair
     assert str(excinfo.value) == toobig_message(0x10000)
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_char16(u"aa")
+        assert m.ord_char16("aa")
     assert str(excinfo.value) == toolong_message
 
-    assert m.ord_char32(u"a") == 0x61
-    assert m.ord_char32(u"é") == 0xE9
-    assert m.ord_char32(u"Ā") == 0x100
-    assert m.ord_char32(u"‽") == 0x203D
-    assert m.ord_char32(u"♥") == 0x2665
-    assert m.ord_char32(u"🎂") == 0x1F382
+    assert m.ord_char32("a") == 0x61
+    assert m.ord_char32("é") == 0xE9
+    assert m.ord_char32("Ā") == 0x100
+    assert m.ord_char32("‽") == 0x203D
+    assert m.ord_char32("♥") == 0x2665
+    assert m.ord_char32("🎂") == 0x1F382
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_char32(u"aa")
+        assert m.ord_char32("aa")
     assert str(excinfo.value) == toolong_message
 
-    assert m.ord_wchar(u"a") == 0x61
-    assert m.ord_wchar(u"é") == 0xE9
-    assert m.ord_wchar(u"Ā") == 0x100
-    assert m.ord_wchar(u"‽") == 0x203D
-    assert m.ord_wchar(u"♥") == 0x2665
+    assert m.ord_wchar("a") == 0x61
+    assert m.ord_wchar("é") == 0xE9
+    assert m.ord_wchar("Ā") == 0x100
+    assert m.ord_wchar("‽") == 0x203D
+    assert m.ord_wchar("♥") == 0x2665
     if m.wchar_size == 2:
         with pytest.raises(ValueError) as excinfo:
-            assert m.ord_wchar(u"🎂") == 0x1F382  # requires surrogate pair
+            assert m.ord_wchar("🎂") == 0x1F382  # requires surrogate pair
         assert str(excinfo.value) == toobig_message(0x10000)
     else:
-        assert m.ord_wchar(u"🎂") == 0x1F382
+        assert m.ord_wchar("🎂") == 0x1F382
     with pytest.raises(ValueError) as excinfo:
-        assert m.ord_wchar(u"aa")
+        assert m.ord_wchar("aa")
     assert str(excinfo.value) == toolong_message
 
     if hasattr(m, "has_u8string"):
-        assert m.ord_char8(u"a") == 0x61  # simple ASCII
-        assert m.ord_char8_lv(u"b") == 0x62
+        assert m.ord_char8("a") == 0x61  # simple ASCII
+        assert m.ord_char8_lv("b") == 0x62
         assert (
-            m.ord_char8(u"é") == 0xE9
+            m.ord_char8("é") == 0xE9
         )  # requires 2 bytes in utf-8, but can be stuffed in a char
         with pytest.raises(ValueError) as excinfo:
-            assert m.ord_char8(u"Ā") == 0x100  # requires 2 bytes, doesn't fit in a char
+            assert m.ord_char8("Ā") == 0x100  # requires 2 bytes, doesn't fit in a char
         assert str(excinfo.value) == toobig_message(0x100)
         with pytest.raises(ValueError) as excinfo:
-            assert m.ord_char8(u"ab")
+            assert m.ord_char8("ab")
         assert str(excinfo.value) == toolong_message
 
 
@@ -123,18 +126,22 @@ def test_bytes_to_string():
     one-way: the only way to return bytes to Python is via the pybind11::bytes class."""
     # Issue #816
 
-    def to_bytes(s):
-        b = s if env.PY2 else s.encode("utf8")
-        assert isinstance(b, bytes)
-        return b
-
-    assert m.strlen(to_bytes("hi")) == 2
-    assert m.string_length(to_bytes("world")) == 5
-    assert m.string_length(to_bytes("a\x00b")) == 3
-    assert m.strlen(to_bytes("a\x00b")) == 1  # C-string limitation
+    assert m.strlen(b"hi") == 2
+    assert m.string_length(b"world") == 5
+    assert m.string_length(b"a\x00b") == 3
+    assert m.strlen(b"a\x00b") == 1  # C-string limitation
 
     # passing in a utf8 encoded string should work
-    assert m.string_length(u"💩".encode("utf8")) == 4
+    assert m.string_length("💩".encode()) == 4
+
+
+def test_bytearray_to_string():
+    """Tests the ability to pass bytearray to C++ string-accepting functions"""
+    assert m.string_length(bytearray(b"Hi")) == 2
+    assert m.strlen(bytearray(b"bytearray")) == 9
+    assert m.string_length(bytearray()) == 0
+    assert m.string_length(bytearray("🦜", "utf-8", "strict")) == 4
+    assert m.string_length(bytearray(b"\x80")) == 1
 
 
 @pytest.mark.skipif(not hasattr(m, "has_string_view"), reason="no <string_view>")
@@ -142,26 +149,26 @@ def test_string_view(capture):
     """Tests support for C++17 string_view arguments and return values"""
     assert m.string_view_chars("Hi") == [72, 105]
     assert m.string_view_chars("Hi 🎂") == [72, 105, 32, 0xF0, 0x9F, 0x8E, 0x82]
-    assert m.string_view16_chars(u"Hi 🎂") == [72, 105, 32, 0xD83C, 0xDF82]
-    assert m.string_view32_chars(u"Hi 🎂") == [72, 105, 32, 127874]
+    assert m.string_view16_chars("Hi 🎂") == [72, 105, 32, 0xD83C, 0xDF82]
+    assert m.string_view32_chars("Hi 🎂") == [72, 105, 32, 127874]
     if hasattr(m, "has_u8string"):
         assert m.string_view8_chars("Hi") == [72, 105]
-        assert m.string_view8_chars(u"Hi 🎂") == [72, 105, 32, 0xF0, 0x9F, 0x8E, 0x82]
+        assert m.string_view8_chars("Hi 🎂") == [72, 105, 32, 0xF0, 0x9F, 0x8E, 0x82]
 
-    assert m.string_view_return() == u"utf8 secret 🎂"
-    assert m.string_view16_return() == u"utf16 secret 🎂"
-    assert m.string_view32_return() == u"utf32 secret 🎂"
+    assert m.string_view_return() == "utf8 secret 🎂"
+    assert m.string_view16_return() == "utf16 secret 🎂"
+    assert m.string_view32_return() == "utf32 secret 🎂"
     if hasattr(m, "has_u8string"):
-        assert m.string_view8_return() == u"utf8 secret 🎂"
+        assert m.string_view8_return() == "utf8 secret 🎂"
 
     with capture:
         m.string_view_print("Hi")
         m.string_view_print("utf8 🎂")
-        m.string_view16_print(u"utf16 🎂")
-        m.string_view32_print(u"utf32 🎂")
+        m.string_view16_print("utf16 🎂")
+        m.string_view32_print("utf32 🎂")
     assert (
         capture
-        == u"""
+        == """
         Hi 2
         utf8 🎂 9
         utf16 🎂 8
@@ -171,10 +178,10 @@ def test_string_view(capture):
     if hasattr(m, "has_u8string"):
         with capture:
             m.string_view8_print("Hi")
-            m.string_view8_print(u"utf8 🎂")
+            m.string_view8_print("utf8 🎂")
         assert (
             capture
-            == u"""
+            == """
             Hi 2
             utf8 🎂 9
         """
@@ -183,11 +190,11 @@ def test_string_view(capture):
     with capture:
         m.string_view_print("Hi, ascii")
         m.string_view_print("Hi, utf8 🎂")
-        m.string_view16_print(u"Hi, utf16 🎂")
-        m.string_view32_print(u"Hi, utf32 🎂")
+        m.string_view16_print("Hi, utf16 🎂")
+        m.string_view32_print("Hi, utf32 🎂")
     assert (
         capture
-        == u"""
+        == """
         Hi, ascii 9
         Hi, utf8 🎂 13
         Hi, utf16 🎂 12
@@ -197,22 +204,21 @@ def test_string_view(capture):
     if hasattr(m, "has_u8string"):
         with capture:
             m.string_view8_print("Hi, ascii")
-            m.string_view8_print(u"Hi, utf8 🎂")
+            m.string_view8_print("Hi, utf8 🎂")
         assert (
             capture
-            == u"""
+            == """
             Hi, ascii 9
             Hi, utf8 🎂 13
         """
         )
 
     assert m.string_view_bytes() == b"abc \x80\x80 def"
-    assert m.string_view_str() == u"abc ‽ def"
-    assert m.string_view_from_bytes(u"abc ‽ def".encode("utf-8")) == u"abc ‽ def"
+    assert m.string_view_str() == "abc ‽ def"
+    assert m.string_view_from_bytes("abc ‽ def".encode()) == "abc ‽ def"
     if hasattr(m, "has_u8string"):
-        assert m.string_view8_str() == u"abc ‽ def"
-    if not env.PY2:
-        assert m.string_view_memoryview() == "Have some 🎂".encode()
+        assert m.string_view8_str() == "abc ‽ def"
+    assert m.string_view_memoryview() == "Have some 🎂".encode()
 
     assert m.bytes_from_type_with_both_operator_string_and_string_view() == b"success"
     assert m.str_from_type_with_both_operator_string_and_string_view() == "success"
@@ -224,20 +230,8 @@ def test_integer_casting():
     assert m.i64_str(-1) == "-1"
     assert m.i32_str(2000000000) == "2000000000"
     assert m.u32_str(2000000000) == "2000000000"
-    if env.PY2:
-        assert m.i32_str(long(-1)) == "-1"  # noqa: F821 undefined name 'long'
-        assert m.i64_str(long(-1)) == "-1"  # noqa: F821 undefined name 'long'
-        assert (
-            m.i64_str(long(-999999999999))  # noqa: F821 undefined name 'long'
-            == "-999999999999"
-        )
-        assert (
-            m.u64_str(long(999999999999))  # noqa: F821 undefined name 'long'
-            == "999999999999"
-        )
-    else:
-        assert m.i64_str(-999999999999) == "-999999999999"
-        assert m.u64_str(999999999999) == "999999999999"
+    assert m.i64_str(-999999999999) == "-999999999999"
+    assert m.u64_str(999999999999) == "999999999999"
 
     with pytest.raises(TypeError) as excinfo:
         m.u32_str(-1)
@@ -252,46 +246,38 @@ def test_integer_casting():
         m.i32_str(3000000000)
     assert "incompatible function arguments" in str(excinfo.value)
 
-    if env.PY2:
-        with pytest.raises(TypeError) as excinfo:
-            m.u32_str(long(-1))  # noqa: F821 undefined name 'long'
-        assert "incompatible function arguments" in str(excinfo.value)
-        with pytest.raises(TypeError) as excinfo:
-            m.u64_str(long(-1))  # noqa: F821 undefined name 'long'
-        assert "incompatible function arguments" in str(excinfo.value)
 
-
-def test_int_convert():
-    class Int(object):
+def test_int_convert(doc):
+    class Int:
         def __int__(self):
             return 42
 
-    class NotInt(object):
+    class NotInt:
         pass
 
-    class Float(object):
+    class Float:
         def __float__(self):
             return 41.99999
 
-    class Index(object):
+    class Index:
         def __index__(self):
             return 42
 
-    class IntAndIndex(object):
+    class IntAndIndex:
         def __int__(self):
             return 42
 
         def __index__(self):
             return 0
 
-    class RaisingTypeErrorOnIndex(object):
+    class RaisingTypeErrorOnIndex:
         def __index__(self):
             raise TypeError
 
         def __int__(self):
             return 42
 
-    class RaisingValueErrorOnIndex(object):
+    class RaisingValueErrorOnIndex:
         def __index__(self):
             raise ValueError
 
@@ -299,6 +285,12 @@ def test_int_convert():
             return 42
 
     convert, noconvert = m.int_passthrough, m.int_passthrough_noconvert
+
+    assert (
+        doc(convert)
+        == "int_passthrough(arg0: typing.SupportsInt | typing.SupportsIndex) -> int"
+    )
+    assert doc(noconvert) == "int_passthrough_noconvert(arg0: int) -> int"
 
     def requires_conversion(v):
         pytest.raises(TypeError, noconvert, v)
@@ -311,8 +303,8 @@ def test_int_convert():
     cant_convert(3.14159)
     # TODO: Avoid DeprecationWarning in `PyLong_AsLong` (and similar)
     # TODO: PyPy 3.8 does not behave like CPython 3.8 here yet (7.3.7)
-    if (3, 8) <= env.PY < (3, 10) and env.CPYTHON:
-        with env.deprecated_call():
+    if sys.version_info < (3, 10) and env.CPYTHON:
+        with pytest.deprecated_call():
             assert convert(Int()) == 42
     else:
         assert convert(Int()) == 42
@@ -332,6 +324,42 @@ def test_int_convert():
     requires_conversion(RaisingValueErrorOnIndex())
 
 
+def test_float_convert(doc):
+    class Int:
+        def __int__(self):
+            return -5
+
+    class Index:
+        def __index__(self) -> int:
+            return -7
+
+    class Float:
+        def __float__(self):
+            return 41.45
+
+    convert, noconvert = m.float_passthrough, m.float_passthrough_noconvert
+    assert (
+        doc(convert)
+        == "float_passthrough(arg0: typing.SupportsFloat | typing.SupportsIndex) -> float"
+    )
+    assert doc(noconvert) == "float_passthrough_noconvert(arg0: float) -> float"
+
+    def requires_conversion(v):
+        pytest.raises(TypeError, noconvert, v)
+
+    def cant_convert(v):
+        pytest.raises(TypeError, convert, v)
+
+    requires_conversion(Float())
+    requires_conversion(Index())
+    assert pytest.approx(convert(Float())) == 41.45
+    assert pytest.approx(convert(Index())) == -7.0
+    assert isinstance(convert(Float()), float)
+    assert pytest.approx(convert(3)) == 3.0
+    requires_conversion(3)
+    cant_convert(Int())
+
+
 def test_numpy_int_convert():
     np = pytest.importorskip("numpy")
 
@@ -348,8 +376,8 @@ def test_numpy_int_convert():
     # TODO: Avoid DeprecationWarning in `PyLong_AsLong` (and similar)
     # TODO: PyPy 3.8 does not behave like CPython 3.8 here yet (7.3.7)
     # https://github.com/pybind/pybind11/issues/3408
-    if (3, 8) <= env.PY < (3, 10) and env.CPYTHON:
-        with env.deprecated_call():
+    if (3, 8) <= sys.version_info < (3, 10) and env.CPYTHON:
+        with pytest.deprecated_call():
             assert convert(np.float32(3.14159)) == 3
     else:
         assert convert(np.float32(3.14159)) == 3
@@ -368,7 +396,7 @@ def test_tuple(doc):
     assert (
         doc(m.pair_passthrough)
         == """
-        pair_passthrough(arg0: Tuple[bool, str]) -> Tuple[str, bool]
+        pair_passthrough(arg0: tuple[bool, str]) -> tuple[str, bool]
 
         Return a pair in reversed order
     """
@@ -376,11 +404,13 @@ def test_tuple(doc):
     assert (
         doc(m.tuple_passthrough)
         == """
-        tuple_passthrough(arg0: Tuple[bool, str, int]) -> Tuple[int, str, bool]
+        tuple_passthrough(arg0: tuple[bool, str, typing.SupportsInt | typing.SupportsIndex]) -> tuple[int, str, bool]
 
         Return a triple in reversed order
     """
     )
+
+    assert doc(m.empty_tuple) == """empty_tuple() -> tuple[()]"""
 
     assert m.rvalue_pair() == ("rvalue", "rvalue")
     assert m.lvalue_pair() == ("lvalue", "lvalue")
@@ -437,22 +467,74 @@ def test_reference_wrapper():
     a2 = m.refwrap_list(copy=True)
     assert [x.value for x in a1] == [2, 3]
     assert [x.value for x in a2] == [2, 3]
-    assert not a1[0] is a2[0] and not a1[1] is a2[1]
+    assert a1[0] is not a2[0]
+    assert a1[1] is not a2[1]
 
     b1 = m.refwrap_list(copy=False)
     b2 = m.refwrap_list(copy=False)
     assert [x.value for x in b1] == [1, 2]
     assert [x.value for x in b2] == [1, 2]
-    assert b1[0] is b2[0] and b1[1] is b2[1]
+    assert b1[0] is b2[0]
+    assert b1[1] is b2[1]
 
     assert m.refwrap_iiw(IncType(5)) == 5
     assert m.refwrap_call_iiw(IncType(10), m.refwrap_iiw) == [10, 10, 10, 10]
 
 
-def test_complex_cast():
+def test_complex_cast(doc):
     """std::complex casts"""
+
+    class Complex:
+        def __complex__(self) -> complex:
+            return complex(5, 4)
+
+    class Float:
+        def __float__(self) -> float:
+            return 5.0
+
+    class Int:
+        def __int__(self) -> int:
+            return 3
+
+    class Index:
+        def __index__(self) -> int:
+            return 1
+
     assert m.complex_cast(1) == "1.0"
+    assert m.complex_cast(1.0) == "1.0"
+    assert m.complex_cast(Complex()) == "(5.0, 4.0)"
     assert m.complex_cast(2j) == "(0.0, 2.0)"
+
+    convert, noconvert = m.complex_convert, m.complex_noconvert
+
+    def requires_conversion(v):
+        pytest.raises(TypeError, noconvert, v)
+
+    def cant_convert(v):
+        pytest.raises(TypeError, convert, v)
+
+    assert (
+        doc(convert)
+        == "complex_convert(arg0: typing.SupportsComplex | typing.SupportsFloat | typing.SupportsIndex) -> complex"
+    )
+    assert doc(noconvert) == "complex_noconvert(arg0: complex) -> complex"
+
+    assert convert(1) == 1.0
+    assert convert(2.0) == 2.0
+    assert convert(1 + 5j) == 1.0 + 5.0j
+    assert convert(Complex()) == 5.0 + 4j
+    assert convert(Float()) == 5.0
+    assert isinstance(convert(Float()), complex)
+    cant_convert(Int())
+    assert convert(Index()) == 1
+    assert isinstance(convert(Index()), complex)
+
+    requires_conversion(1)
+    requires_conversion(2.0)
+    assert noconvert(1 + 5j) == 1.0 + 5.0j
+    requires_conversion(Complex())
+    requires_conversion(Float())
+    requires_conversion(Index())
 
 
 def test_bool_caster():
@@ -475,7 +557,7 @@ def test_bool_caster():
     require_implicit(None)
     assert convert(None) is False
 
-    class A(object):
+    class A:
         def __init__(self, x):
             self.x = x
 
@@ -485,7 +567,7 @@ def test_bool_caster():
         def __bool__(self):
             return self.x
 
-    class B(object):
+    class B:
         pass
 
     # Arbitrary objects are not accepted
@@ -515,17 +597,9 @@ def test_numpy_bool():
 
 
 def test_int_long():
-    """In Python 2, a C++ int should return a Python int rather than long
-    if possible: longs are not always accepted where ints are used (such
-    as the argument to sys.exit()). A C++ long long is always a Python
-    long."""
-
-    import sys
-
-    must_be_long = type(getattr(sys, "maxint", 1) + 1)
     assert isinstance(m.int_cast(), int)
     assert isinstance(m.long_cast(), int)
-    assert isinstance(m.longlong_cast(), must_be_long)
+    assert isinstance(m.longlong_cast(), int)
 
 
 def test_void_caster_2():

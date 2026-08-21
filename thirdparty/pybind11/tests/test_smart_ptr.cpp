@@ -8,21 +8,22 @@
     BSD-style license that can be found in the LICENSE file.
 */
 
-#if defined(_MSC_VER) && _MSC_VER < 1910  // VS 2015's MSVC
-#  pragma warning(disable: 4702) // unreachable code in system header (xatomic.h(382))
-#endif
-
-#include "pybind11_tests.h"
 #include "object.h"
+#include "pybind11_tests.h"
+
+// This breaks on PYBIND11_DECLARE_HOLDER_TYPE
+PYBIND11_WARNING_DISABLE_GCC("-Wpedantic")
 
 namespace {
 
 // This is just a wrapper around unique_ptr, but with extra fields to deliberately bloat up the
-// holder size to trigger the non-simple-layout internal instance layout for single inheritance with
-// large holder type:
-template <typename T> class huge_unique_ptr {
+// holder size to trigger the non-simple-layout internal instance layout for single inheritance
+// with large holder type:
+template <typename T>
+class huge_unique_ptr {
     std::unique_ptr<T> ptr;
     uint64_t padding[10];
+
 public:
     explicit huge_unique_ptr(T *p) : ptr(p) {}
     T *get() { return ptr.get(); }
@@ -32,10 +33,11 @@ public:
 template <typename T>
 class custom_unique_ptr {
     std::unique_ptr<T> impl;
+
 public:
     explicit custom_unique_ptr(T *p) : impl(p) {}
-    T* get() const { return impl.get(); }
-    T* release_ptr() { return impl.release(); }
+    T *get() const { return impl.get(); }
+    T *release_ptr() { return impl.release(); }
 };
 
 // Simple custom holder that works like shared_ptr and has operator& overload
@@ -44,11 +46,12 @@ public:
 template <typename T>
 class shared_ptr_with_addressof_operator {
     std::shared_ptr<T> impl;
+
 public:
-    shared_ptr_with_addressof_operator( ) = default;
+    shared_ptr_with_addressof_operator() = default;
     explicit shared_ptr_with_addressof_operator(T *p) : impl(p) {}
-    T* get() const { return impl.get(); }
-    T** operator&() { throw std::logic_error("Call of overloaded operator& is not expected"); }
+    T *get() const { return impl.get(); }
+    T **operator&() { throw std::logic_error("Call of overloaded operator& is not expected"); }
 };
 
 // Simple custom holder that works like unique_ptr and has operator& overload
@@ -57,12 +60,27 @@ public:
 template <typename T>
 class unique_ptr_with_addressof_operator {
     std::unique_ptr<T> impl;
+
 public:
     unique_ptr_with_addressof_operator() = default;
     explicit unique_ptr_with_addressof_operator(T *p) : impl(p) {}
-    T* get() const { return impl.get(); }
-    T* release_ptr() { return impl.release(); }
-    T** operator&() { throw std::logic_error("Call of overloaded operator& is not expected"); }
+    T *get() const { return impl.get(); }
+    T *release_ptr() { return impl.release(); }
+    T **operator&() { throw std::logic_error("Call of overloaded operator& is not expected"); }
+};
+
+// Simple custom holder that imitates smart pointer, that always stores cpointer to const
+template <class T>
+class const_only_shared_ptr {
+    std::shared_ptr<const T> ptr_;
+
+public:
+    const_only_shared_ptr() = default;
+    explicit const_only_shared_ptr(const T *ptr) : ptr_(ptr) {}
+    const T *get() const { return ptr_.get(); }
+
+private:
+    // for demonstration purpose only, this imitates smart pointer with a const-only pointer
 };
 
 // Custom object with builtin reference counting (see 'object.h' for the implementation)
@@ -70,8 +88,10 @@ class MyObject1 : public Object {
 public:
     explicit MyObject1(int value) : value(value) { print_created(this, toString()); }
     std::string toString() const override { return "MyObject1[" + std::to_string(value) + "]"; }
+
 protected:
     ~MyObject1() override { print_destroyed(this); }
+
 private:
     int value;
 };
@@ -83,6 +103,7 @@ public:
     explicit MyObject2(int value) : value(value) { print_created(this, toString()); }
     std::string toString() const { return "MyObject2[" + std::to_string(value) + "]"; }
     virtual ~MyObject2() { print_destroyed(this); }
+
 private:
     int value;
 };
@@ -94,31 +115,39 @@ public:
     explicit MyObject3(int value) : value(value) { print_created(this, toString()); }
     std::string toString() const { return "MyObject3[" + std::to_string(value) + "]"; }
     virtual ~MyObject3() { print_destroyed(this); }
+
 private:
     int value;
 };
 
+template <typename T>
+std::unordered_set<T *> &pointer_set() {
+    // https://google.github.io/styleguide/cppguide.html#Static_and_Global_Variables
+    static auto singleton = new std::unordered_set<T *>();
+    return *singleton;
+}
+
 // test_unique_nodelete
 // Object with a private destructor
-class MyObject4;
-std::unordered_set<MyObject4 *> myobject4_instances;
 class MyObject4 {
 public:
     explicit MyObject4(int value) : value{value} {
         print_created(this);
-        myobject4_instances.insert(this);
+        pointer_set<MyObject4>().insert(this);
     }
     int value;
 
     static void cleanupAllInstances() {
-        auto tmp = std::move(myobject4_instances);
-        myobject4_instances.clear();
-        for (auto o : tmp)
+        auto tmp = std::move(pointer_set<MyObject4>());
+        pointer_set<MyObject4>().clear();
+        for (auto *o : tmp) {
             delete o;
+        }
     }
+
 private:
     ~MyObject4() {
-        myobject4_instances.erase(this);
+        pointer_set<MyObject4>().erase(this);
         print_destroyed(this);
     }
 };
@@ -126,26 +155,27 @@ private:
 // test_unique_deleter
 // Object with std::unique_ptr<T, D> where D is not matching the base class
 // Object with a protected destructor
-class MyObject4a;
-std::unordered_set<MyObject4a *> myobject4a_instances;
 class MyObject4a {
 public:
-    explicit MyObject4a(int i) {
-        value = i;
+    explicit MyObject4a(int i) : value{i} {
         print_created(this);
-        myobject4a_instances.insert(this);
+        pointer_set<MyObject4a>().insert(this);
     };
+    MyObject4a(const MyObject4a &) = delete;
+
     int value;
 
     static void cleanupAllInstances() {
-        auto tmp = std::move(myobject4a_instances);
-        myobject4a_instances.clear();
-        for (auto o : tmp)
+        auto tmp = std::move(pointer_set<MyObject4a>());
+        pointer_set<MyObject4a>().clear();
+        for (auto *o : tmp) {
             delete o;
+        }
     }
+
 protected:
     virtual ~MyObject4a() {
-        myobject4a_instances.erase(this);
+        pointer_set<MyObject4a>().erase(this);
         print_destroyed(this);
     }
 };
@@ -154,6 +184,7 @@ protected:
 class MyObject4b : public MyObject4a {
 public:
     explicit MyObject4b(int i) : MyObject4a(i) { print_created(this); }
+    MyObject4b(const MyObject4b &) = delete;
     ~MyObject4b() override { print_destroyed(this); }
 };
 
@@ -161,8 +192,23 @@ public:
 class MyObject5 { // managed by huge_unique_ptr
 public:
     explicit MyObject5(int value) : value{value} { print_created(this); }
+    MyObject5(const MyObject5 &) = delete;
     ~MyObject5() { print_destroyed(this); }
     int value;
+};
+
+// test const_only_shared_ptr
+class MyObject6 {
+public:
+    static const_only_shared_ptr<MyObject6> createObject(std::string value) {
+        return const_only_shared_ptr<MyObject6>(new MyObject6(std::move(value)));
+    }
+
+    const std::string &value() const { return value_; }
+
+private:
+    explicit MyObject6(std::string &&value) : value_{std::move(value)} {}
+    std::string value_;
 };
 
 // test_shared_ptr_and_references
@@ -174,7 +220,7 @@ struct SharedPtrRef {
         ~A() { print_destroyed(this); }
     };
 
-    A value = {};
+    A value;
     std::shared_ptr<A> shared = std::make_shared<A>();
 };
 
@@ -182,13 +228,14 @@ struct SharedPtrRef {
 struct SharedFromThisRef {
     struct B : std::enable_shared_from_this<B> {
         B() { print_created(this); }
-        // NOLINTNEXTLINE(bugprone-copy-constructor-init)
+        // NOLINTNEXTLINE(bugprone-copy-constructor-init, readability-redundant-member-init)
         B(const B &) : std::enable_shared_from_this<B>() { print_copy_created(this); }
+        // NOLINTNEXTLINE(readability-redundant-member-init)
         B(B &&) noexcept : std::enable_shared_from_this<B>() { print_move_created(this); }
         ~B() { print_destroyed(this); }
     };
 
-    B value = {};
+    B value;
     std::shared_ptr<B> shared = std::make_shared<B>();
 };
 
@@ -200,9 +247,32 @@ struct SharedFromThisVBase : std::enable_shared_from_this<SharedFromThisVBase> {
 };
 struct SharedFromThisVirt : virtual SharedFromThisVBase {};
 
+// Issue #5989: static_pointer_cast where dynamic_pointer_cast is needed
+// (virtual inheritance with shared_ptr holder)
+struct SftVirtBase : std::enable_shared_from_this<SftVirtBase> {
+    SftVirtBase() = default;
+    virtual ~SftVirtBase() = default;
+    static std::shared_ptr<SftVirtBase> create() { return std::make_shared<SftVirtBase>(); }
+    virtual std::string name() { return "SftVirtBase"; }
+};
+struct SftVirtDerived : SftVirtBase {
+    using SftVirtBase::SftVirtBase;
+    static std::shared_ptr<SftVirtDerived> create() { return std::make_shared<SftVirtDerived>(); }
+    std::string name() override { return "SftVirtDerived"; }
+};
+struct SftVirtDerived2 : virtual SftVirtDerived {
+    using SftVirtDerived::SftVirtDerived;
+    static std::shared_ptr<SftVirtDerived2> create() {
+        return std::make_shared<SftVirtDerived2>();
+    }
+    std::string name() override { return "SftVirtDerived2"; }
+    std::string call_name(const std::shared_ptr<SftVirtDerived2> &d2) { return d2->name(); }
+};
+
 // test_move_only_holder
 struct C {
     C() { print_created(this); }
+    C(const C &) = delete;
     ~C() { print_destroyed(this); }
 };
 
@@ -223,6 +293,7 @@ struct TypeForHolderWithAddressOf {
 // test_move_only_holder_with_addressof_operator
 struct TypeForMoveOnlyHolderWithAddressOf {
     explicit TypeForMoveOnlyHolderWithAddressOf(int value) : value{value} { print_created(this); }
+    TypeForMoveOnlyHolderWithAddressOf(const TypeForMoveOnlyHolderWithAddressOf &) = delete;
     ~TypeForMoveOnlyHolderWithAddressOf() { print_destroyed(this); }
     std::string toString() const {
         return "MoveOnlyHolderWithAddressOf[" + std::to_string(value) + "]";
@@ -231,14 +302,14 @@ struct TypeForMoveOnlyHolderWithAddressOf {
 };
 
 // test_smart_ptr_from_default
-struct HeldByDefaultHolder { };
+struct HeldByDefaultHolder {};
 
 // test_shared_ptr_gc
 // #187: issue involving std::shared_ptr<> return value policy & garbage collection
 struct ElementBase {
     virtual ~ElementBase() = default; /* Force creation of virtual table */
     ElementBase() = default;
-    ElementBase(const ElementBase&) = delete;
+    ElementBase(const ElementBase &) = delete;
 };
 
 struct ElementA : ElementBase {
@@ -258,22 +329,90 @@ struct ElementList {
 // It is always possible to construct a ref<T> from an Object* pointer without
 // possible inconsistencies, hence the 'true' argument at the end.
 // Make pybind11 aware of the non-standard getter member function
-namespace pybind11 { namespace detail {
-    template <typename T>
-    struct holder_helper<ref<T>> {
-        static const T *get(const ref<T> &p) { return p.get_ptr(); }
-    };
+namespace PYBIND11_NAMESPACE {
+namespace detail {
+template <typename T>
+struct holder_helper<ref<T>> {
+    static const T *get(const ref<T> &p) { return p.get_ptr(); }
+};
 } // namespace detail
-} // namespace pybind11
+} // namespace PYBIND11_NAMESPACE
 
 // Make pybind aware of the ref-counted wrapper type (s):
-PYBIND11_DECLARE_HOLDER_TYPE(T, ref<T>, true);
+PYBIND11_DECLARE_HOLDER_TYPE(T, ref<T>, true)
+PYBIND11_DECLARE_HOLDER_TYPE(T, const_only_shared_ptr<T>, true)
 // The following is not required anymore for std::shared_ptr, but it should compile without error:
-PYBIND11_DECLARE_HOLDER_TYPE(T, std::shared_ptr<T>);
-PYBIND11_DECLARE_HOLDER_TYPE(T, huge_unique_ptr<T>);
-PYBIND11_DECLARE_HOLDER_TYPE(T, custom_unique_ptr<T>);
-PYBIND11_DECLARE_HOLDER_TYPE(T, shared_ptr_with_addressof_operator<T>);
-PYBIND11_DECLARE_HOLDER_TYPE(T, unique_ptr_with_addressof_operator<T>);
+PYBIND11_DECLARE_HOLDER_TYPE(T, std::shared_ptr<T>)
+PYBIND11_DECLARE_HOLDER_TYPE(T, huge_unique_ptr<T>)
+PYBIND11_DECLARE_HOLDER_TYPE(T, custom_unique_ptr<T>)
+PYBIND11_DECLARE_HOLDER_TYPE(T, shared_ptr_with_addressof_operator<T>)
+PYBIND11_DECLARE_HOLDER_TYPE(T, unique_ptr_with_addressof_operator<T>)
+
+namespace holder_caster_traits_test {
+struct example_base {};
+} // namespace holder_caster_traits_test
+
+PYBIND11_NAMESPACE_BEGIN(PYBIND11_NAMESPACE)
+PYBIND11_NAMESPACE_BEGIN(detail)
+
+// Negate this condition to demonstrate "ambiguous template instantiation" compilation error:
+#if defined(PYBIND11_HAS_INTERNALS_WITH_SMART_HOLDER_SUPPORT)
+template <typename ExampleType>
+struct copyable_holder_caster_shared_ptr_with_smart_holder_support_enabled<
+    ExampleType,
+    enable_if_t<std::is_base_of<holder_caster_traits_test::example_base, ExampleType>::value>>
+    : std::false_type {};
+#endif
+
+template <typename ExampleType, typename HolderType>
+struct copyable_holder_caster<
+    ExampleType,
+    HolderType,
+    enable_if_t<std::is_base_of<holder_caster_traits_test::example_base, ExampleType>::value>> {
+    static constexpr auto name = const_name<ExampleType>();
+
+    static handle cast(const HolderType &, return_value_policy, handle) {
+        return str("copyable_holder_caster_traits_test").release();
+    }
+};
+
+// Negate this condition to demonstrate "ambiguous template instantiation" compilation error:
+#if defined(PYBIND11_HAS_INTERNALS_WITH_SMART_HOLDER_SUPPORT)
+template <typename ExampleType>
+struct move_only_holder_caster_unique_ptr_with_smart_holder_support_enabled<
+    ExampleType,
+    enable_if_t<std::is_base_of<holder_caster_traits_test::example_base, ExampleType>::value>>
+    : std::false_type {};
+#endif
+
+template <typename ExampleType, typename HolderType>
+struct move_only_holder_caster<
+    ExampleType,
+    HolderType,
+    enable_if_t<std::is_base_of<holder_caster_traits_test::example_base, ExampleType>::value>> {
+    static constexpr auto name = const_name<ExampleType>();
+
+    static handle cast(const HolderType &, return_value_policy, handle) {
+        return str("move_only_holder_caster_traits_test").release();
+    }
+};
+
+PYBIND11_NAMESPACE_END(detail)
+PYBIND11_NAMESPACE_END(PYBIND11_NAMESPACE)
+
+namespace holder_caster_traits_test {
+
+struct example_drvd : example_base {};
+
+void wrap(py::module_ &m) {
+    m.def("return_std_shared_ptr_example_drvd",
+          // NOLINTNEXTLINE(modernize-make-shared)
+          []() { return std::shared_ptr<example_drvd>(new example_drvd()); });
+    m.def("return_std_unique_ptr_example_drvd",
+          []() { return std::unique_ptr<example_drvd>(new example_drvd()); });
+}
+
+} // namespace holder_caster_traits_test
 
 TEST_SUBMODULE(smart_ptr, m) {
     // Please do not interleave `struct` and `class` definitions with bindings code,
@@ -286,8 +425,7 @@ TEST_SUBMODULE(smart_ptr, m) {
     py::class_<Object, ref<Object>> obj(m, "Object");
     obj.def("getRefCount", &Object::getRefCount);
 
-    py::class_<MyObject1, ref<MyObject1>>(m, "MyObject1", obj)
-        .def(py::init<int>());
+    py::class_<MyObject1, ref<MyObject1>>(m, "MyObject1", obj).def(py::init<int>());
     py::implicitly_convertible<py::int_, MyObject1>();
 
     m.def("make_object_1", []() -> Object * { return new MyObject1(1); });
@@ -306,25 +444,27 @@ TEST_SUBMODULE(smart_ptr, m) {
     // Expose constructor stats for the ref type
     m.def("cstats_ref", &ConstructorStats::get<ref_tag>);
 
-    py::class_<MyObject2, std::shared_ptr<MyObject2>>(m, "MyObject2")
-        .def(py::init<int>());
+    py::class_<MyObject2, std::shared_ptr<MyObject2>>(m, "MyObject2").def(py::init<int>());
     m.def("make_myobject2_1", []() { return new MyObject2(6); });
     m.def("make_myobject2_2", []() { return std::make_shared<MyObject2>(7); });
     m.def("print_myobject2_1", [](const MyObject2 *obj) { py::print(obj->toString()); });
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
     m.def("print_myobject2_2", [](std::shared_ptr<MyObject2> obj) { py::print(obj->toString()); });
-    m.def("print_myobject2_3", [](const std::shared_ptr<MyObject2> &obj) { py::print(obj->toString()); });
-    m.def("print_myobject2_4", [](const std::shared_ptr<MyObject2> *obj) { py::print((*obj)->toString()); });
+    m.def("print_myobject2_3",
+          [](const std::shared_ptr<MyObject2> &obj) { py::print(obj->toString()); });
+    m.def("print_myobject2_4",
+          [](const std::shared_ptr<MyObject2> *obj) { py::print((*obj)->toString()); });
 
-    py::class_<MyObject3, std::shared_ptr<MyObject3>>(m, "MyObject3")
-        .def(py::init<int>());
+    py::class_<MyObject3, std::shared_ptr<MyObject3>>(m, "MyObject3").def(py::init<int>());
     m.def("make_myobject3_1", []() { return new MyObject3(8); });
     m.def("make_myobject3_2", []() { return std::make_shared<MyObject3>(9); });
     m.def("print_myobject3_1", [](const MyObject3 *obj) { py::print(obj->toString()); });
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
     m.def("print_myobject3_2", [](std::shared_ptr<MyObject3> obj) { py::print(obj->toString()); });
-    m.def("print_myobject3_3", [](const std::shared_ptr<MyObject3> &obj) { py::print(obj->toString()); });
-    m.def("print_myobject3_4", [](const std::shared_ptr<MyObject3> *obj) { py::print((*obj)->toString()); });
+    m.def("print_myobject3_3",
+          [](const std::shared_ptr<MyObject3> &obj) { py::print(obj->toString()); });
+    m.def("print_myobject3_4",
+          [](const std::shared_ptr<MyObject3> *obj) { py::print((*obj)->toString()); });
 
     // test_smart_ptr_refcounting
     m.def("test_object1_refcounting", []() {
@@ -356,6 +496,10 @@ TEST_SUBMODULE(smart_ptr, m) {
     py::class_<MyObject5, huge_unique_ptr<MyObject5>>(m, "MyObject5")
         .def(py::init<int>())
         .def_readwrite("value", &MyObject5::value);
+
+    py::class_<MyObject6, const_only_shared_ptr<MyObject6>>(m, "MyObject6")
+        .def(py::init([](const std::string &value) { return MyObject6::createObject(value); }))
+        .def_property_readonly("value", &MyObject6::value);
 
     // test_shared_ptr_and_references
     using A = SharedPtrRef::A;
@@ -400,6 +544,17 @@ TEST_SUBMODULE(smart_ptr, m) {
     py::class_<SharedFromThisVirt, std::shared_ptr<SharedFromThisVirt>>(m, "SharedFromThisVirt")
         .def_static("get", []() { return sft.get(); });
 
+    // Issue #5989: static_pointer_cast where dynamic_pointer_cast is needed
+    py::class_<SftVirtBase, std::shared_ptr<SftVirtBase>>(m, "SftVirtBase")
+        .def(py::init<>(&SftVirtBase::create))
+        .def("name", &SftVirtBase::name);
+    py::class_<SftVirtDerived, SftVirtBase, std::shared_ptr<SftVirtDerived>>(m, "SftVirtDerived")
+        .def(py::init<>(&SftVirtDerived::create));
+    py::class_<SftVirtDerived2, SftVirtDerived, std::shared_ptr<SftVirtDerived2>>(
+        m, "SftVirtDerived2")
+        .def(py::init<>(&SftVirtDerived2::create))
+        .def("call_name", &SftVirtDerived2::call_name, py::arg("d2"));
+
     // test_move_only_holder
     py::class_<C, custom_unique_ptr<C>>(m, "TypeWithMoveOnlyHolder")
         .def_static("make", []() { return custom_unique_ptr<C>(new C); })
@@ -420,11 +575,18 @@ TEST_SUBMODULE(smart_ptr, m) {
              [](const HolderWithAddressOf *obj) { py::print((*obj).get()->toString()); });
 
     // test_move_only_holder_with_addressof_operator
-    using MoveOnlyHolderWithAddressOf = unique_ptr_with_addressof_operator<TypeForMoveOnlyHolderWithAddressOf>;
-    py::class_<TypeForMoveOnlyHolderWithAddressOf, MoveOnlyHolderWithAddressOf>(m, "TypeForMoveOnlyHolderWithAddressOf")
-        .def_static("make", []() { return MoveOnlyHolderWithAddressOf(new TypeForMoveOnlyHolderWithAddressOf(0)); })
+    using MoveOnlyHolderWithAddressOf
+        = unique_ptr_with_addressof_operator<TypeForMoveOnlyHolderWithAddressOf>;
+    py::class_<TypeForMoveOnlyHolderWithAddressOf, MoveOnlyHolderWithAddressOf>(
+        m, "TypeForMoveOnlyHolderWithAddressOf")
+        .def_static("make",
+                    []() {
+                        return MoveOnlyHolderWithAddressOf(
+                            new TypeForMoveOnlyHolderWithAddressOf(0));
+                    })
         .def_readwrite("value", &TypeForMoveOnlyHolderWithAddressOf::value)
-        .def("print_object", [](const TypeForMoveOnlyHolderWithAddressOf *obj) { py::print(obj->toString()); });
+        .def("print_object",
+             [](const TypeForMoveOnlyHolderWithAddressOf *obj) { py::print(obj->toString()); });
 
     // test_smart_ptr_from_default
     py::class_<HeldByDefaultHolder, std::unique_ptr<HeldByDefaultHolder>>(m, "HeldByDefaultHolder")
@@ -445,8 +607,21 @@ TEST_SUBMODULE(smart_ptr, m) {
         .def("add", &ElementList::add)
         .def("get", [](ElementList &el) {
             py::list list;
-            for (auto &e : el.l)
+            for (auto &e : el.l) {
                 list.append(py::cast(e));
+            }
             return list;
         });
+
+    // NOLINTNEXTLINE(bugprone-incorrect-enable-shared-from-this)
+    class PrivateESFT : /* implicit private */ std::enable_shared_from_this<PrivateESFT> {};
+    struct ContainerUsingPrivateESFT {
+        std::shared_ptr<PrivateESFT> ptr;
+    };
+    py::class_<ContainerUsingPrivateESFT>(m, "ContainerUsingPrivateESFT")
+        .def(py::init<>())
+        .def_readwrite("ptr",
+                       &ContainerUsingPrivateESFT::ptr); // <- access ESFT through shared_ptr
+
+    holder_caster_traits_test::wrap(m);
 }

@@ -12,7 +12,8 @@
 #ifndef DBOW2_EXTENSION_FASTBRIEF_H
 #define DBOW2_EXTENSION_FASTBRIEF_H
 
-#include <opencv/cv.h>
+#include <opencv2/core.hpp>
+#include <cstdint>
 #include <vector>
 #include <string>
 

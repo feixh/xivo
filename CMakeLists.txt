@@ -42,6 +42,12 @@ add_definitions(-DGOOGLE_STRIP_LOG=1)
 # add_definitions(-DEIGEN_DEFAULT_TO_ROW_MAJOR)
 add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_ZERO)
 
+# Sophus formats Eigen expressions through libfmt in its assertion messages.
+# fmt >= 9 dropped the implicit ostream fallback, so those messages no longer
+# compile. Basic logging keeps the assertions but prints the format string
+# verbatim instead of formatting Eigen types; behaviour is otherwise unchanged.
+add_definitions(-DSOPHUS_USE_BASIC_LOGGING)
+
 find_package(OpenCV REQUIRED)
 find_package(Python3 REQUIRED Interpreter Development)
 

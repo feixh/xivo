@@ -25,8 +25,8 @@ the following rules to make the process as smooth as possible:
 * Make a new branch for every feature you're working on.
 * Make small and clean pull requests that are easy to review but make sure they
   do add value by themselves.
-* Add tests for any new functionality and run the test suite (`cmake --build
-  build --target pytest`) to ensure that no existing features break.
+* Add tests for any new functionality and run the test suite (`cmake --workflow
+  venv`) to ensure that no existing features break.
 * Please run [`pre-commit`][pre-commit] to check your code matches the
   project style. (Note that `gawk` is required.) Use `pre-commit run
   --all-files` before committing (or use installed-mode, check pre-commit docs)
@@ -81,11 +81,11 @@ nox -s build
 ### Full setup
 
 To setup an ideal development environment, run the following commands on a
-system with CMake 3.14+:
+system with CMake 3.15+:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r tests/requirements.txt
 cmake -S . -B build -DDOWNLOAD_CATCH=ON -DDOWNLOAD_EIGEN=ON
 cmake --build build -j4
@@ -93,19 +93,49 @@ cmake --build build -j4
 
 Tips:
 
-* You can use `virtualenv` (from PyPI) instead of `venv` (which is Python 3
-  only).
+* You can use `virtualenv` (faster, from PyPI) instead of `venv`.
 * You can select any name for your environment folder; if it contains "env" it
   will be ignored by git.
-* If you don’t have CMake 3.14+, just add “cmake” to the pip install command.
-* You can use `-DPYBIND11_FINDPYTHON=ON` to use FindPython on CMake 3.12+
-* In classic mode, you may need to set `-DPYTHON_EXECUTABLE=/path/to/python`.
-  FindPython uses `-DPython_ROOT_DIR=/path/to` or
+* If you don't have CMake 3.15+, just add "cmake" to the pip install command.
+* You can use `-DPYBIND11_FINDPYTHON=ON` to use FindPython.
+* For a specific Python, you can use `-DPython_ROOT_DIR=/path/to` or
   `-DPython_EXECUTABLE=/path/to/python`.
 
-### Configuration options
+## CMake presets
 
-In CMake, configuration options are given with “-D”. Options are stored in the
+We also support CMake presets. If you have [uv](https://docs.astral.sh/uv/),
+you can use:
+
+```bash
+cmake --workflow venv
+```
+
+to setup a venv and run all tests. You can break this up into components
+if you want to use a specific version of Python (or any other config option) or
+build only one of the valid targets (listed below).
+
+```bash
+cmake --preset venv -DPYBIND11_CREATE_WITH_UV=3.13t
+cmake --build --preset venv
+cmake --build --preset venv -t cpptest
+```
+
+The `default` preset will use an existing venv or Python install. If you'd like
+to run pytest yourself, say to easily control the options:
+
+```bash
+cd build
+source .venv/bin/activate
+cd tests
+python -m pytest
+```
+
+The `.so` file is not installed into the venv, so you need to run from this
+directory, the local directory is included with `python -m`.
+
+## Configuration options
+
+In CMake, configuration options are given with "-D". Options are stored in the
 build directory, in the `CMakeCache.txt` file, so they are remembered for each
 build directory. Two selections are special - the generator, given with `-G`,
 and the compiler, which is selected based on environment variables `CXX` and
@@ -115,12 +145,12 @@ after the initial run.
 The valid options are:
 
 * `-DCMAKE_BUILD_TYPE`: Release, Debug, MinSizeRel, RelWithDebInfo
-* `-DPYBIND11_FINDPYTHON=ON`: Use CMake 3.12+’s FindPython instead of the
+* `-DPYBIND11_FINDPYTHON=ON`: Use CMake 3.12+'s FindPython instead of the
   classic, deprecated, custom FindPythonLibs
 * `-DPYBIND11_NOPYTHON=ON`: Disable all Python searching (disables tests)
 * `-DBUILD_TESTING=ON`: Enable the tests
 * `-DDOWNLOAD_CATCH=ON`: Download catch to build the C++ tests
-* `-DOWNLOAD_EIGEN=ON`: Download Eigen for the NumPy tests
+* `-DDOWNLOAD_EIGEN=ON`: Download Eigen for the NumPy tests
 * `-DPYBIND11_INSTALL=ON/OFF`: Enable the install target (on by default for the
   master project)
 * `-DUSE_PYTHON_INSTALL_DIR=ON`: Try to install into the python dir
@@ -135,8 +165,8 @@ The valid options are:
 * Use `cmake --build build -j12` to build with 12 cores (for example).
 * Use `-G` and the name of a generator to use something different. `cmake
   --help` lists the generators available.
-      - On Unix, setting `CMAKE_GENERATER=Ninja` in your environment will give
-        you automatic mulithreading on all your CMake projects!
+      - On Unix, setting `CMAKE_GENERATOR=Ninja` in your environment will give
+        you automatic multithreading on all your CMake projects!
 * Open the `CMakeLists.txt` with QtCreator to generate for that IDE.
 * You can use `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to generate the `.json` file
   that some tools expect.
@@ -150,8 +180,8 @@ To run the tests, you can "build" the check target:
 cmake --build build --target check
 ```
 
-`--target` can be spelled `-t` in CMake 3.15+. You can also run individual
-tests with these targets:
+`--target` can be spelled `-t`. You can also run individual tests with these
+targets:
 
 * `pytest`: Python tests only, using the
 [pytest](https://docs.pytest.org/en/stable/) framework
@@ -159,8 +189,9 @@ tests with these targets:
 * `test_cmake_build`: Install / subdirectory tests
 
 If you want to build just a subset of tests, use
-`-DPYBIND11_TEST_OVERRIDE="test_callbacks.cpp;test_pickling.cpp"`. If this is
-empty, all tests will be built.
+`-DPYBIND11_TEST_OVERRIDE="test_callbacks;test_pickling"`. If this is
+empty, all tests will be built. Tests are specified without an extension if they need both a .py and
+.cpp file.
 
 You may also pass flags to the `pytest` target by editing `tests/pytest.ini` or
 by using the `PYTEST_ADDOPTS` environment variable
@@ -231,15 +262,17 @@ of the pybind11 repo.
 more complex to run, compared to `clang-format`, but support for `clang-tidy`
 is built into the pybind11 CMake configuration. To run `clang-tidy`, the
 following recipe should work. Run the `docker` command from the top-level
-directory inside your pybind11 git clone. Files will be modified in place,
-so you can use git to monitor the changes.
+directory inside your pybind11 git clone.
 
 ```bash
-docker run --rm -v $PWD:/mounted_pybind11 -it silkeh/clang:12
-apt-get update && apt-get install -y python3-dev python3-pytest
-cmake -S /mounted_pybind11/ -B build -DCMAKE_CXX_CLANG_TIDY="$(which clang-tidy);-fix" -DDOWNLOAD_EIGEN=ON -DDOWNLOAD_CATCH=ON -DCMAKE_CXX_STANDARD=17
-cmake --build build -j 2 -- --keep-going
+docker run --rm -v $PWD:/pybind11 -w /pybind11 -it silkeh/clang:20
+apt-get update && apt-get install -y git python3-dev python3-pytest ninja-build
+cmake --preset tidy
+cmake --build --preset tidy
 ```
+
+You can add `--fix` to the options list in the preset if you want to apply fixes
+(remember `-j1` to run only one thread).
 
 ### Include what you use
 
@@ -248,7 +281,7 @@ macOS), then run:
 
 ```bash
 cmake -S . -B build-iwyu -DCMAKE_CXX_INCLUDE_WHAT_YOU_USE=$(which include-what-you-use)
-cmake --build build
+cmake --build build-iwyu
 ```
 
 The report is sent to stderr; you can pipe it into a file if you wish.
@@ -256,7 +289,7 @@ The report is sent to stderr; you can pipe it into a file if you wish.
 ### Build recipes
 
 This builds with the Intel compiler (assuming it is in your path, along with a
-recent CMake and Python 3):
+recent CMake and Python):
 
 ```bash
 python3 -m venv venv
@@ -297,84 +330,14 @@ files inside the package, that you get access to via functions in the package,
 and a `pybind11-global` package that can be included via `pybind11[global]` if
 you want the more invasive but discoverable file locations.
 
-If you want to install or package the GitHub source, it is best to have Pip 10
-or newer on Windows, macOS, or Linux (manylinux1 compatible, includes most
-distributions).  You can then build the SDists, or run any procedure that makes
-SDists internally, like making wheels or installing.
+If you want to package the GitHub source for the "global" package, you need
+to use nox. Normal packaging will only make the normal package.
 
 
 ```bash
-# Editable development install example
-python3 -m pip install -e .
+nox -s build
+nox -s build_global
 ```
-
-Since Pip itself does not have an `sdist` command (it does have `wheel` and
-`install`), you may want to use the upcoming `build` package:
-
-```bash
-python3 -m pip install build
-
-# Normal package
-python3 -m build -s .
-
-# Global extra
-PYBIND11_GLOBAL_SDIST=1 python3 -m build -s .
-```
-
-If you want to use the classic "direct" usage of `python setup.py`, you will
-need CMake 3.15+ and either `make` or `ninja` preinstalled (possibly via `pip
-install cmake ninja`), since directly running Python on `setup.py` cannot pick
-up and install `pyproject.toml` requirements. As long as you have those two
-things, though, everything works the way you would expect:
-
-```bash
-# Normal package
-python3 setup.py sdist
-
-# Global extra
-PYBIND11_GLOBAL_SDIST=1 python3 setup.py sdist
-```
-
-A detailed explanation of the build procedure design for developers wanting to
-work on or maintain the packaging system is as follows:
-
-#### 1. Building from the source directory
-
-When you invoke any `setup.py` command from the source directory, including
-`pip wheel .` and `pip install .`, you will activate a full source build. This
-is made of the following steps:
-
-1. If the tool is PEP 518 compliant, like Pip 10+, it will create a temporary
-   virtual environment and install the build requirements (mostly CMake) into
-   it. (if you are not on Windows, macOS, or a manylinux compliant system, you
-   can disable this with `--no-build-isolation` as long as you have CMake 3.15+
-   installed)
-2. The environment variable `PYBIND11_GLOBAL_SDIST` is checked - if it is set
-   and truthy, this will be make the accessory `pybind11-global` package,
-   instead of the normal `pybind11` package. This package is used for
-   installing the files directly to your environment root directory, using
-   `pybind11[global]`.
-2. `setup.py` reads the version from `pybind11/_version.py` and verifies it
-   matches `includes/pybind11/detail/common.h`.
-3. CMake is run with `-DCMAKE_INSTALL_PREIFX=pybind11`. Since the CMake install
-   procedure uses only relative paths and is identical on all platforms, these
-   files are valid as long as they stay in the correct relative position to the
-   includes. `pybind11/share/cmake/pybind11` has the CMake files, and
-   `pybind11/include` has the includes. The build directory is discarded.
-4. Simpler files are placed in the SDist: `tools/setup_*.py.in`,
-   `tools/pyproject.toml` (`main` or `global`)
-5. The package is created by running the setup function in the
-   `tools/setup_*.py`.  `setup_main.py` fills in Python packages, and
-   `setup_global.py` fills in only the data/header slots.
-6. A context manager cleans up the temporary CMake install directory (even if
-   an error is thrown).
-
-### 2. Building from SDist
-
-Since the SDist has the rendered template files in `tools` along with the
-includes and CMake files in the correct locations, the builds are completely
-trivial and simple. No extra requirements are required. You can even use Pip 9
-if you really want to.
 
 
 [pre-commit]: https://pre-commit.com

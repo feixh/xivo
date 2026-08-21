@@ -1,6 +1,7 @@
 // The update step.
 // Author: Xiaohan Fei (feixh@cs.ucla.edu)
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <unordered_set>
@@ -71,6 +72,13 @@ std::vector<FeaturePtr> Estimator::MHGating() {
 
   // The actual gating
   number_t mh_thresh = MH_thresh_;
+  // A non-finite Mahalanobis distance (S singular, or NaN in J/inn) never
+  // compares less than any threshold, so relaxing `mh_thresh` can never admit
+  // it as an inlier. If enough features are affected that `min_required_inliers_`
+  // is unreachable, the loop below spins forever. Bound the relaxation: once
+  // the threshold can no longer grow (or has grown past every finite distance)
+  // there is nothing left to gain, so stop and let the caller proceed with
+  // whatever inliers were found.
   while (inliers.size() < min_required_inliers_) {
     // reset states
     for (auto f : instate_features_) {
@@ -91,8 +99,20 @@ std::vector<FeaturePtr> Estimator::MHGating() {
         LOG(INFO) << "feature #" << f->id() << " rejected by MH-gating";
       }
     }
+    if (inliers.size() >= min_required_inliers_) {
+      break;
+    }
     // relax the threshold
-    mh_thresh *= MH_thresh_multipler_;
+    number_t relaxed = mh_thresh * MH_thresh_multipler_;
+    if (!std::isfinite(relaxed) || relaxed <= mh_thresh) {
+      LOG(WARNING) << "MH-gating could not reach " << min_required_inliers_
+                   << " inliers (" << inliers.size() << " found of "
+                   << instate_features_.size()
+                   << " in-state features); giving up on relaxing the threshold";
+      break;
+    }
+    mh_thresh = relaxed;
+    num_mh_rejected_ = 0;
   }
 
 #ifndef NDEBUG

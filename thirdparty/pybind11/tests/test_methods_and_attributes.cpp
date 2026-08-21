@@ -8,8 +8,14 @@
     BSD-style license that can be found in the LICENSE file.
 */
 
-#include "pybind11_tests.h"
 #include "constructor_stats.h"
+#include "pybind11_tests.h"
+
+#if !defined(PYPY_VERSION)
+// Flag set by the capsule destructor in test_dynamic_attr_dealloc_frees_dict_contents.
+// File scope so the captureless capsule destructor (void(*)(void*)) can access it.
+static bool s_dynamic_attr_capsule_freed = false;
+#endif
 
 #if !defined(PYBIND11_OVERLOAD_CAST)
 template <typename... Args>
@@ -27,7 +33,10 @@ public:
 
     std::string toString() const { return "ExampleMandA[value=" + std::to_string(value) + "]"; }
 
-    void operator=(const ExampleMandA &e) { print_copy_assigned(this); value = e.value; }
+    void operator=(const ExampleMandA &e) {
+        print_copy_assigned(this);
+        value = e.value;
+    }
     void operator=(ExampleMandA &&e) noexcept {
         print_move_assigned(this);
         value = e.value;
@@ -40,37 +49,37 @@ public:
     void add4(ExampleMandA *other) { value += other->value; }       // passing by pointer
     void add5(const ExampleMandA *other) { value += other->value; } // passing by const pointer
 
-    void add6(int other) { value += other; }                        // passing by value
-    void add7(int &other) { value += other; }                       // passing by reference
-    void add8(const int &other) { value += other; }                 // passing by const reference
+    void add6(int other) { value += other; }        // passing by value
+    void add7(int &other) { value += other; }       // passing by reference
+    void add8(const int &other) { value += other; } // passing by const reference
     // NOLINTNEXTLINE(readability-non-const-parameter) Deliberately non-const for testing
-    void add9(int *other) { value += *other; }                      // passing by pointer
-    void add10(const int *other) { value += *other; }               // passing by const pointer
+    void add9(int *other) { value += *other; }        // passing by pointer
+    void add10(const int *other) { value += *other; } // passing by const pointer
 
-    void consume_str(std::string&&) {}
+    void consume_str(std::string &&) {}
 
-    ExampleMandA self1() { return *this; }                          // return by value
-    ExampleMandA &self2() { return *this; }                         // return by reference
-    const ExampleMandA &self3() const { return *this; }             // return by const reference
-    ExampleMandA *self4() { return this; }                          // return by pointer
-    const ExampleMandA *self5() const { return this; }              // return by const pointer
+    ExampleMandA self1() { return *this; }              // return by value
+    ExampleMandA &self2() { return *this; }             // return by reference
+    const ExampleMandA &self3() const { return *this; } // return by const reference
+    ExampleMandA *self4() { return this; }              // return by pointer
+    const ExampleMandA *self5() const { return this; }  // return by const pointer
 
-    int internal1() const { return value; }                         // return by value
-    int &internal2() { return value; }                              // return by reference
-    const int &internal3() const { return value; }                  // return by const reference
-    int *internal4() { return &value; }                             // return by pointer
-    const int *internal5() { return &value; }                       // return by const pointer
+    int internal1() const { return value; }        // return by value
+    int &internal2() { return value; }             // return by reference
+    const int &internal3() const { return value; } // return by const reference
+    int *internal4() { return &value; }            // return by pointer
+    const int *internal5() { return &value; }      // return by const pointer
 
-    py::str overloaded()             { return "()"; }
-    py::str overloaded(int)          { return "(int)"; }
-    py::str overloaded(int, float)   { return "(int, float)"; }
-    py::str overloaded(float, int)   { return "(float, int)"; }
-    py::str overloaded(int, int)     { return "(int, int)"; }
+    py::str overloaded() { return "()"; }
+    py::str overloaded(int) { return "(int)"; }
+    py::str overloaded(int, float) { return "(int, float)"; }
+    py::str overloaded(float, int) { return "(float, int)"; }
+    py::str overloaded(int, int) { return "(int, int)"; }
     py::str overloaded(float, float) { return "(float, float)"; }
-    py::str overloaded(int)          const { return "(int) const"; }
-    py::str overloaded(int, float)   const { return "(int, float) const"; }
-    py::str overloaded(float, int)   const { return "(float, int) const"; }
-    py::str overloaded(int, int)     const { return "(int, int) const"; }
+    py::str overloaded(int) const { return "(int) const"; }
+    py::str overloaded(int, float) const { return "(int, float) const"; }
+    py::str overloaded(float, int) const { return "(float, int) const"; }
+    py::str overloaded(int, int) const { return "(int, int) const"; }
     py::str overloaded(float, float) const { return "(float, float) const"; }
 
     static py::str overloaded(float) { return "static float"; }
@@ -112,7 +121,10 @@ UserType TestPropRVP::sv1(1);
 UserType TestPropRVP::sv2(1);
 
 // Test None-allowed py::arg argument policy
-class NoneTester { public: int answer = 42; };
+class NoneTester {
+public:
+    int answer = 42;
+};
 int none1(const NoneTester &obj) { return obj.answer; }
 int none2(NoneTester *obj) { return obj ? obj->answer : -1; }
 int none3(std::shared_ptr<NoneTester> &obj) { return obj ? obj->answer : -1; }
@@ -134,11 +146,15 @@ struct StrIssue {
     explicit StrIssue(int i) : val{i} {}
 };
 
-// Issues #854, #910: incompatible function args when member function/pointer is in unregistered base class
+// Issues #854, #910: incompatible function args when member function/pointer is in unregistered
+// base class
 class UnregisteredBase {
 public:
     void do_nothing() const {}
-    void increase_value() { rw_value++; ro_value += 0.25; }
+    void increase_value() {
+        rw_value++;
+        ro_value += 0.25;
+    }
     void set_int(int v) { rw_value = v; }
     int get_int() const { return rw_value; }
     double get_double() const { return ro_value; }
@@ -151,6 +167,123 @@ public:
     double sum() const { return rw_value + ro_value; }
 };
 
+// Issue #2234: noexcept methods in an unregistered base should be bindable on the derived class.
+// In C++17, noexcept is part of the function type, so &Derived::method resolves to
+// a Base member function pointer with noexcept, requiring explicit template specializations.
+class NoexceptUnregisteredBase {
+public:
+    // Exercises cpp_function(Return (Class::*)(Args...) const noexcept, ...)
+    int value() const noexcept { return m_value; }
+    // Exercises cpp_function(Return (Class::*)(Args...) noexcept, ...)
+    void set_value(int v) noexcept { m_value = v; }
+    // Exercises cpp_function(Return (Class::*)(Args...) & noexcept, ...)
+    void increment() & noexcept { ++m_value; }
+    // Exercises cpp_function(Return (Class::*)(Args...) const & noexcept, ...)
+    int capped_value() const & noexcept { return m_value < 100 ? m_value : 100; }
+
+private:
+    int m_value = 99;
+};
+class NoexceptDerived : public NoexceptUnregisteredBase {
+public:
+    using NoexceptUnregisteredBase::NoexceptUnregisteredBase;
+};
+
+// Exercises cpp_function(Return (Class::*)(Args...) &&, ...) and
+// cpp_function(Return (Class::*)(Args...) const &&, ...) via an unregistered base.
+class RValueRefUnregisteredBase {
+public:
+    // Exercises cpp_function(Return (Class::*)(Args...) &&, ...).
+    // Moves m_payload to verify that std::move(*c).*f is used in the lambda body.
+    std::string take() && { // NOLINT(readability-make-member-function-const)
+        return std::move(m_payload);
+    }
+    // Exercises cpp_function(Return (Class::*)(Args...) const &&, ...)
+    int peek() const && { return m_value; }
+#ifdef __cpp_noexcept_function_type
+    // Exercises cpp_function(Return (Class::*)(Args...) && noexcept, ...)
+    std::string take_noexcept() && noexcept { // NOLINT(readability-make-member-function-const)
+        return std::move(m_payload);
+    }
+    // Exercises cpp_function(Return (Class::*)(Args...) const && noexcept, ...)
+    int peek_noexcept() const && noexcept { return m_value; }
+#endif
+
+private:
+    int m_value = 77;
+    std::string m_payload{"rref_payload"};
+};
+class RValueRefDerived : public RValueRefUnregisteredBase {
+public:
+    using RValueRefUnregisteredBase::RValueRefUnregisteredBase;
+};
+
+// Exercises overload_cast with noexcept member function pointers (issue #2234).
+// In C++17, overload_cast must have noexcept variants to resolve noexcept overloads.
+struct NoexceptOverloaded {
+    py::str method(int) noexcept { return "(int)"; }
+    py::str method(int) const noexcept { return "(int) const"; }
+    py::str method(float) noexcept { return "(float)"; }
+};
+// Exercises overload_cast with noexcept free function pointers.
+int noexcept_free_func(int x) noexcept { return x + 1; }
+int noexcept_free_func(float x) noexcept { return static_cast<int>(x) + 2; }
+
+// Exercises overload_cast with ref-qualified member function pointers.
+struct RefQualifiedOverloaded {
+    py::str method(int) & { return "(int) &"; }
+    py::str method(int) const & { return "(int) const &"; }
+    py::str method(float) && { return "(float) &&"; }
+    py::str method(float) const && { return "(float) const &&"; }
+#ifdef __cpp_noexcept_function_type
+    py::str method(long) & noexcept { return "(long) & noexcept"; }
+    py::str method(long) const & noexcept { return "(long) const & noexcept"; }
+    py::str method(double) && noexcept { return "(double) && noexcept"; }
+    py::str method(double) const && noexcept { return "(double) const && noexcept"; }
+#endif
+};
+
+// Compile-only guard: catch overload_cast resolution regressions/ambiguities early.
+using RefQualifiedOverloadedIntCast = py::detail::overload_cast_impl<int>;
+using RefQualifiedOverloadedFloatCast = py::detail::overload_cast_impl<float>;
+static_assert(
+    std::is_same<decltype(RefQualifiedOverloadedIntCast{}(&RefQualifiedOverloaded::method)),
+                 py::str (RefQualifiedOverloaded::*)(int) &>::value,
+    "");
+static_assert(std::is_same<decltype(RefQualifiedOverloadedIntCast{}(
+                               &RefQualifiedOverloaded::method, py::const_)),
+                           py::str (RefQualifiedOverloaded::*)(int) const &>::value,
+              "");
+static_assert(
+    std::is_same<decltype(RefQualifiedOverloadedFloatCast{}(&RefQualifiedOverloaded::method)),
+                 py::str (RefQualifiedOverloaded::*)(float) &&>::value,
+    "");
+static_assert(std::is_same<decltype(RefQualifiedOverloadedFloatCast{}(
+                               &RefQualifiedOverloaded::method, py::const_)),
+                           py::str (RefQualifiedOverloaded::*)(float) const &&>::value,
+              "");
+
+#ifdef __cpp_noexcept_function_type
+using RefQualifiedOverloadedLongCast = py::detail::overload_cast_impl<long>;
+using RefQualifiedOverloadedDoubleCast = py::detail::overload_cast_impl<double>;
+static_assert(
+    std::is_same<decltype(RefQualifiedOverloadedLongCast{}(&RefQualifiedOverloaded::method)),
+                 py::str (RefQualifiedOverloaded::*)(long) & noexcept>::value,
+    "");
+static_assert(std::is_same<decltype(RefQualifiedOverloadedLongCast{}(
+                               &RefQualifiedOverloaded::method, py::const_)),
+                           py::str (RefQualifiedOverloaded::*)(long) const & noexcept>::value,
+              "");
+static_assert(
+    std::is_same<decltype(RefQualifiedOverloadedDoubleCast{}(&RefQualifiedOverloaded::method)),
+                 py::str (RefQualifiedOverloaded::*)(double) && noexcept>::value,
+    "");
+static_assert(std::is_same<decltype(RefQualifiedOverloadedDoubleCast{}(
+                               &RefQualifiedOverloaded::method, py::const_)),
+                           py::str (RefQualifiedOverloaded::*)(double) const && noexcept>::value,
+              "");
+#endif
+
 // Test explicit lvalue ref-qualification
 struct RefQualified {
     int value = 0;
@@ -161,19 +294,51 @@ struct RefQualified {
 
 // Test rvalue ref param
 struct RValueRefParam {
-    std::size_t func1(std::string&& s) { return s.size(); }
-    std::size_t func2(std::string&& s) const { return s.size(); }
-    std::size_t func3(std::string&& s) & { return s.size(); }
-    std::size_t func4(std::string&& s) const & { return s.size(); }
+    std::size_t func1(std::string &&s) { return s.size(); }
+    std::size_t func2(std::string &&s) const { return s.size(); }
+    std::size_t func3(std::string &&s) & { return s.size(); }
+    std::size_t func4(std::string &&s) const & { return s.size(); }
 };
+
+namespace pybind11_tests {
+namespace exercise_is_setter {
+
+struct FieldBase {
+    int int_value() const { return int_value_; }
+
+    FieldBase &SetIntValue(int int_value) {
+        int_value_ = int_value;
+        return *this;
+    }
+
+private:
+    int int_value_ = -99;
+};
+
+struct Field : FieldBase {};
+
+void add_bindings(py::module &m) {
+    py::module sm = m.def_submodule("exercise_is_setter");
+    // NOTE: FieldBase is not wrapped, therefore ...
+    py::class_<Field>(sm, "Field")
+        .def(py::init<>())
+        .def_property(
+            "int_value",
+            &Field::int_value,
+            &Field::SetIntValue // ... the `FieldBase &` return value here cannot be converted.
+        );
+}
+
+} // namespace exercise_is_setter
+} // namespace pybind11_tests
 
 TEST_SUBMODULE(methods_and_attributes, m) {
     // test_methods_and_attributes
     py::class_<ExampleMandA> emna(m, "ExampleMandA");
     emna.def(py::init<>())
         .def(py::init<int>())
-        .def(py::init<std::string&&>())
-        .def(py::init<const ExampleMandA&>())
+        .def(py::init<std::string &&>())
+        .def(py::init<const ExampleMandA &>())
         .def("add1", &ExampleMandA::add1)
         .def("add2", &ExampleMandA::add2)
         .def("add3", &ExampleMandA::add3)
@@ -198,16 +363,20 @@ TEST_SUBMODULE(methods_and_attributes, m) {
 #if defined(PYBIND11_OVERLOAD_CAST)
         .def("overloaded", py::overload_cast<>(&ExampleMandA::overloaded))
         .def("overloaded", py::overload_cast<int>(&ExampleMandA::overloaded))
-        .def("overloaded", py::overload_cast<int,   float>(&ExampleMandA::overloaded))
-        .def("overloaded", py::overload_cast<float,   int>(&ExampleMandA::overloaded))
-        .def("overloaded", py::overload_cast<int,     int>(&ExampleMandA::overloaded))
+        .def("overloaded", py::overload_cast<int, float>(&ExampleMandA::overloaded))
+        .def("overloaded", py::overload_cast<float, int>(&ExampleMandA::overloaded))
+        .def("overloaded", py::overload_cast<int, int>(&ExampleMandA::overloaded))
         .def("overloaded", py::overload_cast<float, float>(&ExampleMandA::overloaded))
         .def("overloaded_float", py::overload_cast<float, float>(&ExampleMandA::overloaded))
-        .def("overloaded_const", py::overload_cast<int         >(&ExampleMandA::overloaded, py::const_))
-        .def("overloaded_const", py::overload_cast<int,   float>(&ExampleMandA::overloaded, py::const_))
-        .def("overloaded_const", py::overload_cast<float,   int>(&ExampleMandA::overloaded, py::const_))
-        .def("overloaded_const", py::overload_cast<int,     int>(&ExampleMandA::overloaded, py::const_))
-        .def("overloaded_const", py::overload_cast<float, float>(&ExampleMandA::overloaded, py::const_))
+        .def("overloaded_const", py::overload_cast<int>(&ExampleMandA::overloaded, py::const_))
+        .def("overloaded_const",
+             py::overload_cast<int, float>(&ExampleMandA::overloaded, py::const_))
+        .def("overloaded_const",
+             py::overload_cast<float, int>(&ExampleMandA::overloaded, py::const_))
+        .def("overloaded_const",
+             py::overload_cast<int, int>(&ExampleMandA::overloaded, py::const_))
+        .def("overloaded_const",
+             py::overload_cast<float, float>(&ExampleMandA::overloaded, py::const_))
 #else
         // Use both the traditional static_cast method and the C++11 compatible overload_cast_
         .def("overloaded", overload_cast_<>()(&ExampleMandA::overloaded))
@@ -225,17 +394,30 @@ TEST_SUBMODULE(methods_and_attributes, m) {
 #endif
         // test_no_mixed_overloads
         // Raise error if trying to mix static/non-static overloads on the same name:
-        .def_static("add_mixed_overloads1", []() {
-            auto emna = py::reinterpret_borrow<py::class_<ExampleMandA>>(py::module_::import("pybind11_tests.methods_and_attributes").attr("ExampleMandA"));
-            emna.def       ("overload_mixed1", static_cast<py::str (ExampleMandA::*)(int, int)>(&ExampleMandA::overloaded))
-                .def_static("overload_mixed1", static_cast<py::str (              *)(float   )>(&ExampleMandA::overloaded));
-        })
-        .def_static("add_mixed_overloads2", []() {
-            auto emna = py::reinterpret_borrow<py::class_<ExampleMandA>>(py::module_::import("pybind11_tests.methods_and_attributes").attr("ExampleMandA"));
-            emna.def_static("overload_mixed2", static_cast<py::str (              *)(float   )>(&ExampleMandA::overloaded))
-                .def       ("overload_mixed2", static_cast<py::str (ExampleMandA::*)(int, int)>(&ExampleMandA::overloaded));
-        })
-        .def("__str__", &ExampleMandA::toString)
+        .def_static("add_mixed_overloads1",
+                    []() {
+                        auto emna = py::reinterpret_borrow<py::class_<ExampleMandA>>(
+                            py::module_::import("pybind11_tests.methods_and_attributes")
+                                .attr("ExampleMandA"));
+                        emna.def("overload_mixed1",
+                                 static_cast<py::str (ExampleMandA::*)(int, int)>(
+                                     &ExampleMandA::overloaded))
+                            .def_static(
+                                "overload_mixed1",
+                                static_cast<py::str (*)(float)>(&ExampleMandA::overloaded));
+                    })
+        .def_static("add_mixed_overloads2",
+                    []() {
+                        auto emna = py::reinterpret_borrow<py::class_<ExampleMandA>>(
+                            py::module_::import("pybind11_tests.methods_and_attributes")
+                                .attr("ExampleMandA"));
+                        emna.def_static("overload_mixed2",
+                                        static_cast<py::str (*)(float)>(&ExampleMandA::overloaded))
+                            .def("overload_mixed2",
+                                 static_cast<py::str (ExampleMandA::*)(int, int)>(
+                                     &ExampleMandA::overloaded));
+                    })
+        .def("__str__", &ExampleMandA::toString, py::pos_only())
         .def_readwrite("value", &ExampleMandA::value);
 
     // test_copy_method
@@ -307,7 +489,7 @@ TEST_SUBMODULE(methods_and_attributes, m) {
                                       [](const py::object &) { return UserType(1); });
 
     // test_metaclass_override
-    struct MetaclassOverride { };
+    struct MetaclassOverride {};
     py::class_<MetaclassOverride>(m, "MetaclassOverride", py::metaclass((PyObject *) &PyType_Type))
         .def_property_readonly_static("readonly", [](const py::object &) { return 1; });
 
@@ -322,38 +504,61 @@ TEST_SUBMODULE(methods_and_attributes, m) {
     class DynamicClass {
     public:
         DynamicClass() { print_default_created(this); }
-        DynamicClass(const DynamicClass&) = delete;
+        DynamicClass(const DynamicClass &) = delete;
         ~DynamicClass() { print_destroyed(this); }
     };
-    py::class_<DynamicClass>(m, "DynamicClass", py::dynamic_attr())
-        .def(py::init());
+    py::class_<DynamicClass>(m, "DynamicClass", py::dynamic_attr()).def(py::init());
 
-    class CppDerivedDynamicClass : public DynamicClass { };
-    py::class_<CppDerivedDynamicClass, DynamicClass>(m, "CppDerivedDynamicClass")
-        .def(py::init());
+    class CppDerivedDynamicClass : public DynamicClass {};
+    py::class_<CppDerivedDynamicClass, DynamicClass>(m, "CppDerivedDynamicClass").def(py::init());
+
+    // test_dynamic_attr_dealloc_frees_dict_contents
+    // Regression test: pybind11_object_dealloc() must call PyObject_ClearManagedDict()
+    // before tp_free() so that objects stored in a py::dynamic_attr() instance __dict__
+    // have their refcounts decremented when the pybind11 object is freed. On Python 3.14+
+    // tp_free no longer implicitly clears the managed dict, causing permanent leaks.
+    m.def("make_dynamic_attr_with_capsule", []() -> py::object {
+        s_dynamic_attr_capsule_freed = false;
+        auto *dummy = new int(0);
+        py::capsule cap(dummy, [](void *ptr) {
+            delete static_cast<int *>(ptr);
+            s_dynamic_attr_capsule_freed = true;
+        });
+        py::object obj = py::cast(new DynamicClass(), py::return_value_policy::take_ownership);
+        obj.attr("data") = cap;
+        return obj;
+    });
+    m.def("is_dynamic_attr_capsule_freed", []() { return s_dynamic_attr_capsule_freed; });
 #endif
 
     // test_bad_arg_default
     // Issue/PR #648: bad arg default debugging output
-#if !defined(NDEBUG)
-    m.attr("debug_enabled") = true;
+#if defined(PYBIND11_DETAILED_ERROR_MESSAGES)
+    m.attr("detailed_error_messages_enabled") = true;
 #else
-    m.attr("debug_enabled") = false;
+    m.attr("detailed_error_messages_enabled") = false;
 #endif
-    m.def("bad_arg_def_named", []{
+    m.def("bad_arg_def_named", [] {
         auto m = py::module_::import("pybind11_tests");
-        m.def("should_fail", [](int, UnregisteredType) {}, py::arg(), py::arg("a") = UnregisteredType());
+        m.def(
+            "should_fail",
+            [](int, UnregisteredType) {},
+            py::arg(),
+            py::arg("a") = UnregisteredType());
     });
-    m.def("bad_arg_def_unnamed", []{
+    m.def("bad_arg_def_unnamed", [] {
         auto m = py::module_::import("pybind11_tests");
-        m.def("should_fail", [](int, UnregisteredType) {}, py::arg(), py::arg() = UnregisteredType());
+        m.def(
+            "should_fail",
+            [](int, UnregisteredType) {},
+            py::arg(),
+            py::arg() = UnregisteredType());
     });
 
     // [workaround(intel)] ICC 20/21 breaks with py::arg().stuff, using py::arg{}.stuff works.
 
     // test_accepts_none
-    py::class_<NoneTester, std::shared_ptr<NoneTester>>(m, "NoneTester")
-        .def(py::init<>());
+    py::class_<NoneTester, std::shared_ptr<NoneTester>>(m, "NoneTester").def(py::init<>());
     m.def("no_none1", &none1, py::arg{}.none(false));
     m.def("no_none2", &none2, py::arg{}.none(false));
     m.def("no_none3", &none3, py::arg{}.none(false));
@@ -371,21 +576,19 @@ TEST_SUBMODULE(methods_and_attributes, m) {
     // test_casts_none
     // Issue #2778: implicit casting from None to object (not pointer)
     py::class_<NoneCastTester>(m, "NoneCastTester")
-          .def(py::init<>())
-          .def(py::init<int>())
-          .def(py::init([](py::none const&) { return NoneCastTester{}; }));
+        .def(py::init<>())
+        .def(py::init<int>())
+        .def(py::init([](py::none const &) { return NoneCastTester{}; }));
     py::implicitly_convertible<py::none, NoneCastTester>();
-    m.def("ok_obj_or_none", [](NoneCastTester const& foo) { return foo.answer; });
-
+    m.def("ok_obj_or_none", [](NoneCastTester const &foo) { return foo.answer; });
 
     // test_str_issue
     // Issue #283: __str__ called on uninitialized instance when constructor arguments invalid
     py::class_<StrIssue>(m, "StrIssue")
         .def(py::init<int>())
         .def(py::init<>())
-        .def("__str__", [](const StrIssue &si) {
-            return "StrIssue[" + std::to_string(si.val) + "]"; }
-        );
+        .def("__str__",
+             [](const StrIssue &si) { return "StrIssue[" + std::to_string(si.val) + "]"; });
 
     // test_unregistered_base_implementations
     //
@@ -408,8 +611,164 @@ TEST_SUBMODULE(methods_and_attributes, m) {
         // This one is in the registered class:
         .def("sum", &RegisteredDerived::sum);
 
-    using Adapted = decltype(py::method_adaptor<RegisteredDerived>(&RegisteredDerived::do_nothing));
+    using Adapted
+        = decltype(py::method_adaptor<RegisteredDerived>(&RegisteredDerived::do_nothing));
     static_assert(std::is_same<Adapted, void (RegisteredDerived::*)() const>::value, "");
+
+    // test_noexcept_base (issue #2234)
+    // In C++17, noexcept is part of the function type. Binding a noexcept method from an
+    // unregistered base class must resolve `self` to the derived type, not the base type.
+    py::class_<NoexceptDerived>(m, "NoexceptDerived")
+        .def(py::init<>())
+        // cpp_function(Return (Class::*)(Args...) const noexcept, ...)
+        .def("value", &NoexceptDerived::value)
+        // cpp_function(Return (Class::*)(Args...) noexcept, ...)
+        .def("set_value", &NoexceptDerived::set_value)
+        // cpp_function(Return (Class::*)(Args...) & noexcept, ...)
+        .def("increment", &NoexceptDerived::increment)
+        // cpp_function(Return (Class::*)(Args...) const & noexcept, ...)
+        .def("capped_value", &NoexceptDerived::capped_value);
+
+    // test_rvalue_ref_qualified_methods: rvalue-ref-qualified methods from an unregistered base.
+    // method_adaptor must rebind &&/const&& member pointers to the derived type.
+    py::class_<RValueRefDerived>(m, "RValueRefDerived")
+        .def(py::init<>())
+        // cpp_function(Return (Class::*)(Args...) &&, ...)
+        .def("take", &RValueRefDerived::take)
+        // cpp_function(Return (Class::*)(Args...) const &&, ...)
+        .def("peek", &RValueRefDerived::peek)
+#ifdef __cpp_noexcept_function_type
+        // cpp_function(Return (Class::*)(Args...) && noexcept, ...)
+        .def("take_noexcept", &RValueRefDerived::take_noexcept)
+        // cpp_function(Return (Class::*)(Args...) const && noexcept, ...)
+        .def("peek_noexcept", &RValueRefDerived::peek_noexcept)
+#endif
+        ;
+
+    // Verify that &&-qualified methods cannot be called on lvalues, only on rvalues.
+    // This confirms that the cpp_function lambda must use std::move(*c).*f, not c->*f.
+#if __cplusplus >= 201703L
+    static_assert(!std::is_invocable<std::string (RValueRefUnregisteredBase::*)() &&,
+                                     RValueRefUnregisteredBase &>::value,
+                  "&&-qualified method must not be callable on lvalue");
+    static_assert(std::is_invocable<std::string (RValueRefUnregisteredBase::*)() &&,
+                                    RValueRefUnregisteredBase &&>::value,
+                  "&&-qualified method must be callable on rvalue");
+#endif
+
+    // Verify method_adaptor preserves &&/const&& qualifiers when rebinding.
+    using AdaptedRRef = decltype(py::method_adaptor<RValueRefDerived>(&RValueRefDerived::take));
+    static_assert(std::is_same<AdaptedRRef, std::string (RValueRefDerived::*)() &&>::value, "");
+    using AdaptedConstRRef
+        = decltype(py::method_adaptor<RValueRefDerived>(&RValueRefDerived::peek));
+    static_assert(std::is_same<AdaptedConstRRef, int (RValueRefDerived::*)() const &&>::value, "");
+
+#ifdef __cpp_noexcept_function_type
+    // method_adaptor must also handle noexcept member function pointers (issue #2234).
+    // Verify the noexcept specifier is preserved in the resulting Derived pointer type.
+    using AdaptedConstNoexcept
+        = decltype(py::method_adaptor<NoexceptDerived>(&NoexceptDerived::value));
+    static_assert(
+        std::is_same<AdaptedConstNoexcept, int (NoexceptDerived::*)() const noexcept>::value, "");
+    using AdaptedNoexcept
+        = decltype(py::method_adaptor<NoexceptDerived>(&NoexceptDerived::set_value));
+    static_assert(std::is_same<AdaptedNoexcept, void (NoexceptDerived::*)(int) noexcept>::value,
+                  "");
+    using AdaptedRRefNoexcept
+        = decltype(py::method_adaptor<RValueRefDerived>(&RValueRefDerived::take_noexcept));
+    static_assert(std::is_same < AdaptedRRefNoexcept,
+                  std::string (RValueRefDerived::*)() && noexcept > ::value,
+                  "");
+    using AdaptedConstRRefNoexcept
+        = decltype(py::method_adaptor<RValueRefDerived>(&RValueRefDerived::peek_noexcept));
+    static_assert(std::is_same < AdaptedConstRRefNoexcept,
+                  int (RValueRefDerived::*)() const && noexcept > ::value,
+                  "");
+#endif
+
+    // test_noexcept_overload_cast (issue #2234)
+    // overload_cast must have noexcept operator() overloads so it can resolve noexcept methods.
+#ifdef PYBIND11_OVERLOAD_CAST
+    py::class_<NoexceptOverloaded>(m, "NoexceptOverloaded")
+        .def(py::init<>())
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) noexcept, false_type)
+        .def("method", py::overload_cast<int>(&NoexceptOverloaded::method))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) const noexcept, true_type)
+        .def("method_const", py::overload_cast<int>(&NoexceptOverloaded::method, py::const_))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) noexcept, false_type) float
+        .def("method_float", py::overload_cast<float>(&NoexceptOverloaded::method));
+    // overload_cast_impl::operator()(Return (*)(Args...) noexcept)
+    m.def("noexcept_free_func", py::overload_cast<int>(noexcept_free_func));
+    m.def("noexcept_free_func_float", py::overload_cast<float>(noexcept_free_func));
+
+    py::class_<RefQualifiedOverloaded>(m, "RefQualifiedOverloaded")
+        .def(py::init<>())
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) &, false_type)
+        .def("method_lref", py::overload_cast<int>(&RefQualifiedOverloaded::method))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) const &, true_type)
+        .def("method_const_lref",
+             py::overload_cast<int>(&RefQualifiedOverloaded::method, py::const_))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) &&, false_type)
+        .def("method_rref", py::overload_cast<float>(&RefQualifiedOverloaded::method))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) const &&, true_type)
+        .def("method_const_rref",
+             py::overload_cast<float>(&RefQualifiedOverloaded::method, py::const_))
+#    ifdef __cpp_noexcept_function_type
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) & noexcept, false_type)
+        .def("method_lref_noexcept", py::overload_cast<long>(&RefQualifiedOverloaded::method))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) const & noexcept, true_type)
+        .def("method_const_lref_noexcept",
+             py::overload_cast<long>(&RefQualifiedOverloaded::method, py::const_))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) && noexcept, false_type)
+        .def("method_rref_noexcept", py::overload_cast<double>(&RefQualifiedOverloaded::method))
+        // overload_cast_impl::operator()(Return (Class::*)(Args...) const && noexcept, true_type)
+        .def("method_const_rref_noexcept",
+             py::overload_cast<double>(&RefQualifiedOverloaded::method, py::const_))
+#    endif
+        ;
+#else
+    // Fallback using explicit static_cast for C++11/14
+    py::class_<NoexceptOverloaded>(m, "NoexceptOverloaded")
+        .def(py::init<>())
+        .def("method",
+             static_cast<py::str (NoexceptOverloaded::*)(int)>(&NoexceptOverloaded::method))
+        .def("method_const",
+             static_cast<py::str (NoexceptOverloaded::*)(int) const>(&NoexceptOverloaded::method))
+        .def("method_float",
+             static_cast<py::str (NoexceptOverloaded::*)(float)>(&NoexceptOverloaded::method));
+    m.def("noexcept_free_func", static_cast<int (*)(int)>(noexcept_free_func));
+    m.def("noexcept_free_func_float", static_cast<int (*)(float)>(noexcept_free_func));
+
+    py::class_<RefQualifiedOverloaded>(m, "RefQualifiedOverloaded")
+        .def(py::init<>())
+        .def("method_lref",
+             static_cast<py::str (RefQualifiedOverloaded::*)(int) &>(
+                 &RefQualifiedOverloaded::method))
+        .def("method_const_lref",
+             static_cast<py::str (RefQualifiedOverloaded::*)(int) const &>(
+                 &RefQualifiedOverloaded::method))
+        .def("method_rref",
+             static_cast<py::str (RefQualifiedOverloaded::*)(float) &&>(
+                 &RefQualifiedOverloaded::method))
+        .def("method_const_rref",
+             static_cast<py::str (RefQualifiedOverloaded::*)(float) const &&>(
+                 &RefQualifiedOverloaded::method))
+#    ifdef __cpp_noexcept_function_type
+        .def("method_lref_noexcept",
+             static_cast<py::str (RefQualifiedOverloaded::*)(long) & noexcept>(
+                 &RefQualifiedOverloaded::method))
+        .def("method_const_lref_noexcept",
+             static_cast<py::str (RefQualifiedOverloaded::*)(long) const & noexcept>(
+                 &RefQualifiedOverloaded::method))
+        .def("method_rref_noexcept",
+             static_cast < py::str (RefQualifiedOverloaded::*)(double)
+                 && noexcept > (&RefQualifiedOverloaded::method))
+        .def("method_const_rref_noexcept",
+             static_cast < py::str (RefQualifiedOverloaded::*)(double) const && noexcept
+                 > (&RefQualifiedOverloaded::method))
+#    endif
+        ;
+#endif
 
     // test_methods_and_attributes
     py::class_<RefQualified>(m, "RefQualified")
@@ -424,4 +783,6 @@ TEST_SUBMODULE(methods_and_attributes, m) {
         .def("func2", &RValueRefParam::func2)
         .def("func3", &RValueRefParam::func3)
         .def("func4", &RValueRefParam::func4);
+
+    pybind11_tests::exercise_is_setter::add_bindings(m);
 }
