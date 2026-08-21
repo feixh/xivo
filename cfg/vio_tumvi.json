@@ -1,0 +1,14 @@
+{
+    "estimator_cfg": "cfg/tumvi_cam0.json",
+    "viewer_cfg": "cfg/viewer.json",
+
+    "visualize": false,
+    "wait_time": 1,
+    "verbose": true,
+
+
+    "evaluation_cfg": {
+        "ignore_seconds": 0,   // seconds
+        "RPE_interval": 1.0   // seconds
+    }
+}
