@@ -26,6 +26,11 @@ void Estimator::UpdateStep(const timestamp_t &ts,
   new_features_.clear();
   inliers_.clear();
   in_current_ekf_update_.clear();
+  // `CleanupOOSFeatures` empties this at the end of every step; clear it here
+  // too so that a step that bails out early cannot leak stale pointers into the
+  // next one.
+  oos_features_.clear();
+  oos_used_.clear();
 
   // only used for data collection.
   just_dropped_feature_ids_.clear();
@@ -99,9 +104,17 @@ void Estimator::UpdateStep(const timestamp_t &ts,
     << "bookkeeping error in removing floating groups";
 #endif
 
-  if (!in_current_ekf_update_.empty()) {
+  // Out-of-state (MSCKF) measurements. Computed here, after all the group
+  // management of this step, so that the group state indices their Jacobians
+  // refer to are the ones the update will use.
+  int oos_rows = use_OOS_ ? ComputeOOSMeasurements() : 0;
+
+  if (!in_current_ekf_update_.empty() || oos_rows > 0) {
     instate_groups_ = graph.GetInstateGroups();
-    FilterUpdate();
+    FilterUpdate(oos_rows);
+  }
+  if (use_OOS_) {
+    CleanupOOSFeatures();
   }
 
   // Make accessors work.
@@ -206,8 +219,19 @@ void Estimator::ProcessTracks(const timestamp_t &ts,
     else if (!f->instate() && f->track_status() == TrackStatus::DROPPED) {
       just_dropped_feature_ids_.push_back(f->id());
 
-      graph.RemoveFeature(f);
-      Feature::Destroy(f);
+      if (use_OOS_) {
+        // The feature never made it into the state, but its observations still
+        // constrain the poses it was seen from -- keep it (and its observations
+        // in the graph) for the out-of-state update later in this step.
+        // `REJECTED_BY_TRACKER` keeps it out of `Criteria::Candidate` (which
+        // wants READY or INITIALIZING), so it cannot be promoted into the state
+        // between here and the update.
+        f->SetStatus(FeatureStatus::REJECTED_BY_TRACKER);
+        oos_features_.push_back(f);
+      } else {
+        graph.RemoveFeature(f);
+        Feature::Destroy(f);
+      }
       it = tracks.erase(it);
     }
 
