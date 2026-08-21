@@ -685,8 +685,13 @@ void Feature::FillJacobianBlock(MatX &H, int offset) {
   int goff = kGroupBegin + 6 * ref_->sind();
   int foff = kFeatureBegin + 3 * sind();
 
+  // NOTE: the second destination used to be `goff` as well, so the reference
+  // group's rotation block was overwritten by its translation block and the
+  // translation block at `goff + 3` was never written at all. `J_` itself is
+  // correct (see ComputeJacobian above); only this copy into `H` was wrong,
+  // which is why OnePointRANSAC -- which reads `J_` directly -- was unaffected.
   H.block<2, 3>(offset, goff) = J_.block<2, 3>(0, goff);
-  H.block<2, 3>(offset, goff) = J_.block<2, 3>(0, goff + 3);
+  H.block<2, 3>(offset, goff + 3) = J_.block<2, 3>(0, goff + 3);
   H.block<2, 3>(offset, foff) = J_.block<2, 3>(0, foff);
 
 #ifdef USE_ONLINE_CAMERA_CALIB
