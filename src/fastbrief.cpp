@@ -18,9 +18,12 @@ namespace xivo {
 void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors,
                           FastBrief::TDescriptor &mean)
 {
-  // initialize
-  mean = new uint64_t[4];
-  memset( &mean, 0, sizeof( uint64_t ) * (BRIEF_BYTES >> 3) );
+  // initialize. `mean` is a `uint64_t*&`, so `&mean` is the address of the
+  // caller's *pointer* -- memset'ing that clobbered the pointer itself (plus 24
+  // bytes past it on the stack) and left the freshly allocated buffer
+  // uninitialized.
+  mean = new uint64_t[BRIEF_BYTES >> 3];
+  memset( mean, 0, sizeof( uint64_t ) * (BRIEF_BYTES >> 3) );
 
   if(descriptors.empty()) return;
 
@@ -31,10 +34,12 @@ void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors
 
   vector<FastBrief::pDescriptor>::const_iterator it;
   for(it = descriptors.begin(); it != descriptors.end(); ++it) {
-    // v[ p >> 6 ] & ((unsigned long) 1 << ( i & ( (i << 6)-1) )
+    // Bit i of a uint64_t array is word i>>6, bit i&63. The original
+    // `i & ((i<<6)-1)` is not a bit index at all: for i=64 it yields 64, an
+    // out-of-range shift count for uint64_t (UB).
     FastBrief::TDescriptor desc = **it;
     for(int i = 0; i < L; ++i) {
-      if ( desc[ i >> 6 ] & ((uint64_t)1 << ( i & ( (i<<6)-1 ) ) ) ) {
+      if ( desc[ i >> 6 ] & ((uint64_t)1 << ( i & 63 ) ) ) {
         ++counters[i];
       }
     }
@@ -42,7 +47,7 @@ void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors
 
   for(int i = 0; i < L; ++i) {
     if(counters[i] > N2) {
-      mean[ i >> 6 ] |= ((uint64_t)1 << ( i & ( (i<<6)-1 ) ) );
+      mean[ i >> 6 ] |= ((uint64_t)1 << ( i & 63 ) );
     }
   }
 

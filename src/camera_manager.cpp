@@ -53,7 +53,13 @@ CameraManager::CameraManager(const Json::Value &cfg) : model_{Unknown{}} {
   fy_ = fy;
   cx_ = cx;
   cy_ = cy;
-  fl_ = 0.5 * std::sqrt(fx * fx + fy * fy);
+  // Must match UpdateState() in camera_manager.h, which uses
+  // sqrt(0.5*(fx^2+fy^2)) -- the RMS of the two focal lengths. The old
+  // expression here was 0.5*sqrt(fx^2+fy^2), i.e. a factor 1/sqrt(2) too small
+  // (135.0 instead of 191.0 for TUM-VI cam0), so `initial_std_x/y` came out
+  // sqrt(2)x too large in normalized coordinates, and `fl_` jumped by sqrt(2)
+  // on the first autocalibration update.
+  fl_ = std::sqrt(0.5 * (fx * fx + fy * fy));
 }
 
 } // namespace xivo

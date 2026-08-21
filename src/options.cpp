@@ -54,10 +54,26 @@ bool Criteria::CandidateComparison(FeaturePtr f1, FeaturePtr f2) {
     score2 = -1.0 * (f2->P().diagonal().norm() + f2->outlier_counter());
   }
   else {
-    LOG(ERROR) << "Invalid feature score type";
+    LOG(ERROR) << "Invalid feature score type " << score_type
+               << "; falling back to DepthUncertainty";
+    score1 = -1.0 * (f1->P())(2,2);
+    score2 = -1.0 * (f2->P())(2,2);
   }
 
-  return (s1 > s2) || (s1 == s2 && f1->score() > f2->score());
+  // score1/score2 used to be computed and then thrown away in favour of
+  // f->score(), which is hard-wired to -P_(2,2) -- so "CovarianceDiagNorm" and
+  // "CovarianceDiagNormPlusOutlierCount" were unreachable.
+  if (s1 != s2) {
+    return s1 > s2;
+  }
+  if (score1 != score2) {
+    return score1 > score2;
+  }
+  // Ties are common (every freshly initialized candidate carries the identical
+  // covariance), and the caller sorts a vector that MakePtrVectorUnique ordered
+  // by *pointer value*. Breaking the tie on id keeps promotion deterministic
+  // across runs instead of depending on the heap layout.
+  return f1->id() < f2->id();
 }
 
 } // namespace xivo

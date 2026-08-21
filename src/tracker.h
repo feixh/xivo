@@ -118,11 +118,17 @@ private:
 
   // Matching newly detected tracks to tracks that were just dropped
   bool match_dropped_tracks_;
+  /** If false, the KLT tracker ignores the filter's predicted measurement and
+   * seeds each search from the previous pixel location instead. */
+  bool use_prediction_;
   cv::Ptr<cv::BFMatcher> matcher_;
 
 private:
+  /** Detects new features. Entries of `newly_dropped_tracks` that get rescued
+   * by descriptor matching are set to `nullptr`, so the caller can tell which
+   * ones must still be marked DROPPED. Taken by reference for that reason. */
   void DetectLK(const cv::Mat &img, int num_to_add,
-                std::vector<FeaturePtr> newly_dropped_tracks,
+                std::vector<FeaturePtr> &newly_dropped_tracks,
                 bool check_homography, cv::Mat H);
 
   /** An interface to OpenCV's `findHomography` that checks for outliers. */

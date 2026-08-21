@@ -19,7 +19,7 @@
   },
 
   "tracker_cfg": {
-    "use_prediction": false,
+    "use_prediction": true,
     "mask_size": 15,
     "margin": 8, // image boundary to mask out
     "num_features_min": 45,
