@@ -137,16 +137,45 @@ public:
 
   void inflate_cov(number_t factor) { P_ *= factor; }
 
+  /** Number of rows of the marginalized out-of-state measurement, i.e. of
+   *  `ro()` and `Ho()`. */
   int oos_inn_size() const { return oos_jac_counter_; }
+  /** Number of observations that went into the out-of-state measurement. */
+  int oos_num_obs() const { return oos_num_obs_; }
+  /** Mean per-view reprojection error (pixels) of the last call to
+   *  `RefineOOSDepth`. */
+  number_t oos_mean_reproj_err() const { return oos_mean_reproj_err_; }
 
-  /** Computes the Jacobian for the out-of-state (MSCKF) measurement model. */
+  /** The observations of this feature that an out-of-state update can use:
+   *  those made from groups that are in the state, oldest first, thinned down to
+   *  `options.max_observations`. Idempotent, so the depth refinement and the
+   *  Jacobian can be run on the very same rows. */
+  std::vector<Obs> SelectOOSObservations(const std::vector<Obs> &obs,
+                                         const OOSOptions &options) const;
+
+  /** Gauss-Newton refinement of the 3D point over all of `views`, in the
+   *  log-depth parameterization w.r.t. the reference camera. Returns false --
+   *  and leaves `x_` at the best state found -- when the refinement diverges, or
+   *  when the mean per-view reprojection error or the depth is out of bounds, in
+   *  which case the feature must not be used for an update. */
+  bool RefineOOSDepth(const SE3 &gbc, const std::vector<Obs> &views,
+                      const OOSOptions &options);
+
+  /** Computes the Jacobian for the out-of-state (MSCKF) measurement model, and
+   *  marginalizes the 3D point out of it. Returns the number of rows of the
+   *  resulting measurement (`2n - 3` for n observations), or 0 if the feature
+   *  has too few observations from in-state groups. */
   int ComputeOOSJacobian(const std::vector<Obs> &obs, const Mat3 &Rbc,
-                         const Vec3 &Tbc);
+                         const Vec3 &Tbc, const OOSOptions &options);
   /** Contains the equations used in `Feature::ComputeOOSJacobian` for each
    *  observation.
    *  \todo make the following private */
   void ComputeOOSJacobianInternal(const Obs &obs, const Mat3 &Rbc,
                                   const Vec3 &Tbc);
+  /** Projects the first `rows` rows of the out-of-state Jacobian onto the left
+   *  nullspace of `oos_.Hf`, which eliminates the 3D point. Returns the number
+   *  of rows left, `rows - 3`. */
+  int MarginalizeOOSPoint(int rows);
 
   /** Compute Jacobians for Loop Closure measurement update. */
   void ComputeLCJacobian(const Obs &obs, const Mat3 &Rbc, const Vec3 &Tbc,
@@ -321,8 +350,15 @@ private:
   /** Current MSCKF measurement Jacobians (both Hf and Hx) and innovation */
   OOSJacobian oos_;
 
-  /** Number of measurements in the MSCKF measurement update. */
+  /** While filling `oos_`: number of observations processed so far. Afterwards:
+   *  number of rows of the marginalized MSCKF measurement. */
   int oos_jac_counter_;
+
+  /** Number of observations that went into the MSCKF measurement. */
+  int oos_num_obs_;
+
+  /** Mean per-view reprojection error (pixels) after `RefineOOSDepth`. */
+  number_t oos_mean_reproj_err_;
 
   /** id of a past feature this feature was loop-closed to. */
   int lc_match_;

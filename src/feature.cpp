@@ -78,6 +78,9 @@ void Feature::Reset(number_t x, number_t y) {
   outlier_counter_ = 0;
   lc_match_ = -1;
   triangulation_successful_ = false;
+  oos_jac_counter_ = 0;
+  oos_num_obs_ = 0;
+  oos_mean_reproj_err_ = -1;
 
   sim_.Xs << -1, -1, -1;
   sim_.xp << -1, -1;

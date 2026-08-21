@@ -152,6 +152,11 @@ add_executable(unitTests_Jacobians
 target_link_libraries(unitTests_Jacobians ${libxivo} ${deps} gtest gtest_main)
 add_test(NAME Jacobians COMMAND unitTests_Jacobians)
 
+add_executable(unitTests_OOSUpdate
+               test/unittest_oos_update.cpp)
+target_link_libraries(unitTests_OOSUpdate ${libxivo} ${deps} gtest gtest_main)
+add_test(NAME OOSUpdate COMMAND unitTests_OOSUpdate)
+
 add_executable(unitTests_pinhole
                test/unittest_camera_pinhole.cpp)
 target_link_libraries(unitTests_pinhole xest ${deps} gtest gtest_main)
