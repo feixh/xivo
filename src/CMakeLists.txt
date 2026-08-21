@@ -106,6 +106,7 @@ add_library(xest STATIC
         mm.cpp
         mapper.cpp
         camera_manager.cpp
+        stereo.cpp
         imu.cpp)
 if (IS_MAC)
   target_link_libraries(xest INTERFACE ${deps} "-Wl, -framework OpenGL")
@@ -176,6 +177,11 @@ add_executable(unitTests_triangulation
                test/unittest_triangulation.cpp)
 target_link_libraries(unitTests_triangulation xest ${deps} gtest gtest_main)
 add_test(NAME Triangulation COMMAND unitTests_triangulation)
+
+add_executable(unitTests_stereo
+               test/unittest_stereo.cpp)
+target_link_libraries(unitTests_stereo xest ${deps} gtest gtest_main)
+add_test(NAME Stereo COMMAND unitTests_stereo)
 
 if (BUILD_G2O)
   message(INFO ${libxivo})

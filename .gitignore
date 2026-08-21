@@ -26,3 +26,6 @@ doc/latex/
 *.synctex.gz
 
 tumvi_*
+# ... but the tumvi configs are source, not output. Without this, generated
+# configs like cfg/tumvi_stereo.json are silently dropped from commits.
+!cfg/tumvi_*.json
