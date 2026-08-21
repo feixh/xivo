@@ -1,4 +1,6 @@
 build
+build-*/
+out-*/
 .idea
 *.pyc
 estimator/*json

@@ -26,6 +26,9 @@ DEFINE_string(seq, "room1", "Sequence of TUM VI benchmark to play with.");
 DEFINE_int32(cam_id, 0, "Camera id.");
 DEFINE_string(out, "out_state", "Output file path.");
 DEFINE_string(graphout, "", ".dot file to save output graph to");
+DEFINE_int32(max_entries, 0,
+             "Stop after this many dataset entries; 0 (default) plays the "
+             "whole sequence. Useful for short runs under a sanitizer.");
 
 using namespace xivo;
 
@@ -61,11 +64,16 @@ int main(int argc, char **argv) {
 
     std::vector<msg::Pose> traj_est;
 
-    for (int i = 0; i < loader->size(); ++i) {
+    int num_entries = loader->size();
+    if (FLAGS_max_entries > 0 && FLAGS_max_entries < num_entries) {
+      num_entries = FLAGS_max_entries;
+    }
+
+    for (int i = 0; i < num_entries; ++i) {
       auto raw_msg = loader->Get(i);
 
       if (verbose && i % 1000 == 0) {
-        std::cout << i << "/" << loader->size() << std::endl;
+        std::cout << i << "/" << num_entries << std::endl;
       }
 
       if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {

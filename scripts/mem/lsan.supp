@@ -1,0 +1,37 @@
+# LeakSanitizer suppressions for XIVO leak runs.
+#
+# Only third-party one-time allocations belong here. Every entry needs a reason;
+# if a suppression is hiding XIVO's own allocation, that is a bug to fix, not to
+# suppress. Match strings are checked against the symbolized stack frames, so
+# `leak:<substring>` suppresses any leak whose stack mentions that substring.
+#
+# Used by scripts/mem/leakcheck.sh via LSAN_OPTIONS=suppressions=...
+
+# glog installs its own singletons (LogMessage internals, vmodule list, the
+# LogDestination per severity) that it intentionally never frees; it has no
+# shutdown API that releases them.
+leak:google::LogMessage
+leak:google::InitGoogleLogging
+leak:google::LogDestination
+
+# gflags keeps its registered-flag registry alive for the life of the process.
+leak:gflags::
+
+# OpenCV's lazily-created singletons: the thread pool / TLS storage, the
+# algorithm registry and the ipp/ocl state. Created once, freed never.
+leak:cv::TLSDataContainer
+leak:cv::getThreadID
+leak:cv::ThreadID
+leak:cv::ocl::
+
+# CPython interning, module state, and the pymalloc arenas are still reachable
+# at interpreter exit when a C extension is loaded; relevant to the pyxivo
+# runs only.
+leak:_PyObject_GC_
+leak:_PyMem_
+leak:PyObject_Malloc
+leak:PyType_Ready
+leak:PyUnicode_
+leak:_PyRuntimeState_Init
+leak:pybind11::
+leak:libpython3
