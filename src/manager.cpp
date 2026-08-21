@@ -309,7 +309,18 @@ void Estimator::EnforceMaxGroupLifetime() {
 
 void Estimator::DiscardAffectedGroups() {
   Graph& graph{*Graph::instance()};
-  for (auto g : affected_groups_) {
+  // `affected_groups_` is an unordered_set keyed by pointer, so its iteration
+  // order depends on the hash of the addresses and therefore on ASLR. That
+  // would be harmless for a read-only loop, but this one *mutates the graph*:
+  // FindNewOwnersForFeaturesOf reassigns feature ownership, so discarding one
+  // group changes whether the next group still meets the instate-feature
+  // threshold below. Iterating in id order makes the outcome reproducible.
+  // See notes-stereo/m3a-determinism.md.
+  std::vector<GroupPtr> affected(affected_groups_.begin(),
+                                 affected_groups_.end());
+  std::sort(affected.begin(), affected.end(),
+            [](GroupPtr a, GroupPtr b) { return a->id() < b->id(); });
+  for (auto g : affected) {
     std::vector<FeaturePtr> instate_features_of_g = graph.GetFeaturesIf(
       [g](FeaturePtr f) { return (f->ref() == g) && (f->instate()); }
     );
@@ -483,10 +494,17 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
   // Sort groups by the number of features that they own (none of these
   // features should be instate). Comparison function returns True when g1 is
   // better than g2
+  // Ties on the feature count are broken by id for the same reason
+  // Criteria::CandidateComparison does it: the input order here comes from a
+  // pointer-value sort, so without a deterministic final tie-break the outcome
+  // depends on heap addresses. Small integer counts tie constantly.
   auto comp_fun = [&graph](GroupPtr g1, GroupPtr g2) {
     int nf1 = graph.NumFeatureCandidatesOwnedBy(g1);
     int nf2 = graph.NumFeatureCandidatesOwnedBy(g2);
-    return (nf1 > nf2);
+    if (nf1 != nf2) {
+      return nf1 > nf2;
+    }
+    return g1->id() < g2->id();
   };
   std::sort(candidates.begin(), candidates.end(), comp_fun);
 

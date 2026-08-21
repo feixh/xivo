@@ -41,6 +41,8 @@ bool Criteria::CandidateComparison(FeaturePtr f1, FeaturePtr f2) {
 
   number_t score1, score2;
   if (score_type == "DepthUncertainty") {
+    // Same quantity `Feature::score()` returns, spelled out here so all three
+    // options go through one code path.
     score1 = -1.0 * (f1->P())(2,2);
     score2 = -1.0 * (f2->P())(2,2);
   }
@@ -55,9 +57,34 @@ bool Criteria::CandidateComparison(FeaturePtr f1, FeaturePtr f2) {
   }
   else {
     LOG(ERROR) << "Invalid feature score type";
+    score1 = f1->score();
+    score2 = f2->score();
   }
 
-  return (s1 > s2) || (s1 == s2 && f1->score() > f2->score());
+  // score1/score2 were previously computed and then dropped on the floor: the
+  // comparison used f->score() unconditionally, so `comparison_score_type` was
+  // a silently ignored knob. The default ("DepthUncertainty") is exactly what
+  // score() returns, so honoring it here leaves default behavior unchanged.
+  if (s1 != s2) {
+    return s1 > s2;
+  }
+  if (score1 != score2) {
+    return score1 > score2;
+  }
+  // Tie-break on id so this is a *total* order, not merely a strict weak one.
+  //
+  // Without this the result of std::sort over tied features depends on their
+  // order on input, and callers reach here via MakePtrVectorUnique, which sorts
+  // by *pointer value*. Ties are the common case, not a rare one: every freshly
+  // initialized candidate carries the same initial depth variance, so all of
+  // them compare equal. The candidate list is then truncated at kMaxFeature,
+  // which means which of several equally-uncertain features got promoted into
+  // the state was decided by heap addresses -- and therefore by ASLR, varying
+  // from run to run. Measured on TUM-VI room3: ~1 run in 8 produced a different
+  // trajectory (ATE 0.1549 vs 0.1703). See notes-stereo/m3a-determinism.md.
+  //
+  // Ascending id prefers the older feature, which has the longer track.
+  return f1->id() < f2->id();
 }
 
 } // namespace xivo

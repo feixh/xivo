@@ -183,6 +183,11 @@ add_executable(unitTests_stereo
 target_link_libraries(unitTests_stereo xest ${deps} gtest gtest_main)
 add_test(NAME Stereo COMMAND unitTests_stereo)
 
+add_executable(unitTests_determinism
+               test/unittest_determinism.cpp)
+target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)
+add_test(NAME Determinism COMMAND unitTests_determinism)
+
 # The loader lives in xapp, so this one links the application library too.
 # jsoncpp is repeated after ${deps}: `common` sits after `jsoncpp` in that list
 # and pulls in Json symbols, which a single-pass static link cannot resolve
