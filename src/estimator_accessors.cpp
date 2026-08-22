@@ -676,11 +676,14 @@ std::vector<std::tuple<int, Vec2, MatXf>> Estimator::tracked_features() {
   for (auto f : tracker->features_)
   {
     int id = f->id();
-    cv::Mat descriptor = f->descriptor();
 
-    // Convert from cv::Mat to matrix
+    // Convert from cv::Mat to matrix. Features have no descriptor at all when
+    // extract_descriptor is off, in which case this stays empty rather than
+    // reading descriptors_.back() on an empty vector.
     MatXf descriptor_eigen;
-    cv2eigen(descriptor, descriptor_eigen);
+    if (f->has_descriptor()) {
+      cv2eigen(f->descriptor(), descriptor_eigen);
+    }
 
     Vec2 kp_vector = f->xp();
 

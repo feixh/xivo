@@ -18,6 +18,9 @@
 #                     bytes-allocated puts the detailed snapshots at comparable
 #                     points of the run.
 #
+# --detailed-freq/--max-snapshots are the values the M0/M1 baseline profiles were
+# taken with; keep them if you want to diff against those files.
+#
 # Needs the `valgrind` build variant: -march=native emits AVX-512 that valgrind
 # 3.26 cannot execute (SIGILL inside Eigen's static initialisers).
 #   scripts/mem/build.sh valgrind
@@ -31,10 +34,15 @@ ENTRIES="${4:-8000}"
 XIVO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WS="$(cd "$XIVO/.." && pwd)"
 BIN="$XIVO/out-valgrind/bin/vio"
-DATA="$WS/data/tumvi/dataset-${SEQ}_512_16"
+# bin/vio builds the sequence directory itself (`<root>/dataset-<seq>_512_16`,
+# see GetDirs in src/loader.cpp), so -root is the parent of the sequences.
+ROOT="$WS/data/tumvi"
 
 [ -x "$BIN" ] || { echo "missing $BIN -- run scripts/mem/build.sh valgrind" >&2; exit 1; }
-[ -d "$DATA" ] || { echo "missing dataset $DATA" >&2; exit 1; }
+[ -d "$ROOT/dataset-${SEQ}_512_16" ] || {
+  echo "missing dataset $ROOT/dataset-${SEQ}_512_16" >&2; exit 1; }
+
+mkdir -p "$(dirname "$OUT")"
 
 export LD_LIBRARY_PATH="$WS/dependencies/opencv_install/lib:${LD_LIBRARY_PATH:-}"
 export XIVO_RANDOM_SEED=0
@@ -43,13 +51,15 @@ cd "$XIVO"
 valgrind --tool=massif \
   --massif-out-file="$OUT" \
   --threshold=0.05 \
-  --detailed-freq=1 \
-  --max-snapshots=100 \
+  --detailed-freq=4 \
+  --max-snapshots=40 \
   --time-unit=B \
   "$BIN" \
   -cfg "cfg/${CFG}.json" \
-  -root "$DATA" \
+  -root "$ROOT" \
   -dataset tumvi \
+  -seq "$SEQ" \
+  -out "$OUT.traj" \
   -max_entries "$ENTRIES" \
   >/dev/null
 

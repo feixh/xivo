@@ -62,8 +62,6 @@ int main(int argc, char **argv) {
   // setup I/O for saving results
   if (std::ofstream ostream{FLAGS_out, std::ios::out}) {
 
-    std::vector<msg::Pose> traj_est;
-
     int num_entries = loader->size();
     if (FLAGS_max_entries > 0 && FLAGS_max_entries < num_entries) {
       num_entries = FLAGS_max_entries;
@@ -106,7 +104,11 @@ int main(int argc, char **argv) {
         LOG(FATAL) << "Invalid entry type.";
       }
 
-      traj_est.emplace_back(est->ts(), est->gsb());
+      // The pose is streamed straight to `ostream`; it used to also be
+      // accumulated into a std::vector<msg::Pose> that nothing ever read, which
+      // grew by 96 bytes for every dataset entry -- image *and* IMU -- and was
+      // the largest single accumulating block in the process (~3.1 MB by the end
+      // of room1, ~4.7 MB across the last reallocation).
       Vec3 Tsb = (Vec3)est->gsb().translation();
       Vec3 Wsb = (Vec3)est->gsb().so3().log();
       ostream << StrFormat("%ld", est->ts().count()) << " "

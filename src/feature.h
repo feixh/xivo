@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "glog/logging.h"
+
 #include "component.h"
 #include "core.h"
 #include "jac.h"
@@ -37,18 +39,39 @@ public:
   /** Deletes the entire history of tracks and starts a new vector. */
   void Reset(number_t x, number_t y) {
     clear();
+    // Tracks are pooled objects (see MemoryManager): Reset is how a slot is
+    // handed to its next tenant, and it is the only chance to drop the previous
+    // one's data. Without this the descriptor history was inherited by every
+    // subsequent tenant of the slot and grew for the whole run.
+    descriptors_.clear();
     status_ = TrackStatus::CREATED;
     push_back(Vec2(x, y));
   }
 
   TrackStatus status() const { return status_; }
   void SetStatus(TrackStatus status) { status_ = status; }
-  void SetDescriptor(const cv::Mat &descriptor) { descriptors_.push_back(descriptor); }
+  /** Stores a *copy* of the descriptor.
+   *
+   *  Every caller passes `all_descriptors.row(i)`, which is a view sharing the
+   *  per-frame descriptor matrix OpenCV filled in. Keeping the view keeps that
+   *  whole matrix -- 110-270 keypoints of it -- alive for one 32-byte row, so
+   *  holding on to a handful of rows pinned megabytes.
+   */
+  void SetDescriptor(const cv::Mat &descriptor) {
+    descriptors_.push_back(descriptor.clone());
+  }
   void SetKeypoint(const cv::KeyPoint &keypoint) { keypoint_ = keypoint; }
   const cv::KeyPoint &keypoint() const { return keypoint_; }
   cv::KeyPoint &keypoint() { return keypoint_; }
-  const cv::Mat &descriptor() const { return descriptors_.back(); }
-  cv::Mat &descriptor() { return descriptors_.back(); }
+  bool has_descriptor() const { return !descriptors_.empty(); }
+  const cv::Mat &descriptor() const {
+    CHECK(!descriptors_.empty()) << "track has no descriptor";
+    return descriptors_.back();
+  }
+  cv::Mat &descriptor() {
+    CHECK(!descriptors_.empty()) << "track has no descriptor";
+    return descriptors_.back();
+  }
   const std::vector<cv::Mat>& GetAllDescriptors() { return descriptors_; }
   FastBrief::TDescriptor GetDBoWDesc();
   std::vector<FastBrief::TDescriptor> GetAllDBoWDesc();

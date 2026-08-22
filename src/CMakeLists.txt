@@ -139,43 +139,59 @@ target_link_libraries(feature_tracker_only ${libxivo} gflags::gflags)
 ################################################################################
 # TESTS
 ################################################################################
+# The test binaries open fixtures by relative path (e.g.
+# src/test/camera_configs.json), so ctest has to run them from the source root
+# the way a hand-run `bin/unitTests_*` does -- hence WORKING_DIRECTORY below.
 add_executable(unitTests_NumericalAlgorithms
                test/unittest_givens.cpp
                test/unittest_helpers.cpp)
 target_link_libraries(unitTests_NumericalAlgorithms xest ${deps} gtest gtest_main)
-add_test(NAME NumericalAlgorithms COMMAND unitTests_NumericalAlgorithms)
+add_test(NAME NumericalAlgorithms COMMAND unitTests_NumericalAlgorithms
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_Jacobians
                test/unittest_jacobians_instate.cpp
                test/unittest_jacobians_oos.cpp
                test/unittest_helpers.cpp)
 target_link_libraries(unitTests_Jacobians ${libxivo} ${deps} gtest gtest_main)
-add_test(NAME Jacobians COMMAND unitTests_Jacobians)
+add_test(NAME Jacobians COMMAND unitTests_Jacobians
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_pinhole
                test/unittest_camera_pinhole.cpp)
 target_link_libraries(unitTests_pinhole xest ${deps} gtest gtest_main)
-add_test(NAME CamerasPinhole COMMAND unitTests_pinhole)
+add_test(NAME CamerasPinhole COMMAND unitTests_pinhole
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_radtan
                test/unittest_camera_radtan.cpp)
 target_link_libraries(unitTests_radtan xest ${deps} gtest gtest_main)
-add_test(NAME CamerasRadtan COMMAND unitTests_radtan)
+add_test(NAME CamerasRadtan COMMAND unitTests_radtan
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_equi
                test/unittest_camera_equi.cpp)
 target_link_libraries(unitTests_equi xest ${deps} gtest gtest_main)
-add_test(NAME CamerasEqui COMMAND unitTests_equi)
+add_test(NAME CamerasEqui COMMAND unitTests_equi
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_atan
                test/unittest_camera_atan.cpp)
 target_link_libraries(unitTests_atan xest ${deps} gtest gtest_main)
-add_test(NAME CamerasAtan COMMAND unitTests_atan)
+add_test(NAME CamerasAtan COMMAND unitTests_atan
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_triangulation
                test/unittest_triangulation.cpp)
 target_link_libraries(unitTests_triangulation xest ${deps} gtest gtest_main)
-add_test(NAME Triangulation COMMAND unitTests_triangulation)
+add_test(NAME Triangulation COMMAND unitTests_triangulation
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(unitTests_descriptor_memory
+               test/unittest_descriptor_memory.cpp)
+target_link_libraries(unitTests_descriptor_memory xest ${deps} gtest gtest_main)
+add_test(NAME DescriptorMemory COMMAND unitTests_descriptor_memory
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 if (BUILD_G2O)
   message(INFO ${libxivo})

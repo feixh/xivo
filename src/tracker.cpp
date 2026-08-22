@@ -244,7 +244,10 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
   std::vector<bool> matched(kps.size(), false);
   std::vector<int> matchIdx(kps.size(), -1);
 
-  if (match_dropped_tracks_ &&
+  // extract_descriptor_ is part of the condition because the rescue below
+  // matches *descriptors*: with it off no track has one, and GetDescriptors
+  // would read Track::descriptors_.back() on an empty vector.
+  if (match_dropped_tracks_ && extract_descriptor_ &&
       (newly_dropped_tracks.size() > 0) &&
       (kps.size() > 0))
   {
@@ -778,6 +781,12 @@ bool MaskValid(const cv::Mat &mask, number_t x, number_t y) {
 
 cv::Mat GetDescriptors(std::vector<FeaturePtr> fvec)
 {
+  // fvec[0] was indexed unconditionally, and descriptor() is
+  // descriptors_.back(); neither is safe without these two checks.
+  if (fvec.empty() || !fvec[0]->has_descriptor()) {
+    return cv::Mat();
+  }
+
   int d_size = fvec[0]->descriptor().cols;
   int d_type = fvec[0]->descriptor().type();
 
