@@ -57,6 +57,16 @@ Please see our [wiki](https://github.com/ucla-vision/xivo/wiki) for usage instru
 
 ## New Features (in the era of coding agent, developed by coding agent)
 
+### Intro (written by human)
+The original repo does not implement the stereo + IMU combination, and only partially implements the out-of-state (also known as multi-state constraint kalman filter or MSCKF) update. 
+
+Here, I used Claude Code to implement both as an experiment: Is coding agent as of today (August 2026) is capable of implementing such features that require domain-specific knowledge. It turns out that the coding agent is doing an Okay job -- it is able to implement the algorithm, implement some tests, and also tunes and tests the implementation against a simple benchmark (room1 - room6 in TUM-VI, 6 sequences in total) to ensure that 1/ there is no performance regression for the existing features, and 2/ the algorithms implemented outperform the original system which is the expected outcome.
+
+**Note**: Even though the coding agent manages to implement the algorithm and advances the performance, there is no guarantee that the implemented algorithm is free of bugs and mathematicall correct. I didn't manually check the implementation. Again, this is an experiment aiming to test coding agent's performance in domains that require deep expertise.
+
+Now, the rest of this section below are written by a coding agent, the algorithms described in these sub-sections, of course, are implemented also by a coding agent. This intro is written by me, a 35-year old flesh-and-blood human being.
+
+
 ### Stereo + IMU
 
 This branch adds stereo-camera support: a second camera in the registry, a fixed
@@ -132,7 +142,7 @@ at upstream capacity. `-DXIVO_OUTPUT_SUFFIX=_foo` puts a variant build in
 `bin_foo/` and `lib_foo/` so it can sit beside the default one; `scripts/pyxivo.py`
 reads `XIVO_LIB` to pick which to import.
 
-### Out-of-state (MSCKF) update
+### Out-of-state update
 
 When the tracker drops a track that never made it into the state, its observations
 are triangulated and the 3-D point is marginalized out through the left nullspace
