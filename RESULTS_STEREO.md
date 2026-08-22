@@ -33,6 +33,75 @@ the monocular result at upstream capacity.
 | room6 | 0.0278 | 0.0320 | 0.0103 | 0.531 | 75.1% |
 | **mean** | **0.0476** | **0.0575** | **0.0145** | **0.6206** | 73.8% |
 
+## Speed and memory
+
+The accuracy above is bought with compute. Measured on one core (`OMP_NUM_THREADS=1
+OPENCV_FOR_THREADS_NUM=1 OPENBLAS_NUM_THREADS=1`), `-mode runOnly`, two repeats per
+cell, arms interleaved across repeats; wall clock includes PNG decode and the Python
+feed loop. room1 is 2821 frames, room6 is 2636.
+
+| arm | EKF / tracker | room1 FPS | room6 FPS | slowdown | vs the 20 Hz camera | peak RSS | mean ATE@0.02 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| monocular, upstream | 30 / 60 | 88.5 | 90.4 | 1.0× | 4.5× real time | 153 MB | 0.1396 |
+| stereo, upstream capacity | 30 / 60 | 45.2 | 44.1 | 2.0× | 2.2× real time | 161 MB | not scored |
+| monocular, new capacity | 90 / 180 | 20.5 | 19.4 | 4.3–4.7× | 1.0× real time | 447 MB | 0.0953 |
+| **stereo, shipped** | 90 / 180 | **11.8** | **11.3** | **7.5–8.0×** | **0.6× real time** | 454 MB | 0.0575 |
+
+**The shipped configuration runs at about 11.5 FPS on one core, against ~89 FPS at
+upstream capacity — 7.5–8× slower, and no longer real time on this dataset.** The
+2×2 separates the two causes: stereo alone costs 2.0× (two images, two KLT passes,
+the left→right match and its gating), the capacity increase alone costs 4.3–4.7×,
+and together 7.5× — slightly less than the product, because some per-frame cost is
+fixed.
+
+### Where the time goes
+
+Per frame, room1, mean of two repeats. `visual-meas` is XIVO's own timer and
+excludes image decode; `propagation` is per IMU sample, of which there are 9.97 per
+frame.
+
+| component | mono 30/60 | stereo 90/180 | factor |
+| --- | --- | --- | --- |
+| track (KLT, + stereo match) | 2.23 | 14.96 | 6.7× |
+| MH gating | 0.42 | 9.50 | 23× |
+| stereo geometric gating | — | 8.84 | new |
+| EKF update proper | 1.26 | 36.18 | 29× |
+| **`visual-meas` total** | **4.44** | **71.03** | **16×** |
+| IMU propagation, per sample | 0.330 | 0.672 | 2.0× |
+| wall clock per frame | 11.30 | 84.92 | 7.5× |
+
+The cost is in the **covariance update, not the front end**. Tripling the in-state
+feature count made the EKF update 29× more expensive — an empirical exponent of
+about 2.7 on state size, consistent with the cubic-ish cost of a dense EKF update —
+while KLT on two images is only 15 ms of the 71 ms. This also means threads do not
+help: an unpinned run (≈255 OpenCV/OpenMP threads, 708% CPU) finished a full eval in
+165.7 s against 176.1 s pinned to one thread, a 6% gain for 7 cores, because the
+bottleneck is dense Eigen work on a single matrix.
+
+### Accuracy against speed
+
+Capacity is the knob that trades one for the other. Accuracy is the six-room mean
+from the M6 sweep; FPS is room1, one repeat, same protocol as above.
+
+| capacity (EKF / tracker) | mean ATE@0.001 | mean ATE@0.02 | room1 FPS |
+| --- | --- | --- | --- |
+| 30 / 120 | 0.0615 | 0.0802 | 39.4 |
+| 60 / 120 | 0.0523 | 0.0629 | 23.8 |
+| **90 / 180 (shipped)** | **0.0476** | **0.0575** | **11.8** |
+| 120 / 240 | 0.0485 | 0.0576 | 6.7 |
+
+**60 / 120 is the point to take if real time matters**: 0.0629 m at 23.8 FPS is
+still 55% better than the upstream monocular baseline while keeping ahead of a 20 Hz
+camera, where the shipped configuration does not. The shipped default optimizes
+accuracy because that is what the exit criteria asked for; `EKF_MAX_FEATURES` and
+`tracker_cfg.num_features_max` are the two numbers to lower, together, if the
+trade should go the other way.
+
+Caveats: single-core numbers on a shared 192-core host, so absolute FPS depends on
+the machine — but the repeat spread was under 5% even with load average varying
+between 10 and 141, and every ratio above is within-machine. `-mode eval` adds a few
+percent for state saving.
+
 ## Notes on interpreting these
 
 - **Roughly half the gain is stereo and half is capacity.** The upstream builds

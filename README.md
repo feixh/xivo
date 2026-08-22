@@ -77,6 +77,21 @@ capacity increase described below; a monocular run at the *same* capacity scores
 numbers, both ATE association protocols, and how to reproduce the controls are in
 [`RESULTS_STEREO.md`](RESULTS_STEREO.md).
 
+That accuracy costs speed, and the default trades in favour of accuracy:
+
+| config | EKF / tracker | FPS, one core | mean ATE |
+| --- | --- | --- | --- |
+| monocular, upstream capacity | 30 / 60 | 89 | 0.140 |
+| **stereo, shipped default** | 90 / 180 | **11.5** | **0.058** |
+| stereo, real-time-friendly | 60 / 120 | 24 | 0.063 |
+
+So the shipped config is ~7.5× slower than upstream and runs at about 0.6× real time
+against TUM-VI's 20 Hz cameras; almost all of that is the EKF covariance update
+growing with the feature count, not the stereo front end. Lower `EKF_MAX_FEATURES`
+and `tracker_cfg.num_features_max` together (60 / 120) to get back above real time
+for 0.005 m of accuracy. Full breakdown, including where each millisecond goes, in
+[`RESULTS_STEREO.md`](RESULTS_STEREO.md#speed-and-memory).
+
 ### EKF capacity is a build option
 
 The number of features and groups the filter can hold is a compile-time constant.
