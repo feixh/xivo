@@ -62,6 +62,10 @@ add_definitions(-DSOPHUS_USE_BASIC_LOGGING)
 # slots decides which branch of SelectAndAddNewFeatures runs and how many groups
 # AddGroupOfFeatures admits. Both the baseline and the OOS numbers in the report
 # use this same value.
+# Online temporal calibration: estimate the IMU-camera time offset td as part of
+# the state. Same top-level placement requirement as the EKF_MAX_* defines --
+# these change kMotionSize and so the whole state layout.
+add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
 add_definitions(-DEKF_MAX_GROUPS=60)
 add_definitions(-DEKF_MAX_FEATURES=200)
 

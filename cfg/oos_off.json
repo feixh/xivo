@@ -12,7 +12,7 @@
 
   // algorithmic-level knobs
   "integration_method": "PrinceDormand", // "PrinceDormand", "RK4", //, Fehlberg
-  "use_OOS": true, // update with Out-Of-State features
+  "use_OOS": false, // update with Out-Of-State features
   "use_depth_opt": false,  // depth optimization
   "use_MH_gating": true,
   "use_1pt_RANSAC": false,
@@ -38,7 +38,7 @@
     "zmin": 0.05,
     "zmax": 50.0,
     "MH_thresh": 5.991,         // Mahalanobis gate, per degree of freedom
-    "pose_window": 20,          // poses kept in the state for OOS (0 = off)
+    "pose_window": 0,          // poses kept in the state for OOS (0 = off)
     "augment_every": 2          // add every k-th pose to the window
   },
   "feature_owner_change_cov_factor": 1.5,
