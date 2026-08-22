@@ -2,6 +2,8 @@
 // Xiaohan Fei (feixh@cs.ucla.edu)
 #pragma once
 #include <condition_variable>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -575,6 +577,10 @@ private:
   void MaintainBuffer();
 
   own<std::thread *> worker_;
+  /** Set by the destructor to break the worker's loop. Without it, `Run()`'s
+   *  `for (;;)` never returned and `~Estimator`'s `worker_->join()` deadlocked,
+   *  so destroying an estimator with `async_run: true` hung the process. */
+  std::atomic<bool> stop_{false};
 
   /** Computes the running average time for dynamics propatagion, visual measurement
    *  processing, tracker, update tracker, jacobian, MH gating. (Those quantities

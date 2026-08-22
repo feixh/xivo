@@ -189,9 +189,28 @@ bool Feature::Merge(FeaturePtr f, const SE3& gbc) {
   // Change coordinates of new feature's estimates
   bool success = f->ChangeOwner(ref_, gbc);
   if (success) {
-    Mat3 P_den = (P_ + f->P()).inverse();
-    x_ = P_den*(P_*x_ + f->P()*f->x());
-    P_ = P_den*(P_ + f->P());
+    // Covariance-weighted fusion of two independent Gaussian estimates:
+    //
+    //   P = (P1^-1 + P2^-1)^-1        = P1 (P1 + P2)^-1 P2
+    //   x = P (P1^-1 x1 + P2^-1 x2)   = P2 (P1 + P2)^-1 x1 + P1 (P1 + P2)^-1 x2
+    //
+    // Each mean is weighted by the *other* estimate's covariance. The previous
+    // code had both parts wrong: it weighted each mean by its own covariance, so
+    // the more uncertain estimate dominated, and its fused covariance was
+    // `(P1 + P2)^-1 (P1 + P2)`, i.e. the identity -- a merged feature came out
+    // with a variance of 1 in normalised-pixel and log-depth units regardless of
+    // what either input said.
+    const Mat3 P1 = P_;
+    const Mat3 P2 = f->P();
+    const Mat3 S = P1 + P2;
+    if (!S.allFinite() || std::abs(S.determinant()) < 1e-12) {
+      return false;
+    }
+    const Mat3 S_inv = S.inverse();
+    x_ = S_inv * (P2 * x_ + P1 * f->x());
+    const Mat3 P_fused = P1 * S_inv * P2;
+    // Symmetric in exact arithmetic; enforce it against round-off.
+    P_ = 0.5 * (P_fused + P_fused.transpose());
     Xc();
     Xs(gbc);
 
@@ -342,10 +361,15 @@ bool Feature::RefineDepth(const SE3 &gbc,
 
   std::vector<Observation> views;
   if (options.two_view) {
+    // `o1.g->id() < o1.g->id()` compares o1 with itself and is therefore always
+    // false, so `minmax_element` returned two positions fixed by the algorithm's
+    // tie-breaking rather than the oldest and newest observation. When both
+    // landed on the same element the two "views" were identical, `H` stayed zero,
+    // and the refinement silently did nothing.
     auto[first, last] =
         std::minmax_element(std::begin(observations), std::end(observations),
                             [](const Observation &o1, const Observation &o2) {
-                              return o1.g->id() < o1.g->id();
+                              return o1.g->id() < o2.g->id();
                             });
     views = {*first, *last};
   } else {
@@ -356,6 +380,10 @@ bool Feature::RefineDepth(const SE3 &gbc,
   Vec3 b;           // F' * invC * residual
 
   number_t res_norm0{0}; // norm of residual corresponding to optimal state
+  // How many views actually contributed -- the reference group is skipped, and
+  // `views` may hold duplicates. Needed to turn the summed residual into a
+  // per-observation one for the acceptance test at the end.
+  int num_res0{0};
   // information matrix
   Mat2 invC;
   invC(0, 0) = 1. / options.Rtri;
@@ -371,6 +399,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     H.setZero();
     b.setZero();
     number_t res_norm{0};
+    int num_res{0};
 
     for (const auto &obs : views) {
       // skip reference group
@@ -397,6 +426,12 @@ bool Feature::RefineDepth(const SE3 &gbc,
       // jac_res.push_back(std::make_tuple(dxp_dx, res));
 
       res_norm += res.norm(); //  / (views.size() - 1);
+      ++num_res;
+    }
+
+    if (num_res == 0) {
+      // Every view was the reference group: nothing to refine against.
+      return false;
     }
 
     if (iter > 0 && res_norm > res_norm0) {
@@ -406,7 +441,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     }
 
     VLOG_IF(0, iter > 0) << StrFormat("iter=%d; |res|:%0.4f->%0.4f",
-        iter, res_norm0 / (views.size() - 1), res_norm / (views.size() - 1) );
+        iter, res_norm0 / num_res0, res_norm / num_res );
 
     // auto ldlt = H.ldlt();
     // std::cout << "D=" << ldlt.vectorD().transpose() << std::endl;
@@ -445,6 +480,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     x_ -= delta;
     ClampLogDepth();
     res_norm0 = res_norm;
+    num_res0 = num_res;
 
     // not much to progress
     if (delta.lpNorm<Eigen::Infinity>() < options.eps) {
@@ -452,9 +488,21 @@ bool Feature::RefineDepth(const SE3 &gbc,
     }
   }
 
-  if (res_norm0 > options.max_res_norm) {
+  if (num_res0 == 0) {
+    // The iteration never completed a usable pass.
+    return false;
+  }
+
+  // `res_norm0` is a *sum* of per-observation reprojection-error norms, while
+  // `max_res_norm` is a per-observation threshold -- the commented-out
+  // `/ (views.size() - 1)` on each accumulation, and the log line above that
+  // divides before printing, both say so. Comparing the sum made the test
+  // strictly harder the more observations a feature had, so well-fitted
+  // long-lived features were rejected while poorly-fitted two-view ones passed.
+  const number_t mean_res = res_norm0 / num_res0;
+  if (mean_res > options.max_res_norm) {
     VLOG(0) << StrFormat("feature #%d; status=%d; |res|=%f\n", id_,
-                               as_integer(status_), res_norm0);
+                               as_integer(status_), mean_res);
     return false;
   }
     // std::cout << "H=\n" << H << std::endl;

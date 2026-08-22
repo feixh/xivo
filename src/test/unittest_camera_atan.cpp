@@ -28,6 +28,80 @@ TEST(CamerasAtan, atanProjectUnproject) {
 }
 
 
+// Both Project and UnProject switch to a "singular" branch near R = 0 and used
+// f = 1 there. The true limits are 2 tan(w/2) / w and its reciprocal, so the
+// model was discontinuous across the threshold.
+TEST(CamerasAtan, atanIsContinuousAcrossTheSingularThreshold) {
+  auto cfg_ = LoadJson("src/test/camera_configs.json");
+  CameraManager *cam = Camera::Create(cfg_["atan_cam"]);
+
+  // Project's threshold is R < 1e-4; straddle it.
+  Vec2 inside(0.9e-4 / std::sqrt(2.0), 0.9e-4 / std::sqrt(2.0));
+  Vec2 outside(1.1e-4 / std::sqrt(2.0), 1.1e-4 / std::sqrt(2.0));
+  Vec2 pin = cam->Project(inside);
+  Vec2 pout = cam->Project(outside);
+  // Over a 2e-5 change in xc the projected pixel must move by well under a pixel.
+  EXPECT_LT((pout - pin).norm(), 1e-2);
+
+  // UnProject's threshold is R > 0.01, i.e. a pixel radius of ~0.01 * f.
+  Mat2 J_in, J_out;
+  Vec2 c = cam->UnProject(Vec2(0.0, 0.0));
+  Vec2 uin = cam->UnProject(cam->Project(Vec2(0.9e-2 / std::sqrt(2.0),
+                                              0.9e-2 / std::sqrt(2.0))),
+                            &J_in);
+  Vec2 uout = cam->UnProject(cam->Project(Vec2(1.1e-2 / std::sqrt(2.0),
+                                               1.1e-2 / std::sqrt(2.0))),
+                             &J_out);
+  // Round trip must hold on both sides of the threshold.
+  EXPECT_NEAR(uin(0), 0.9e-2 / std::sqrt(2.0), 1e-6);
+  EXPECT_NEAR(uout(0), 1.1e-2 / std::sqrt(2.0), 1e-6);
+  // ...and the Jacobian must not jump across it.
+  EXPECT_LT((J_out - J_in).norm(), 1e-2 * J_in.norm());
+  ASSERT_TRUE(c.allFinite());
+}
+
+
+// Both singular branches wrote only the diagonal, so the off-diagonals were
+// whatever the caller's matrix already held.
+TEST(CamerasAtan, atanSingularJacobiansAreFullyWritten) {
+  auto cfg_ = LoadJson("src/test/camera_configs.json");
+  CameraManager *cam = Camera::Create(cfg_["atan_cam"]);
+
+  const number_t poison = 12345.0;
+
+  Mat2 J = Mat2::Constant(poison);
+  cam->Project(Vec2(0.0, 0.0), &J);
+  EXPECT_NE(J(0, 1), poison);
+  EXPECT_NE(J(1, 0), poison);
+  EXPECT_EQ(J(0, 1), 0.0);
+  EXPECT_EQ(J(1, 0), 0.0);
+
+  Mat2 J2 = Mat2::Constant(poison);
+  cam->UnProject(cam->Project(Vec2(0.0, 0.0)), &J2);
+  EXPECT_NE(J2(0, 1), poison);
+  EXPECT_NE(J2(1, 0), poison);
+  EXPECT_EQ(J2(0, 1), 0.0);
+  EXPECT_EQ(J2(1, 0), 0.0);
+}
+
+
+// R * w >= pi/2 is outside the model's image circle; tan flips sign there and the
+// unprojected ray came back mirrored through the principal point.
+TEST(CamerasAtan, atanUnprojectDoesNotMirrorFarPixels) {
+  auto cfg_ = LoadJson("src/test/camera_configs.json");
+  CameraManager *cam = Camera::Create(cfg_["atan_cam"]);
+
+  Vec2 dir(0.6, 0.8);
+  Vec2 principal = cam->Project(Vec2(0.0, 0.0));
+  for (number_t r = 50.0; r < 5000.0; r += 173.0) {
+    Vec2 xc = cam->UnProject(Vec2(principal + r * dir));
+    ASSERT_TRUE(std::isfinite(xc(0))) << "r=" << r;
+    ASSERT_TRUE(std::isfinite(xc(1))) << "r=" << r;
+    EXPECT_GE(xc.dot(dir), 0.0) << "mirrored ray at r=" << r;
+  }
+}
+
+
 TEST(CamerasAtan, atanProjectionJac) {
   auto cfg_ = LoadJson("src/test/camera_configs.json");
   CameraManager *cam = Camera::Create(cfg_["atan_cam"]);

@@ -29,12 +29,16 @@ public:
     Eigen::Matrix<f_t, 2, 1> xp;
 
     f_t R = xc.norm();
-    f_t f{1};
     bool singular = (R < 0.0001 || w_ == 0);
 
-    if (!singular) {
-      f = invw_ * std::atan(w2_ * R) / R;
-    }
+    // The R -> 0 limit of f = atan(w2 R) / (w R) is w2 / w, not 1, because
+    // atan(w2 R) -> w2 R. Substituting 1 made the projection discontinuous
+    // across the R = 1e-4 threshold by a factor 2 tan(w/2) / w -- roughly 9 %
+    // for a typical w near 1 -- and put the same error in the Jacobian below.
+    // (For w -> 0 the model degenerates to a pinhole and the limit really is 1,
+    // but w2 / w is 0/0 there, so that case stays explicit.)
+    const f_t f_limit = (w_ == 0) ? f_t(1) : f_t(invw_ * w2_);
+    f_t f{singular ? f_limit : f_t(invw_ * std::atan(w2_ * R) / R)};
 
     // Project through distortion model
     xp(0) = fx_ * f * xc(0) + cx_;
@@ -44,8 +48,10 @@ public:
       auto &J{*jac};
       // compute jacobians
       if (singular) {
-        J(0, 0) = fx_;
-        J(1, 1) = fy_;
+        // The off-diagonals were left untouched -- `jac` points at whatever the
+        // caller last had there (`JacobianCache::dxp_dxcn` is a reused member),
+        // so this branch returned a Jacobian with two stale entries.
+        J << fx_ * f, 0, 0, fy_ * f;
       } else {
         // FIXME: optimize computation
         f_t df_dx, df_dy, df_dR;
@@ -63,7 +69,20 @@ public:
       auto &J{*jacc};
       J.setZero(2, DIM); // d[x, y]_d[fx, fy, cx, cy, w]
       if (singular) {
-        J << xc(0), 0, 1, 0, 0, 0, xc(1), 0, 1, 0;
+        // Same wrong limit as above: dxp/dfx is f * xc(0), and f is w2/w here,
+        // not 1. The dxp/dw column was left at zero, but d/dw [2 tan(w/2) / w]
+        // is only zero at w = 0.
+        const f_t df_dw_limit =
+            (w_ == 0) ? f_t(0)
+                      : f_t((w_ / (std::cos(w_ * 0.5) * std::cos(w_ * 0.5)) -
+                             w2_) *
+                            invw_ * invw_);
+        J(0, 0) = f * xc(0);
+        J(0, 2) = 1;
+        J(1, 1) = f * xc(1);
+        J(1, 3) = 1;
+        J(0, 4) = fx_ * xc(0) * df_dw_limit;
+        J(1, 4) = fy_ * xc(1) * df_dw_limit;
       } else {
         J(0, 0) = f * xc(0);
         J(0, 2) = 1;
@@ -103,14 +122,40 @@ public:
 
     Eigen::Matrix<f_t, 2, 1> tmp((xp(0) - cx_) / fx_, (xp(1) - cy_) / fy_);
     f_t R = tmp.norm();
-    f_t RR{w_ == 0 ? R : std::tan(R * w_) / w2_};
-    f_t f{R > 0.01 ? RR / R : 1.0};
+
+    const bool singular = !(R > 0.01) || w_ == 0;
+    // Mirror of the Project bug: the R -> 0 limit of tan(R w) / (w2 R) is
+    // w / w2, not 1.
+    const f_t f_limit = (w_ == 0) ? f_t(1) : f_t(w_ / w2_);
+
+    f_t f;
+    if (singular) {
+      f = f_limit;
+    } else {
+      // R * w >= pi/2 is outside the model's image circle. Past it tan flips
+      // sign and this returned a ray pointing backwards through the principal
+      // point, reported as a valid unprojection.
+      f_t Rw = R * w_;
+      constexpr f_t kMaxRw = f_t(1.5706); // just under pi/2
+      if (!std::isfinite(Rw)) {
+        Rw = f_t(0);
+      } else if (Rw > kMaxRw) {
+        Rw = kMaxRw;
+      } else if (Rw < -kMaxRw) {
+        Rw = -kMaxRw;
+      }
+      f = std::tan(Rw) / (w2_ * R);
+    }
     xc = f * tmp;
 
     if (jac != nullptr) {
-      if (f == 1) {
-        (*jac)(0, 0) = 1.0 / fx_;
-        (*jac)(1, 1) = 1.0 / fy_;
+      // The test used to be `f == 1`: an exact float comparison against the
+      // value the singular branch happened to assign, which both misses the
+      // singular case whenever the limit is not 1 and fires spuriously if the
+      // regular branch lands on 1 exactly. And, as in Project, the branch only
+      // wrote the diagonal, leaving the caller's stale off-diagonals in place.
+      if (singular) {
+        (*jac) << f_limit / fx_, 0, 0, f_limit / fy_;
       } else {
         f_t df_dR;
         f_t a = std::tan(R * w_);

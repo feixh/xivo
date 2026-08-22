@@ -8,11 +8,19 @@
 
 namespace xivo {
 
-// Project matrix Hx onto the left nullspace of Hf via Givens rotations.
-// i.e., A' * Hf = 0 and we compute Hx <- A' * Hx
-// This can be achieved first concatenate Hf and Hx as [Hf | Hx]
-// And then eliminate the left most block Hf via Givens rotation.
-int SlowGivens(const MatX &Hf, MatX &Hx, MatX &A);
+// Project measurement Jacobian Hx and residual inn onto the left nullspace of
+// Hf, i.e. build A with A' * Hf = 0 and apply Hx <- A' * Hx, inn <- A' * inn.
+//
+// `A` is returned with **orthonormal columns**: the EKF that consumes the
+// result assumes the projected measurement noise is still isotropic, and
+// A' * (sigma^2 I) * A == sigma^2 I only holds for an orthonormal A.
+//
+// `Hx`/`inn` may be over-sized buffers -- pass the number of rows actually
+// filled as `effective_rows`. Only the leading `effective_rows` rows are read
+// and only the leading return-value rows are written; the buffers keep their
+// size, so the caller can go on filling them on the next frame.
+int SlowGivens(const MatX &Hf, MatX &Hx, VecX &inn, MatX &A,
+               int effective_rows = -1);
 
 // zero-out measurement jacobian matrix H by applying Givens rotations
 // same rotations will also be used to transform residual vector r.

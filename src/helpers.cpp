@@ -10,16 +10,54 @@ namespace xivo {
 
 // Reference:
 // http://www.math.usm.edu/lambers/mat610/sum10/lecture9.pdf
-int SlowGivens(const MatX &Hf, MatX &Hx, MatX &A) {
-  // FIXME: use Givens rotation
-  Eigen::FullPivLU<MatX> lu(Hf.transpose());
-  A = lu.kernel();
-//  MatX A = lu.kernel(); // Hf.T * A = 0 -> A.T * Hf = 0
-  // Hf: 2nx3, Hf.T: 3x2n, A: 2nx?, At: ?x2n
-  // MatX At = A.transpose();
-  Hx = A.transpose() * Hx;
+int SlowGivens(const MatX &Hf, MatX &Hx, VecX &inn, MatX &A,
+               int effective_rows) {
+  const int rows = (effective_rows < 0 ? static_cast<int>(Hf.rows())
+                                       : effective_rows);
+  const int cols = Hf.cols();
 
-  return Hx.rows();
+  CHECK(rows <= Hf.rows());
+  CHECK(rows <= Hx.rows());
+  CHECK(rows <= inn.rows());
+
+  // The old implementation had three problems, all of which reached the filter:
+  //
+  //  1. `FullPivLU::kernel()` is *not* orthonormal. The MSCKF nullspace
+  //     projection is only noise-preserving for an orthonormal basis; with a
+  //     general basis the projected noise is sigma^2 * A'A while the update
+  //     still assumed sigma^2 * I, so the OOS measurements were weighted by an
+  //     essentially arbitrary matrix.
+  //  2. It ignored how many rows were actually filled. `Feature::oos_` is a
+  //     fixed 2 * kMaxGroup buffer written one observation at a time, so the
+  //     unfilled tail -- stale rows from whichever feature last used this
+  //     pooled object -- was folded into both the nullspace and the result.
+  //  3. It *resized* `Hx` down to (rows - cols). Since `oos_.Hx` is the
+  //     persistent buffer that `ComputeOOSJacobianInternal` writes into with
+  //     fixed-size `block<2, kFullSize>(2 * counter, 0)`, a later feature with
+  //     enough observations to need the rows that had been trimmed away wrote
+  //     past the end of the matrix. Eigen's bounds assertions are disabled by
+  //     NDEBUG in a release build, so this was a silent heap overwrite.
+  //
+  // Householder QR gives the orthonormal basis directly: Hf = Q R with R upper
+  // triangular, so the trailing columns of Q span the left nullspace of Hf.
+  const int rank = std::min(rows, cols);
+  const int out_rows = rows - rank;
+  if (out_rows <= 0) {
+    A.resize(rows, 0);
+    return 0;
+  }
+
+  Eigen::HouseholderQR<MatX> qr(Hf.topRows(rows));
+  const MatX Q = qr.householderQ();
+  A = Q.rightCols(out_rows);
+
+  // Into temporaries: the destinations overlap the sources.
+  const MatX Hx_proj = A.transpose() * Hx.topRows(rows);
+  const VecX inn_proj = A.transpose() * inn.head(rows);
+  Hx.topRows(out_rows) = Hx_proj;
+  inn.head(out_rows) = inn_proj;
+
+  return out_rows;
 }
 
 // Matrix computation. Golub & Loan.
@@ -46,24 +84,40 @@ static Mat2 givens(number_t a, number_t b) {
 }
 
 int Givens(VecX &x, MatX &Hx, MatX &Hf, int effective_rows) {
-  CHECK((effective_rows == -1 && (x.rows() ^ 1)) ||
-        ((effective_rows <= x.rows()) && effective_rows ^ 1));
-
   CHECK(x.rows() == Hx.rows());
   CHECK(x.rows() == Hf.rows());
 
   int rows = (effective_rows == -1 ? Hf.rows() : effective_rows);
   int cols = Hf.cols();
 
+  // `n ^ 1` is bitwise XOR: it is non-zero -- i.e. the assertion passes -- for
+  // every n except 1, so the intended "the row count is even, because
+  // measurements come in (u, v) pairs" precondition was never actually checked.
+  CHECK(rows % 2 == 0) << "expected an even row count, got " << rows;
+  CHECK(effective_rows <= x.rows());
+
+  // Hx has the full state width; Hf has three columns. Rotating only
+  // `Hf.cols()` columns of Hx left every column from the fourth on
+  // untouched, so the returned Hx was not A' * Hx for any A -- the rows had
+  // been mixed by the rotations in their first three columns and not in the
+  // rest. This is what the shipped `SlowAndFastGivensMatch` failure was
+  // reporting: its Hx has five columns.
+  const int hx_cols = Hx.cols();
+
   Mat2 Gt;
   for (int c = 0; c < cols; ++c) {
     for (int r = rows - 2; r >= c; --r) {
       Gt.transpose() = givens(Hf(r, c), Hf(r + 1, c));
       Hf.block(r, 0, 2, cols) = Gt * Hf.block(r, 0, 2, cols);
-      Hx.block(r, 0, 2, cols) = Gt * Hx.block(r, 0, 2, cols);
+      Hx.block(r, 0, 2, hx_cols) = Gt * Hx.block(r, 0, 2, hx_cols);
 
       x.segment<2>(r) = Gt * x.segment<2>(r);
     }
+  }
+  if (rows <= cols) {
+    // Nothing survives the elimination; the caller must not be handed a
+    // negative row count.
+    return 0;
   }
   // now strip the first #cols rows
   for (int r = 0; r < rows - cols; ++r) {

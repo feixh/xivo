@@ -526,6 +526,10 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
     std::sort(features_of_group.begin(), features_of_group.end(),
               Criteria::CandidateComparison);
 
+    // How many of this group's features actually made it into the state. The
+    // group is only worth a group slot if that is nonzero -- see below.
+    int num_features_added = 0;
+
     // case 1: we're using depth optimization -- which means that we'll only add
     // the group if enough features optimize well.
     if (use_depth_opt_) {
@@ -546,7 +550,6 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
         }
       }
       if (good_features.size() >= num_gauge_xy_features_) {
-        int num_features_added = 0;
         for (auto f: good_features) {
           AddFeatureToState(f);
           instate_features_.push_back(f);
@@ -566,7 +569,6 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
 
     // No depth optimization = the simple case.
     else {
-      int num_features_added = 0;
       for (auto f: features_of_group) {
         AddFeatureToState(f);
         instate_features_.push_back(f);
@@ -579,7 +581,22 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
       LOG(INFO) << "Added " << num_features_added << " features from group " << g->id();
     }
 
-    // Add group
+    // Add group -- but only if it contributed at least one in-state feature. The
+    // depth-optimization path above has an `else` that adds nothing (fewer than
+    // num_gauge_xy_features_ features refined well) and even files the group
+    // under affected_groups_ for cleanup; the non-depth-opt path adds nothing
+    // when features_of_group came back empty. Both then fell through to here, so
+    // a group with no measurements attached to it burned one of the
+    // kMaxGroup slots, contributed 6 state dimensions whose covariance could only
+    // grow, and was queued in needs_new_gauge_features_ -- asking
+    // FindNewGaugeFeatures for gauge features among features it does not have in
+    // the state.
+    if (num_features_added == 0) {
+      LOG(INFO) << "group #" << g->id()
+                << " contributed no instate features; not adding it to the state";
+      continue;
+    }
+
     AddGroupToState(g);
     needs_new_gauge_features_.push_back(g);
     LOG(INFO) << "group #" << g->id() << " added to EKF state" << std::endl;
@@ -609,10 +626,22 @@ void Estimator::InitializeJustCreatedTracks(GroupPtr g,
     CHECK(f->ref() == nullptr);
 #endif
     f->SetRef(g);
-    if (triangulate_pre_subfilter_ && !f->TriangulationSuccessful()) {
-      f->Initialize(init_z_, {init_std_x_badtri_, init_std_y_badtri_, init_std_z_badtri_});
-    } else if (sim_initialize_depths_) {
+    // Every feature reaching this point was created on *this* frame, so it has
+    // exactly one observation, `Feature::Reset` has just set
+    // triangulation_successful_ = false, and `Triangulate` needs two views. The
+    // `triangulate_pre_subfilter_ && !TriangulationSuccessful()` test is
+    // therefore a tautology here whenever triangulate_pre_subfilter_ is on --
+    // which it is in every TUM-VI config. That made it shadow the simulation
+    // branch below, so `sim_initialize_depths_` silently did nothing and
+    // simulation runs threw away their ground-truth depths. Test the branch that
+    // actually discriminates first.
+    if (sim_initialize_depths_) {
       f->Initialize(ids_to_depths_[f->id()], {init_std_x_, init_std_y_, init_std_z_});
+    } else if (triangulate_pre_subfilter_) {
+      // No triangulation is possible from a single view, so the wide "bad
+      // triangulation" prior is the correct one -- stated directly rather than
+      // via a condition that cannot be false.
+      f->Initialize(init_z_, {init_std_x_badtri_, init_std_y_badtri_, init_std_z_badtri_});
     } else {
       f->Initialize(init_z_, {init_std_x_, init_std_y_, init_std_z_});
     }

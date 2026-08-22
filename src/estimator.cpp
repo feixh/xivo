@@ -92,8 +92,10 @@ Estimator::~Estimator() {
   }
 
   if (worker_) {
+    stop_.store(true, std::memory_order_release);
     worker_->join();
     delete worker_;
+    worker_ = nullptr;
   }
 }
 
@@ -309,13 +311,26 @@ Estimator::Estimator(const Json::Value &cfg)
   G_.resize(kMotionSize, 12);
   G_.setZero();
 
+  // Five of the eight keys every shipped config carries -- Tsb, Vsb, wb, ab and
+  // Tbc -- were never read. `cfg/pcw.json` sets Vsb to 0.01 and got zero, with no
+  // diagnostic. Read all of them, and take the values as standard deviations (the
+  // original squared the assembled matrix by *multiplying it with itself*, which
+  // happens to square the diagonal but reads as a typo and would be wrong for any
+  // off-diagonal term).
   auto Qmodel = cfg_["Qmodel"];
+  auto std2var = [&Qmodel](const char *key) {
+    const number_t s = Qmodel.get(key, 0.0).asDouble();
+    return s * s;
+  };
   Qmodel_.setZero(kMotionSize, kMotionSize);
-  Qmodel_.block<3, 3>(Index::Wsb, Index::Wsb) = I3 * Qmodel["Wsb"].asDouble();
-  Qmodel_.block<3, 3>(Index::Wbc, Index::Wbc) = I3 * Qmodel["Wbc"].asDouble();
-  Qmodel_.block<2, 2>(Index::Wsg, Index::Wsg) = I2 * Qmodel["Wsg"].asDouble();
-  Qmodel_.block<kMotionSize, kMotionSize>(0, 0) *=
-      Qmodel_.block<kMotionSize, kMotionSize>(0, 0);
+  Qmodel_.block<3, 3>(Index::Wsb, Index::Wsb) = I3 * std2var("Wsb");
+  Qmodel_.block<3, 3>(Index::Tsb, Index::Tsb) = I3 * std2var("Tsb");
+  Qmodel_.block<3, 3>(Index::Vsb, Index::Vsb) = I3 * std2var("Vsb");
+  Qmodel_.block<3, 3>(Index::bg, Index::bg) = I3 * std2var("wb");
+  Qmodel_.block<3, 3>(Index::ba, Index::ba) = I3 * std2var("ab");
+  Qmodel_.block<3, 3>(Index::Wbc, Index::Wbc) = I3 * std2var("Wbc");
+  Qmodel_.block<3, 3>(Index::Tbc, Index::Tbc) = I3 * std2var("Tbc");
+  Qmodel_.block<2, 2>(Index::Wsg, Index::Wsg) = I2 * std2var("Wsg");
   LOG(INFO) << "Covariance of process noises loaded";
 
   // /////////////////////////////
@@ -428,7 +443,10 @@ Estimator::Estimator(const Json::Value &cfg)
 
 void Estimator::Run() {
   worker_ = new std::thread([this]() {
-    for (;;) {
+    // `for (;;)` with no exit condition meant ~Estimator's join() waited on a
+    // thread that could never finish. It also spun at 100% CPU whenever the
+    // buffer was short of MAX_SIZE, starving the producer; yield when idle.
+    while (!stop_.load(std::memory_order_acquire)) {
       std::unique_ptr<internal::Message> msg;
       {
         std::scoped_lock lck(buf_.mtx);
@@ -441,6 +459,8 @@ void Estimator::Run() {
       if (msg != nullptr) {
         // std::cout << "executing\n";
         msg->Execute(this);
+      } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
       }
     }
   });
@@ -597,7 +617,14 @@ void Estimator::Propagate(bool visual_meas) {
     LOG(FATAL) << "Unknown integration method";
   }
 
-  P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += Qmodel_;
+  // Qmodel is a continuous-time process-noise density, so the amount injected
+  // has to be proportional to the elapsed time. Adding it once per call instead
+  // made the effective noise a function of the IMU rate: at 200 Hz a one-second
+  // interval got 200x the noise it got at 1 Hz, and doubling the sensor rate
+  // silently doubled the assumed model uncertainty. Every TUM-VI config leaves
+  // Qmodel at zero, which is why this never showed up there; `cfg/pcw.json` sets
+  // it nonzero.
+  P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += Qmodel_ * dt;
   timer_.Tock("propagation");
 }
 
@@ -721,12 +748,15 @@ void Estimator::ComputeMotionJacobianAt(
 }
 
 bool Estimator::GoodTimestamp(const timestamp_t &now) {
-  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now);
-  auto curr_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(curr_time_);
-  if (now_ms < curr_ms) {
-    LOG(WARNING) << StrFormat("now=%ld ms < curr=%ld ms", now_ms.count(),
-                                    curr_ms.count());
+  // `timestamp_t` is nanoseconds. Truncating both sides to milliseconds before
+  // comparing let any measurement that arrived out of order by less than a
+  // millisecond -- or that merely landed in the same millisecond bucket as a
+  // later one -- through the guard, and it was then integrated with a negative
+  // dt. Compare at the resolution the timestamps actually carry.
+  if (now < curr_time_) {
+    LOG(WARNING) << StrFormat(
+        "now=%ld ns < curr=%ld ns (out of order by %ld ns)", now.count(),
+        curr_time_.count(), (curr_time_ - now).count());
     return false;
   } else {
     return true;
@@ -1404,6 +1434,14 @@ void Estimator::DiscardGroup(const GroupPtr g) {
   if (g->id() == gauge_group_) {
     // just lost the gauge group
     gauge_group_ = -1;
+    // ...and the pointer has to go with the id. `Group::Deactivate` below hands
+    // this object back to MemoryManager's pool, so keeping the pointer left
+    // `update.cpp`'s `groups_with_low_inn_inlier.count(gauge_group_ptr_)` test
+    // comparing against a dangling address -- which, once the slot was recycled
+    // for a different group, could match a live group that is not the gauge
+    // group. Null is the honest answer and makes that test take the
+    // "pick a temporary reference group" branch, which is the safe one.
+    gauge_group_ptr_ = nullptr;
   }
 #ifdef USE_MAPPER
   Mapper::instance()->AddGroup(g, graph.GetGroupAdj(g));
@@ -1531,17 +1569,30 @@ void Estimator::RestoreState(std::unordered_set<FeaturePtr>& features,
 #endif
 }
 
+// Both of these are used as `std::sort` comparators, which requires a strict
+// weak ordering: `comp(a, a)` must be false. `<=` makes it true, and libstdc++'s
+// introsort relies on irreflexivity to bound its partition scan -- with an
+// invalid comparator it can run past the end of the range. Ties are not
+// hypothetical here: every feature initialised on the same frame carries the
+// identical covariance, so equal norms are routine. Tie-break on id so the
+// order does not depend on the pointer order `MakePtrVectorUnique` leaves.
 bool Estimator::FeatureCovComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).norm();
   number_t score2 = InstateFeatureCov(f2).norm();
-  return (score1 <= score2);
+  if (score1 != score2) {
+    return score1 < score2;
+  }
+  return f1->id() < f2->id();
 }
 
 
 bool Estimator::FeatureCovXYComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).block<2,2>(0,0).norm();
   number_t score2 = InstateFeatureCov(f2).block<2,2>(0,0).norm();
-  return (score1 <= score2);
+  if (score1 != score2) {
+    return score1 < score2;
+  }
+  return f1->id() < f2->id();
 }
 
 

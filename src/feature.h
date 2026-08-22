@@ -39,6 +39,15 @@ public:
     clear();
     status_ = TrackStatus::CREATED;
     push_back(Vec2(x, y));
+    // Features are recycled out of MemoryManager's pool (see Feature::Create,
+    // which calls Reset on a slot that previously belonged to a different
+    // feature). Leaving these behind meant a new track inherited the *previous*
+    // track's descriptor history: `descriptor()` returns descriptors_.back(), so
+    // until the first SetDescriptor call it handed out a descriptor belonging to
+    // an unrelated feature, and GetAllDescriptors()/GetAllDBoWDesc() mixed the
+    // two tracks for the rest of the new feature's life. Same for the keypoint.
+    descriptors_.clear();
+    keypoint_ = cv::KeyPoint();
   }
 
   TrackStatus status() const { return status_; }

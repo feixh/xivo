@@ -141,6 +141,7 @@ target_link_libraries(feature_tracker_only ${libxivo} gflags::gflags)
 ################################################################################
 add_executable(unitTests_NumericalAlgorithms
                test/unittest_givens.cpp
+               test/unittest_rodrigues.cpp
                test/unittest_helpers.cpp)
 target_link_libraries(unitTests_NumericalAlgorithms xest ${deps} gtest gtest_main)
 add_test(NAME NumericalAlgorithms COMMAND unitTests_NumericalAlgorithms)
