@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstring>
 
 #include "estimator.h"
 #include "feature.h"
@@ -25,14 +26,34 @@ void FeatureAdj::Add(const Observation &obs) { insert({obs.g->id(), obs.xp}); }
 void FeatureAdj::Remove(int id) { erase(id); }
 
 
+namespace {
+
+/** Copy a BRIEF descriptor out of the cv::Mat row OpenCV wrote it into.
+ *
+ *  A copy, not a cast of `mat.data`: FastBrief::TDescriptor is a value type
+ *  (see fastbrief.h), the row is 32 bytes of CV_8U with no alignment guarantee,
+ *  and DBoW2 keeps whatever it is given for as long as the vocabulary lives,
+ *  which is longer than any pooled Feature's descriptor vector.
+ */
+FastBrief::TDescriptor ToDBoWDesc(const cv::Mat &mat) {
+  FastBrief::TDescriptor desc;
+  CHECK_EQ(mat.total() * mat.elemSize(), sizeof(desc))
+      << "descriptor is not " << sizeof(desc) << " bytes";
+  std::memcpy(desc.data(), mat.data, sizeof(desc));
+  return desc;
+}
+
+} // namespace
+
 FastBrief::TDescriptor Track::GetDBoWDesc() {
-  return (FastBrief::TDescriptor) descriptors_.back().data;
+  return ToDBoWDesc(descriptors_.back());
 }
 
 std::vector<FastBrief::TDescriptor> Track::GetAllDBoWDesc() {
   std::vector<FastBrief::TDescriptor> ret;
-  for (auto d: descriptors_) {
-    ret.push_back((FastBrief::TDescriptor) d.data);
+  ret.reserve(descriptors_.size());
+  for (const auto &d: descriptors_) {
+    ret.push_back(ToDBoWDesc(d));
   }
   return ret;
 }

@@ -134,7 +134,10 @@ private:
   Graph& operator=(const Graph&) = delete;
   static std::unique_ptr<Graph> instance_;
 
-  GroupPtr last_added_group_;
+  /** The most recently added group, or nullptr if there is none (nothing added
+   *  yet, or the last one added has since been removed). Only `AddGroup` and
+   *  `RemoveGroup` write it; `LastAddedGroup()` reads it. */
+  GroupPtr last_added_group_{nullptr};
 
   /** Maps group id (int) to a unordered set of features whose (x,y) coordinates
    *  of `Feature::x_` is held constant. */

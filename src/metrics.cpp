@@ -67,6 +67,11 @@ std::tuple<number_t, number_t> ComputeRPE(const std::vector<msg::Pose> &est,
     if (it_est->ts_ >= it_gt->ts_ && it_est->ts_ < next(it_gt)->ts_) {
       auto gY = (it_est++)->g_;
       auto gX = (it_gt++)->g_;
+      // The loop condition was checked before those two increments, so either
+      // iterator can be end() by now and both are dereferenced below.
+      if (it_est == est.end() || it_gt == gt.end()) {
+        break;
+      }
       // pair these poses with poses dt seconds apart in time
       SE3 gY2, gX2;
       bool found{false};

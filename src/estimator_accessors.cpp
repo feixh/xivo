@@ -13,9 +13,9 @@ VecXi Estimator::InstateFeatureSinds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -48,9 +48,9 @@ VecXi Estimator::InstateFeatureRefGroups(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -83,9 +83,9 @@ VecXi Estimator::InstateFeatureIDs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -118,9 +118,9 @@ MatX3 Estimator::InstateFeaturePositions(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -155,9 +155,9 @@ MatX3 Estimator::InstateFeatureXc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -192,9 +192,9 @@ MatX3 Estimator::InstateFeaturexc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -229,9 +229,9 @@ MatX2 Estimator::InstateFeaturePreds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -265,9 +265,9 @@ MatX2 Estimator::InstateFeatureMeas(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -300,9 +300,9 @@ MatX6 Estimator::InstateFeatureCovs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
-  // returned array to include rows that are never written. Line 318 of this same
-  // file uses `min` for the identical computation.
+  // std::min, not max: the fill loop below stops at n_output *and* at the end of
+  // instate_features, and Eigen does not zero-initialise, so sizing the output
+  // by the larger of the two returned uninitialised heap to the caller.
   int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
@@ -708,11 +708,14 @@ std::vector<std::tuple<int, Vec2, MatXf>> Estimator::tracked_features() {
   for (auto f : tracker->features_)
   {
     int id = f->id();
-    cv::Mat descriptor = f->descriptor();
 
-    // Convert from cv::Mat to matrix
+    // Convert from cv::Mat to matrix. Features have no descriptor at all when
+    // extract_descriptor is off, in which case this stays empty rather than
+    // reading descriptors_.back() on an empty vector.
     MatXf descriptor_eigen;
-    cv2eigen(descriptor, descriptor_eigen);
+    if (f->has_descriptor()) {
+      cv2eigen(f->descriptor(), descriptor_eigen);
+    }
 
     Vec2 kp_vector = f->xp();
 

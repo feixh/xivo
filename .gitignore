@@ -4,6 +4,10 @@ build
 build_*
 bin_*
 lib_*
+# Instrumented builds from scripts/mem/build.sh, which puts a sanitized tree
+# beside the plain one via -DXIVO_OUTPUT_DIR.
+build-*/
+out-*/
 .idea
 *.pyc
 estimator/*json

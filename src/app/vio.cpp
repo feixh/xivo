@@ -26,6 +26,9 @@ DEFINE_string(seq, "room1", "Sequence of TUM VI benchmark to play with.");
 DEFINE_int32(cam_id, 0, "Camera id.");
 DEFINE_string(out, "out_state", "Output file path.");
 DEFINE_string(graphout, "", ".dot file to save output graph to");
+DEFINE_int32(max_entries, 0,
+             "Stop after this many dataset entries; 0 (default) plays the "
+             "whole sequence. Useful for short runs under a sanitizer.");
 
 using namespace xivo;
 
@@ -72,13 +75,16 @@ int main(int argc, char **argv) {
   // setup I/O for saving results
   if (std::ofstream ostream{FLAGS_out, std::ios::out}) {
 
-    std::vector<msg::Pose> traj_est;
+    int num_entries = loader->size();
+    if (FLAGS_max_entries > 0 && FLAGS_max_entries < num_entries) {
+      num_entries = FLAGS_max_entries;
+    }
 
-    for (int i = 0; i < loader->size(); ++i) {
+    for (int i = 0; i < num_entries; ++i) {
       auto raw_msg = loader->Get(i);
 
       if (verbose && i % 1000 == 0) {
-        std::cout << i << "/" << loader->size() << std::endl;
+        std::cout << i << "/" << num_entries << std::endl;
       }
 
       // `StereoImage` does not derive from `Image`, so the two branches are
@@ -123,7 +129,11 @@ int main(int argc, char **argv) {
         LOG(FATAL) << "Invalid entry type.";
       }
 
-      traj_est.emplace_back(est->ts(), est->gsb());
+      // The pose is streamed straight to `ostream`; it used to also be
+      // accumulated into a std::vector<msg::Pose> that nothing ever read, which
+      // grew by 96 bytes for every dataset entry -- image *and* IMU -- and was
+      // the largest single accumulating block in the process (~3.1 MB by the end
+      // of room1, ~4.7 MB across the last reallocation).
       Vec3 Tsb = (Vec3)est->gsb().translation();
       Vec3 Wsb = (Vec3)est->gsb().so3().log();
       ostream << StrFormat("%ld", est->ts().count()) << " "

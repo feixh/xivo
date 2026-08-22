@@ -1585,9 +1585,10 @@ void Estimator::DiscardGroup(const GroupPtr g) {
   if (g->id() == gauge_group_) {
     // just lost the gauge group
     gauge_group_ = -1;
-    // ...and the pointer has to go with the id. `Group::Deactivate` below hands
-    // this object back to MemoryManager's pool, so keeping the pointer left
-    // `update.cpp`'s `groups_with_low_inn_inlier.count(gauge_group_ptr_)` test
+    // ...and the pointer has to go with the id: the group is about to outlive
+    // it. `Group::Deactivate` below hands this object back to MemoryManager's
+    // pool, so keeping the pointer left OnePointRANSAC's
+    // `groups_with_low_inn_inlier.count(gauge_group_ptr_)` test (update.cpp)
     // comparing against a dangling address -- which, once the slot was recycled
     // for a different group, could match a live group that is not the gauge
     // group. Null is the honest answer and makes that test take the
@@ -1722,11 +1723,12 @@ void Estimator::RestoreState(std::unordered_set<FeaturePtr>& features,
 
 // Both of these are used as `std::sort` comparators, which requires a strict
 // weak ordering: `comp(a, a)` must be false. `<=` makes it true, and libstdc++'s
-// introsort relies on irreflexivity to bound its partition scan -- with an
-// invalid comparator it can run past the end of the range. Ties are not
-// hypothetical here: every feature initialised on the same frame carries the
-// identical covariance, so equal norms are routine. Tie-break on id so the
-// order does not depend on the pointer order `MakePtrVectorUnique` leaves.
+// introsort has no bounds check of its own -- it relies on irreflexivity to stop
+// its partition scan, so on a run of equal scores it can walk off either end of
+// the range and write outside the vector. Ties are not hypothetical here: every
+// feature initialised on the same frame carries the identical covariance, so
+// equal norms are routine. Tie-break on id so the order does not depend on the
+// pointer order `MakePtrVectorUnique` leaves.
 bool Estimator::FeatureCovComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).norm();
   number_t score2 = InstateFeatureCov(f2).norm();

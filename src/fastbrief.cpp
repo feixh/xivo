@@ -18,12 +18,13 @@ namespace xivo {
 void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors,
                           FastBrief::TDescriptor &mean)
 {
-  // initialize. `mean` is a `uint64_t*&`, so `&mean` is the address of the
-  // caller's *pointer* -- memset'ing that clobbered the pointer itself (plus 24
-  // bytes past it on the stack) and left the freshly allocated buffer
-  // uninitialized.
-  mean = new uint64_t[BRIEF_BYTES >> 3];
-  memset( mean, 0, sizeof( uint64_t ) * (BRIEF_BYTES >> 3) );
+  // initialize. This used to be `mean = new uint64_t[4]` followed by
+  // `memset(&mean, 0, 32)`: `mean` was a `uint64_t*&`, so `&mean` is the address
+  // of the caller's *pointer*, and the memset clobbered that pointer (plus 24
+  // bytes past it) while leaving the freshly allocated buffer uninitialized --
+  // and leaked the array. `TDescriptor` is now a `std::array`, so `mean` owns
+  // its storage and both faults are gone.
+  mean.fill(0);
 
   if(descriptors.empty()) return;
 
@@ -34,10 +35,11 @@ void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors
 
   vector<FastBrief::pDescriptor>::const_iterator it;
   for(it = descriptors.begin(); it != descriptors.end(); ++it) {
-    // Bit i of a uint64_t array is word i>>6, bit i&63. The original
+    // Bit i of the descriptor is word i>>6, bit i&63 (below). The original
     // `i & ((i<<6)-1)` is not a bit index at all: for i=64 it yields 64, an
-    // out-of-range shift count for uint64_t (UB).
-    FastBrief::TDescriptor desc = **it;
+    // out-of-range shift count for uint64_t (UB). Bound by const reference:
+    // `TDescriptor` is a 32-byte array now, so a copy per descriptor is waste.
+    const FastBrief::TDescriptor &desc = **it;
     for(int i = 0; i < L; ++i) {
       if ( desc[ i >> 6 ] & ((uint64_t)1 << ( i & 63 ) ) ) {
         ++counters[i];
@@ -112,7 +114,6 @@ std::string FastBrief::toString(const FastBrief::TDescriptor &a)
 
 void FastBrief::fromString(FastBrief::TDescriptor &a, const std::string &s)
 {
-  a = new uint64_t[4];
   stringstream ss(s);
   for(int i = 0; i < (BRIEF_BYTES >> 3); ++i) {
     ss >> a[i];

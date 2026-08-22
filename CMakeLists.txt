@@ -54,7 +54,11 @@ if (BUILD_G2O)
 endif (BUILD_G2O)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -std=c++17 -Wno-narrowing -Wno-register -fPIC -g")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=native -march=native")
+
+# Overridable because valgrind cannot execute the AVX-512 that -march=native
+# emits on this machine; a heap-profiling build sets e.g. -march=x86-64-v3.
+set(XIVO_ARCH_FLAGS "-mtune=native -march=native" CACHE STRING "architecture flags")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${XIVO_ARCH_FLAGS}")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops")
 
@@ -63,9 +67,26 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops")
 set(CMAKE_BUILD_TYPE "Release")
 #add_definitions(-DNDEBUG)
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin${XIVO_OUTPUT_SUFFIX})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib${XIVO_OUTPUT_SUFFIX})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib${XIVO_OUTPUT_SUFFIX})
+# Sanitizer instrumentation, e.g. -DXIVO_SANITIZE=address or
+# -DXIVO_SANITIZE=address,undefined. Off by default. See scripts/mem/README.md.
+set(XIVO_SANITIZE "" CACHE STRING "sanitizers to enable (address, undefined, ...)")
+if (XIVO_SANITIZE)
+  message(STATUS "XIVO_SANITIZE ${XIVO_SANITIZE}")
+  set(CMAKE_CXX_FLAGS
+      "${CMAKE_CXX_FLAGS} -fsanitize=${XIVO_SANITIZE} -fno-omit-frame-pointer -fno-optimize-sibling-calls")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=${XIVO_SANITIZE}")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=${XIVO_SANITIZE}")
+endif (XIVO_SANITIZE)
+
+# Where bin/ and lib/ go. Two independent knobs, both of which exist so a
+# variant build can sit beside the plain one rather than overwrite it:
+# XIVO_OUTPUT_DIR moves the whole prefix (scripts/mem/build.sh, for a sanitized
+# or valgrind-friendly tree) and XIVO_OUTPUT_SUFFIX renames bin/lib in place
+# (build_arch.sh, for a differently-sized EKF state -- see EKF_MAX_FEATURES).
+set(XIVO_OUTPUT_DIR "${CMAKE_SOURCE_DIR}" CACHE PATH "prefix for the bin/ and lib/ output directories")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/bin${XIVO_OUTPUT_SUFFIX})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/lib${XIVO_OUTPUT_SUFFIX})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/lib${XIVO_OUTPUT_SUFFIX})
 
 # disable logging whose severity level is below the given integer
 add_definitions(-DGOOGLE_STRIP_LOG=1)

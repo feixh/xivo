@@ -185,7 +185,9 @@ public:
     return P_.block<kMaxCameraIntrinsics,kMaxCameraIntrinsics>(kCameraBegin,
       kCameraBegin);
 #else
-    Eigen::Matrix<number_t, 9, 9> all_zeros;
+    // Eigen does not zero-initialise, so this used to return 648 bytes of
+    // whatever was on the stack.
+    Eigen::Matrix<number_t, 9, 9> all_zeros = Eigen::Matrix<number_t, 9, 9>::Zero();
     return all_zeros;
 #endif
   }

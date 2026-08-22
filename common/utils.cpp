@@ -4,6 +4,7 @@
 #include "dirent.h"
 // stl
 #include <iostream>
+#include <memory>
 // I/O
 #include "json/json.h"
 
@@ -124,7 +125,8 @@ void SaveJson(const Json::Value &value, const std::string &filename) {
   builder["commentStyle"] = "None";
   builder["indentation"] = "    ";
 
-  auto writer = builder.newStreamWriter();
+  // newStreamWriter returns an owning raw pointer (json/writer.h).
+  std::unique_ptr<Json::StreamWriter> writer{builder.newStreamWriter()};
   writer->write(value, &out);
   out.close();
 }

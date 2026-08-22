@@ -15,14 +15,13 @@ const static Vec3f kGreen{0, 1., 0};
 const static Vec3f kCyan{0, 1., 1.};
 
 Viewer::~Viewer() {
-  if (camera_state_) {
-    delete camera_state_;
-  }
-  if (image_state_) {
-    delete image_state_;
-  }
-  if (texture_) {
-    delete texture_;
+  // The views themselves live in pangolin's global display registry and outlive
+  // this object; they hold a non-owning Handler*, so unhook the handlers this
+  // object owns before they go away. Every input dispatch site in pangolin
+  // null-checks View::handler, so clearing it is safe.
+  pangolin::Display("image").SetHandler(nullptr);
+  if (!tracker_only_) {
+    pangolin::Display("cam").SetHandler(nullptr);
   }
 }
 
@@ -52,14 +51,15 @@ Viewer::Viewer(const Json::Value &cfg, const std::string &name, bool tracker_onl
   float aspect = width_ / (float)height_;
 
   // Display Video Sequence
-  image_state_ = new pangolin::OpenGlRenderState(
+  image_state_ = std::make_unique<pangolin::OpenGlRenderState>(
       pangolin::ProjectionMatrix(width_, height_, fx_, fy_, cx_, cy_, znear_,
                                  zfar_),
       pangolin::ModelViewLookAt(-1, 1, -1, 0, 0, 0, pangolin::AxisY));
 
   pangolin::View &image_view = pangolin::Display("image").SetAspect(aspect);
 
-  image_view.SetHandler(new pangolin::Handler3D(*image_state_));
+  image_handler_ = std::make_unique<pangolin::Handler3D>(*image_state_);
+  image_view.SetHandler(image_handler_.get());
 
   // background setup
   bg_color_[0] = cfg_["bg_color"].get("r", 0).asFloat();
@@ -69,7 +69,7 @@ Viewer::Viewer(const Json::Value &cfg, const std::string &name, bool tracker_onl
 
   // Display Map + Video Sequence
   if(!tracker_only_) {
-    camera_state_ = new pangolin::OpenGlRenderState();
+    camera_state_ = std::make_unique<pangolin::OpenGlRenderState>();
 
     camera_state_->SetProjectionMatrix(pangolin::ProjectionMatrixRDF_TopLeft(
         width_, height_, fx_, fy_, cx_, cy_, znear_, zfar_));
@@ -85,7 +85,8 @@ Viewer::Viewer(const Json::Value &cfg, const std::string &name, bool tracker_onl
 
     pangolin::View &camera_view = pangolin::Display("cam").SetAspect(aspect);
 
-    camera_view.SetHandler(new pangolin::Handler3D(*camera_state_));
+    camera_handler_ = std::make_unique<pangolin::Handler3D>(*camera_state_);
+    camera_view.SetHandler(camera_handler_.get());
 
     pangolin::DisplayBase()
         .SetBounds(0, 1, 0, 1)
@@ -120,8 +121,8 @@ void Viewer::Update(const cv::Mat &image) {
   // bind to context
   pangolin::BindToContext(window_name_);
   if (!texture_) {
-    texture_ = new pangolin::GlTexture(cols, rows, GL_RGB, false, 0, GL_RGB,
-                                       GL_UNSIGNED_BYTE);
+    texture_ = std::make_unique<pangolin::GlTexture>(
+        cols, rows, GL_RGB, false, 0, GL_RGB, GL_UNSIGNED_BYTE);
   }
   texture_->Upload((uint8_t *)image_.data, GL_RGB, GL_UNSIGNED_BYTE);
   // unset context

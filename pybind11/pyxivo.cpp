@@ -17,6 +17,42 @@
 namespace py = pybind11;
 using namespace xivo;
 
+namespace {
+
+/** Copies a contiguous HxW or HxWxC uint8 numpy image into a `cv::Mat`.
+ *
+ *  Both properties matter.
+ *
+ *  *Shape from the shape*: the previous code derived the geometry from
+ *  `info.strides` and hard-coded `CV_8UC3`, so a 2-D grayscale array became a
+ *  `num_col = strides[0]/strides[1]`-wide 3-channel image and was read about
+ *  twice past the end of the buffer.
+ *
+ *  *Copy, not wrap*: the `cv::Mat` handed to `VisualMeas` does not own the numpy
+ *  buffer, and `VisualMeas` does not process the frame it is given — it buffers
+ *  the message and processes the *oldest* one it holds
+ *  (`Estimator::MaintainBuffer`), so the pixels are read long after this call
+ *  returns, by which time python may have freed the array. */
+cv::Mat CloneImageFromBuffer(const py::buffer_info &info) {
+  if (info.ndim != 2 && info.ndim != 3) {
+    throw std::runtime_error(
+        "expecting a HxW or HxWxC uint8 image array, got ndim=" +
+        std::to_string(info.ndim));
+  }
+  const int channels =
+      info.ndim == 3 ? static_cast<int>(info.shape[2]) : 1;
+  if (channels < 1 || channels > 4) {
+    throw std::runtime_error("expecting 1-4 image channels, got " +
+                             std::to_string(channels));
+  }
+  cv::Mat borrowed(static_cast<int>(info.shape[0]),
+                   static_cast<int>(info.shape[1]), CV_8UC(channels),
+                   info.ptr);
+  return borrowed.clone();
+}
+
+} // namespace
+
 class EstimatorWrapper {
 public:
   EstimatorWrapper(const std::string &cfg_path,
@@ -100,11 +136,7 @@ public:
   {
     py::buffer_info info = b.request();
 
-    int size_row = info.strides[0];
-    int num_col = size_row / info.strides[1] / info.itemsize;
-    int num_row = info.size / size_row;
-
-    cv::Mat image(num_row, num_col, CV_8UC3, info.ptr);
+    cv::Mat image = CloneImageFromBuffer(info);
 
     estimator_->VisualMeas(timestamp_t{ts}, image);
 
@@ -162,11 +194,7 @@ public:
   {
     py::buffer_info info = b.request();
 
-    int size_row = info.strides[0];
-    int num_col = size_row / info.strides[1] / info.itemsize;
-    int num_row = info.size / size_row;
-
-    cv::Mat image(num_row, num_col, CV_8UC3, info.ptr);
+    cv::Mat image = CloneImageFromBuffer(info);
 
     estimator_->VisualMeasTrackerOnly(timestamp_t{ts}, image);
 

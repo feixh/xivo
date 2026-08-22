@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "glog/logging.h"
+
 #include "component.h"
 #include "core.h"
 #include "jac.h"
@@ -41,23 +43,41 @@ public:
     push_back(Vec2(x, y));
     // Features are recycled out of MemoryManager's pool (see Feature::Create,
     // which calls Reset on a slot that previously belonged to a different
-    // feature). Leaving these behind meant a new track inherited the *previous*
-    // track's descriptor history: `descriptor()` returns descriptors_.back(), so
-    // until the first SetDescriptor call it handed out a descriptor belonging to
-    // an unrelated feature, and GetAllDescriptors()/GetAllDBoWDesc() mixed the
-    // two tracks for the rest of the new feature's life. Same for the keypoint.
+    // feature), so this is the only chance to drop the previous tenant's data.
+    // Leaving it behind meant a new track inherited the *previous* track's
+    // descriptor history: `descriptor()` returns descriptors_.back(), so until
+    // the first SetDescriptor call it handed out a descriptor belonging to an
+    // unrelated feature, GetAllDescriptors()/GetAllDBoWDesc() mixed the two
+    // tracks for the rest of the new feature's life, and the history grew for
+    // the whole run instead of per track. Same for the keypoint.
     descriptors_.clear();
     keypoint_ = cv::KeyPoint();
   }
 
   TrackStatus status() const { return status_; }
   void SetStatus(TrackStatus status) { status_ = status; }
-  void SetDescriptor(const cv::Mat &descriptor) { descriptors_.push_back(descriptor); }
+  /** Stores a *copy* of the descriptor.
+   *
+   *  Every caller passes `all_descriptors.row(i)`, which is a view sharing the
+   *  per-frame descriptor matrix OpenCV filled in. Keeping the view keeps that
+   *  whole matrix -- 110-270 keypoints of it -- alive for one 32-byte row, so
+   *  holding on to a handful of rows pinned megabytes.
+   */
+  void SetDescriptor(const cv::Mat &descriptor) {
+    descriptors_.push_back(descriptor.clone());
+  }
   void SetKeypoint(const cv::KeyPoint &keypoint) { keypoint_ = keypoint; }
   const cv::KeyPoint &keypoint() const { return keypoint_; }
   cv::KeyPoint &keypoint() { return keypoint_; }
-  const cv::Mat &descriptor() const { return descriptors_.back(); }
-  cv::Mat &descriptor() { return descriptors_.back(); }
+  bool has_descriptor() const { return !descriptors_.empty(); }
+  const cv::Mat &descriptor() const {
+    CHECK(!descriptors_.empty()) << "track has no descriptor";
+    return descriptors_.back();
+  }
+  cv::Mat &descriptor() {
+    CHECK(!descriptors_.empty()) << "track has no descriptor";
+    return descriptors_.back();
+  }
   const std::vector<cv::Mat>& GetAllDescriptors() { return descriptors_; }
   FastBrief::TDescriptor GetDBoWDesc();
   std::vector<FastBrief::TDescriptor> GetAllDBoWDesc();

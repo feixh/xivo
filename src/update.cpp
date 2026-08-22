@@ -463,6 +463,14 @@ Estimator::OnePointRANSAC(const std::vector<FeaturePtr> &mh_inliers) {
     }
 
     DestroyFeatures(to_destroy);
+    // active_features was snapshotted before the update and is walked again
+    // below (RestoreState + ComputeJacobian). A destroyed feature has had
+    // RemoveFeatureFromState set its sind to -1 (estimator.cpp), and
+    // ComputeJacobian indexes Jacobian blocks off sind(), so leaving it in the
+    // set writes at a negative offset.
+    for (auto f : to_destroy) {
+      active_features.erase(f);
+    }
 
     if (!hi_inliers.empty()) {
       max_inliers.insert(hi_inliers.begin(), hi_inliers.end());

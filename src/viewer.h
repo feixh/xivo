@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
 
 #include "opencv2/core/core.hpp"
@@ -27,9 +28,14 @@ public:
 
 private:
   std::string window_name_;
-  pangolin::OpenGlRenderState *camera_state_;
-  pangolin::OpenGlRenderState *image_state_;
-  pangolin::GlTexture *texture_;
+  std::unique_ptr<pangolin::OpenGlRenderState> camera_state_;
+  std::unique_ptr<pangolin::OpenGlRenderState> image_state_;
+  std::unique_ptr<pangolin::GlTexture> texture_;
+  /** pangolin::View stores a *non-owning* Handler*, so whatever is passed to
+   *  View::SetHandler has to be owned here. See ~Viewer, which unhooks these
+   *  from the views before dropping them. */
+  std::unique_ptr<pangolin::Handler3D> image_handler_;
+  std::unique_ptr<pangolin::Handler3D> camera_handler_;
   Json::Value cfg_;
   bool tracker_only_;
 

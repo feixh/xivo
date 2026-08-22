@@ -2,6 +2,7 @@
 // Author: Stephanie Tsuei (stephanietsuei@ucla.edu)
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -31,7 +32,7 @@ using LCMatch = std::pair<FeaturePtr, FeaturePtr>;
 
 
 // Helper functions for interfacing with Lambdatwist PnP RANSAC
-cvl::PnpParams* GetRANSACParams(const Json::Value &cfg);
+std::unique_ptr<cvl::PnpParams> GetRANSACParams(const Json::Value &cfg);
 void GetPnPInput(std::vector<LCMatch> &matches,
                  std::vector<cvl::Vector3D> &xs,
                  std::vector<cvl::Vector2D> &yns);
@@ -77,7 +78,7 @@ private:
   double feature_merge_cov_factor_;
   int uplevel_word_search_;
   double nn_dist_thresh_;
-  FastBriefVocabulary* voc_;
+  std::unique_ptr<FastBriefVocabulary> voc_;
 
   /** Maps DBoW2 words to a set of features that map to the same word in the
    *  vocabulary. */
@@ -93,7 +94,7 @@ private:
   void RANSAC(std::vector<LCMatch> &match_list);
 
   // RANSAC parameters
-  cvl::PnpParams* ransac_params_;
+  std::unique_ptr<cvl::PnpParams> ransac_params_;
 };
 
 
