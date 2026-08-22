@@ -13,7 +13,10 @@ VecXi Estimator::InstateFeatureSinds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // std::min, not max: the fill loop below stops at n_output *and* at the end
+  // of instate_features, and Eigen does not zero-initialise, so sizing the
+  // output by the larger of the two returned uninitialised heap to the caller.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -45,7 +48,7 @@ VecXi Estimator::InstateFeatureRefGroups(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -77,7 +80,7 @@ VecXi Estimator::InstateFeatureIDs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -109,7 +112,7 @@ MatX3 Estimator::InstateFeaturePositions(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -143,7 +146,7 @@ MatX3 Estimator::InstateFeatureXc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -177,7 +180,7 @@ MatX3 Estimator::InstateFeaturexc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -211,7 +214,7 @@ MatX2 Estimator::InstateFeaturePreds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -244,7 +247,7 @@ MatX2 Estimator::InstateFeatureMeas(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -276,7 +279,7 @@ MatX6 Estimator::InstateFeatureCovs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),

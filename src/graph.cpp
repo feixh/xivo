@@ -46,6 +46,11 @@ void Graph::RemoveFeatures(const std::vector<FeaturePtr> &features) {
 void Graph::RemoveGroup(const GroupPtr g) {
   GraphBase::RemoveGroup(g);
   gauge_features_.erase(g);
+  if (last_added_group_ == g) {
+    // The group is about to be deactivated and its pool slot reused, so keeping
+    // it here would leave LastAddedGroup() returning the slot's next tenant.
+    last_added_group_ = nullptr;
+  }
   LOG(INFO) << "group #" << g->id() << " removed from Graph";
 }
 

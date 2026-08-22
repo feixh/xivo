@@ -187,6 +187,12 @@ target_link_libraries(unitTests_triangulation xest ${deps} gtest gtest_main)
 add_test(NAME Triangulation COMMAND unitTests_triangulation
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+add_executable(unitTests_metrics_rpe
+               test/unittest_metrics_rpe.cpp)
+target_link_libraries(unitTests_metrics_rpe ${libxivo} ${deps} gtest gtest_main)
+add_test(NAME MetricsRPE COMMAND unitTests_metrics_rpe
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(unitTests_descriptor_memory
                test/unittest_descriptor_memory.cpp)
 target_link_libraries(unitTests_descriptor_memory xest ${deps} gtest gtest_main)

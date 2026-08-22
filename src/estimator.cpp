@@ -1321,6 +1321,11 @@ void Estimator::DiscardGroup(const GroupPtr g) {
   if (g->id() == gauge_group_) {
     // just lost the gauge group
     gauge_group_ = -1;
+    // ... and with it the pointer, which the group is about to outlive: `g` is
+    // deactivated below and its pool slot handed to another group, after which
+    // the identity comparison in OnePointRANSAC (update.cpp:312) would be
+    // against whatever moved in.
+    gauge_group_ptr_ = nullptr;
   }
 #ifdef USE_MAPPER
   Mapper::instance()->AddGroup(g, graph.GetGroupAdj(g));
@@ -1448,17 +1453,21 @@ void Estimator::RestoreState(std::unordered_set<FeaturePtr>& features,
 #endif
 }
 
+// Both comparators are std::sort predicates and so have to be a strict weak
+// ordering: `<=` reports comp(a,a) == true, and libstdc++'s partition loop has
+// no bounds check of its own -- on a run of equal scores it can walk off either
+// end of the range and write outside the vector.
 bool Estimator::FeatureCovComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).norm();
   number_t score2 = InstateFeatureCov(f2).norm();
-  return (score1 <= score2);
+  return (score1 < score2);
 }
 
 
 bool Estimator::FeatureCovXYComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).block<2,2>(0,0).norm();
   number_t score2 = InstateFeatureCov(f2).block<2,2>(0,0).norm();
-  return (score1 <= score2);
+  return (score1 < score2);
 }
 
 
