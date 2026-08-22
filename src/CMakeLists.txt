@@ -9,9 +9,22 @@ project(estimator)
 # if set, use inverse-depth parametrization
 # add_definitions(-DUSE_INVDEPTH)
 
-# if set, perform online temporal calibration
+# Online calibration of the IMU intrinsics (Cg, Ca). Measured inert on TUM-VI:
+# with P.Cg = P.Ca = 1e-5 (prior sigma 0.32%) the estimates move ~1e-6 over a
+# whole sequence, i.e. 0.03% of one sigma, because the dataset's IMU is already
+# factory-calibrated. Enabling it leaves mean ATE and RPE unchanged (0.1090 vs
+# 0.1102, well inside the +/-0.005 ensemble noise) while adding 15 weakly
+# observable states, which raises the ATE spread back to sd 0.0047 from the
+# 0.0020 temporal calibration alone achieves. The Jacobian chain it needs was
+# broken until M6 (bug #35) and its unit tests are ifdef'd behind this flag, so
+# turn it on when touching rodrigues.h.
 #add_definitions(-DUSE_ONLINE_IMU_CALIB)
-#add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
+
+# Online temporal calibration (camera/IMU time offset td). ON: it estimates a
+# small nonzero offset (-0.077 ms on room1) and halves the run-to-run ATE spread
+# (sd 0.0047 -> 0.0020) at a slightly better mean. Requires the td plumbing
+# fixed in M6 (bug #46: State::td was read uninitialised).
+add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
 #add_definitions(-DUSE_ONLINE_CAMERA_CALIB)
 
 # if set, enables the mapper object (and loop closure)
