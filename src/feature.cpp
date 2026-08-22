@@ -208,7 +208,8 @@ bool Feature::Merge(FeaturePtr f, const SE3& gbc) {
 }
 
 
-bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc) {
+bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc,
+                          ReanchorJacobians *jac_out) {
   // now transfer
   SE3 g_cn_s =
       (nref->gsb() * gbc)
@@ -232,7 +233,45 @@ bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc) {
   x_ = xn;
   Mat3 J = dxn_dXcn * dXcn_dx;
 
+  // `P_` is the covariance only for an out-of-state (depth sub-filter) feature,
+  // whose reference pose is treated as exact -- there `J` alone is the whole
+  // story. Once the feature is in the EKF state its covariance lives in the 3x3
+  // block of `Estimator::P_` at `kFeatureBegin + 3 * sind()` plus the
+  // cross-covariance rows/columns against the rest of the state, none of which
+  // is reachable from here.
   P_ = J * P_ * J.transpose();
+
+  if (jac_out != nullptr) {
+    // xn also depends on the *poses* of both the outgoing and the incoming
+    // reference group, and both of those are error-state blocks:
+    //
+    //   xn = pi( (gsb_n gbc)^-1 gsb_o gbc pi^-1(x) )
+    //
+    // For an in-state feature the covariance transform is therefore a row
+    // operation over three blocks, not a similarity transform on one. Dropping
+    // the two pose terms understates the re-anchored uncertainty, and the
+    // outgoing group is about to be deleted from the state without being
+    // marginalized -- so if its contribution is not folded in here it is simply
+    // lost. Derivatives use the same right (local) perturbation convention as
+    // `ComputeJacobian`: Rsb <- Rsb exp(dW), Tsb <- Tsb + dT.
+    const Mat3 Rbc_t = gbc.so3().matrix().transpose();
+    const Mat3 R_cn_s = g_cn_s.so3().matrix();
+
+    const Mat3 Rsb_o = ref_->Rsb().matrix();
+    const Vec3 Xb_o = Rsb_o.transpose() * (Xs_ - ref_->Tsb());
+    const Mat3 Rsb_n = nref->Rsb().matrix();
+    const Vec3 Xb_n = Rsb_n.transpose() * (Xs_ - nref->Tsb());
+
+    jac_out->dxn_dx = J;
+    // d Xs / d[dW_o, dT_o] = [-Rsb_o hat(Xb_o), I], then through R_cn_s.
+    jac_out->dxn_dref_old.leftCols<3>() =
+        dxn_dXcn * R_cn_s * (-Rsb_o * SO3::hat(Xb_o));
+    jac_out->dxn_dref_old.rightCols<3>() = dxn_dXcn * R_cn_s;
+    // d Xcn / d[dW_n, dT_n] = [Rbc^T hat(Xb_n), -R_cn_s].
+    jac_out->dxn_dref_new.leftCols<3>() =
+        dxn_dXcn * (Rbc_t * SO3::hat(Xb_n));
+    jac_out->dxn_dref_new.rightCols<3>() = dxn_dXcn * (-R_cn_s);
+  }
 
   // Update other parameters
   ResetRef(nref);
@@ -555,6 +594,13 @@ bool Feature::RefineDepth(const SE3 &gbc,
 void Feature::ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
                               const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
                               const Vec3 &bg, const Vec3 &Vsb, number_t td) {
+
+  // `J_` is a full-width row block of which only a handful of column blocks are
+  // ever written, so stale columns survive from one call to the next. That
+  // matters after `ChangeOwner`: the old reference group's six columns keep the
+  // Jacobian w.r.t. a group this feature is no longer anchored to, and
+  // `MHGating` forms `J_ * P_ * J_^T` over the *whole* row. Clear it.
+  J_.setZero();
 
   Mat3 Rsb_t = Rsb.transpose();
   Mat3 Rbc_t = Rbc.transpose();

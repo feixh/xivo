@@ -1326,10 +1326,76 @@ std::tuple<number_t, bool> Estimator::HuberOnInnovation(const Vec2 &inn,
 std::vector<FeaturePtr> Estimator::FindNewOwnersForFeaturesOf(const GroupPtr g) {
   Graph& graph{*Graph::instance()};
   std::vector<FeaturePtr> nullref_features;
-  auto failed =
-    graph.TransferFeatureOwnership(g, gbc(), feature_owner_change_cov_factor_);
+  std::vector<Graph::Reanchored> reanchored_instate;
+  auto failed = graph.TransferFeatureOwnership(
+      g, gbc(), feature_owner_change_cov_factor_, &reanchored_instate);
+
+  // Re-parameterizing an in-state feature against a new reference group is a
+  // change of state coordinates, so its filter covariance -- including every
+  // cross-covariance against the rest of the state -- has to be pushed through
+  // the same Jacobian. `Feature::ChangeOwner` can only reach the feature's local
+  // 3x3 copy, which is dead storage once the feature is in the state, so this
+  // never happened: the filter kept the old parameterization's uncertainty for
+  // the new coordinates. Fold the inflation factor in as sqrt(factor) * J, which
+  // scales the feature block by `factor` and its cross terms by sqrt(factor),
+  // preserving positive semi-definiteness.
+  const number_t s = std::sqrt(feature_owner_change_cov_factor_);
+  for (const auto &r : reanchored_instate) {
+    ReanchorFeatureCovariance(r.f, r.old_ref, r.f->ref(), r.jac, s);
+  }
+
   nullref_features.insert(nullref_features.end(), failed.begin(), failed.end());
   return nullref_features;
+}
+
+
+void Estimator::ReanchorFeatureCovariance(FeaturePtr f, GroupPtr old_ref,
+                                          GroupPtr new_ref,
+                                          const Feature::ReanchorJacobians &jac,
+                                          number_t scale) {
+#ifndef NDEBUG
+  CHECK(f->sind() != -1) << "feature not in state";
+  CHECK(new_ref->sind() != -1) << "new reference group not in state";
+#endif
+  const int foff = kFeatureBegin + kFeatureSize * f->sind();
+  const int n = P_.rows();
+
+  const Mat3 Jx = scale * jac.dxn_dx;
+  const Mat36 Jn = scale * jac.dxn_dref_new;
+  const int noff = kGroupBegin + kGroupSize * new_ref->sind();
+  // The outgoing group is not necessarily in the state -- `DiscardAffectedGroups`
+  // re-anchors before it knows whether the group had a state slot. If it does
+  // not, its pose carries no error state and the term simply drops out.
+  const bool old_in_state = (old_ref != nullptr) && (old_ref->sind() != -1);
+  const Mat36 Jo = old_in_state ? Mat36(scale * jac.dxn_dref_old)
+                                : Mat36(Mat36::Zero());
+  const int ooff =
+      old_in_state ? kGroupBegin + kGroupSize * old_ref->sind() : 0;
+
+  // P <- S P S^T with S = I except for rows [foff, foff+3), which hold Jx at
+  // foff, Jo at ooff and Jn at noff. Do it as (S P) first, then (S P) S^T: after
+  // the row pass the feature's rows are already S P, and reading the *updated*
+  // columns in the second pass is exactly what (S P) S^T needs -- including the
+  // diagonal block, which ends up as the full quadratic form.
+  const MatX row = Jx * P_.block(foff, 0, kFeatureSize, n) +
+                   Jn * P_.block(noff, 0, kGroupSize, n) +
+                   (old_in_state ? MatX(Jo * P_.block(ooff, 0, kGroupSize, n))
+                                 : MatX(MatX::Zero(kFeatureSize, n)));
+  P_.block(foff, 0, kFeatureSize, n) = row;
+
+  const MatX col = P_.block(0, foff, n, kFeatureSize) * Jx.transpose() +
+                   P_.block(0, noff, n, kGroupSize) * Jn.transpose() +
+                   (old_in_state
+                        ? MatX(P_.block(0, ooff, n, kGroupSize) * Jo.transpose())
+                        : MatX(MatX::Zero(n, kFeatureSize)));
+  P_.block(0, foff, n, kFeatureSize) = col;
+
+  // The error state is zero outside a filter update, but transform it anyway so
+  // this stays correct if it is ever called from within one.
+  err_.segment<3>(foff) = Jx * err_.segment<3>(foff) +
+                          Jn * err_.segment<6>(noff) +
+                          (old_in_state ? Vec3(Jo * err_.segment<6>(ooff))
+                                        : Vec3(Vec3::Zero()));
 }
 
 

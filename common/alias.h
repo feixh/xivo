@@ -23,6 +23,7 @@ using Mat6 = Eigen::Matrix<number_t, 6, 6>;
 using Mat23 = Eigen::Matrix<number_t, 2, 3>;
 using Mat32 = Eigen::Matrix<number_t, 3, 2>;
 using Mat34 = Eigen::Matrix<number_t, 3, 4>;
+using Mat36 = Eigen::Matrix<number_t, 3, 6>;
 using Mat93 = Eigen::Matrix<number_t, 9, 3>;
 using Mat39 = Eigen::Matrix<number_t, 3, 9>;
 using MatX = Eigen::Matrix<number_t, Eigen::Dynamic, Eigen::Dynamic>;

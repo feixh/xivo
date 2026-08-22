@@ -1,5 +1,8 @@
 #include <iostream>
 
+#include <algorithm>
+
+#include "Eigen/Eigenvalues"
 #include "Eigen/OrderingMethods"
 #include "Eigen/SparseCore"
 #include "Eigen/SparseQR"
@@ -160,15 +163,53 @@ SE3 TrajectoryAlignment(const std::vector<Vec3> &Y,
 
 
 bool PointsAreCollinear(const std::vector<Vec3>& pts, number_t thresh) {
-  Vec3 v1 = pts[1] - pts[0];
-  for (int i=2; i<pts.size(); i++) {
-    Vec3 vi = pts[i] - pts[0];
-    number_t r = v1.cross(vi).norm();
-    if (r > thresh) {
-      return false;
-    }
+  // Three defects in the previous implementation, all of which mattered:
+  //
+  //  1. `pts[1] - pts[0]` was read unguarded, so a vector of 0 or 1 points read
+  //     out of bounds.
+  //  2. It compared |(p1-p0) x (pi-p0)|, an *area*, against a fixed threshold.
+  //     That grows with the square of the distance between the points, so the
+  //     same geometry passes or fails depending only on how far away it is; and
+  //     it degenerates to "always collinear" whenever p0 and p1 happen to be
+  //     close together, independently of where the other points lie.
+  //  3. The verdict depended on which point landed at index 0. The only caller
+  //     (`Graph::FindNewGaugeFeatures`) builds the vector by iterating an
+  //     `unordered_set<FeaturePtr>`, whose order is the features' heap
+  //     addresses -- which is why runs of two different binaries on identical
+  //     input diverged (see notes-bugfix/m0-baseline.md).
+  //
+  // Use the second moment of the centred point set instead. Its eigenvalues are
+  // invariant to the ordering, and the ratio of the largest spread orthogonal to
+  // the best-fit line to the spread along it is dimensionless: `thresh` is now
+  // sin(angle) of the residual off-line spread rather than an area in m^2.
+  if (pts.size() < 3) {
+    // Fewer than three points are always collinear.
+    return true;
   }
-  return true;
+
+  Vec3 centroid = Vec3::Zero();
+  for (const auto &p : pts) {
+    centroid += p;
+  }
+  centroid /= static_cast<number_t>(pts.size());
+
+  Mat3 M = Mat3::Zero();
+  for (const auto &p : pts) {
+    Vec3 d = p - centroid;
+    M += d * d.transpose();
+  }
+
+  Eigen::SelfAdjointEigenSolver<Mat3> eig(M);
+  if (eig.info() != Eigen::Success) {
+    return true; // cannot tell; treat as degenerate
+  }
+  // Ascending order: s(2) is the variance along the best-fit line, s(1) the
+  // largest variance orthogonal to it.
+  const Vec3 s = eig.eigenvalues();
+  if (!(s(2) > 0)) {
+    return true; // every point coincides
+  }
+  return std::sqrt(std::max<number_t>(s(1), 0) / s(2)) < thresh;
 }
 
 

@@ -57,8 +57,19 @@ public:
   // This function is called when a group `g` is discarded to make room for
   // more groups in the `MemoryManager`. Features that were first created at
   // group `g` have their coordinates changed to a new group.
+  // One entry per in-state feature that was successfully re-anchored: the
+  // feature, the group it came from, and the Jacobians of its new
+  // parameterization. `Graph` cannot reach the filter covariance, so the caller
+  // has to apply those to `Estimator::P_`; in-state features are *not* passed
+  // through `inflate_cov`, which only scales the (dead) local copy.
+  struct Reanchored {
+    FeaturePtr f;
+    GroupPtr old_ref;
+    Feature::ReanchorJacobians jac;
+  };
   std::vector<FeaturePtr> TransferFeatureOwnership(
-    GroupPtr g, const SE3 &gbc, number_t cov_factor);
+    GroupPtr g, const SE3 &gbc, number_t cov_factor,
+    std::vector<Reanchored> *reanchored_instate = nullptr);
 
   // Helper function to `TransferFeatureOwnership`. Finds a new reference frame
   // for a feature when its group is removed from the graph to make room for new

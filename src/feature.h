@@ -117,7 +117,18 @@ public:
    * changes in any members of this feature are made. Used when reference
    * group meets the maximum group lifetime and is removed from the state and
    * during loop closure. */
-  bool ChangeOwner(GroupPtr nref, const SE3 &gbc);
+  /** Jacobians of a re-anchored feature's new local parameterization w.r.t. the
+   *  error-state blocks it depends on. Re-anchoring is a change of state
+   *  coordinates, so the filter covariance has to be pushed through the whole
+   *  row -- not just the feature's own 3x3 block. `Feature` cannot reach
+   *  `Estimator::P_`, so `ChangeOwner` hands these out instead. */
+  struct ReanchorJacobians {
+    Mat3 dxn_dx;         //< w.r.t. this feature's own (X/Z, Y/Z, log Z)
+    Mat36 dxn_dref_old;  //< w.r.t. [Wsb, Tsb] of the outgoing reference group
+    Mat36 dxn_dref_new;  //< w.r.t. [Wsb, Tsb] of the incoming reference group
+  };
+  bool ChangeOwner(GroupPtr nref, const SE3 &gbc,
+                   ReanchorJacobians *jac_out = nullptr);
   const int LoopClosureMatch() { return lc_match_; }
   void SetLCMatch(int matched_feat_id) { lc_match_ = matched_feat_id; }
 

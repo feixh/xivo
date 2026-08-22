@@ -94,6 +94,17 @@ void Estimator::UpdateStep(const timestamp_t &ts,
     }
   }
 
+  // `DiscardAffectedGroups` may have re-anchored some of these features to a new
+  // reference group, which changes both `x_` and the state columns the Jacobian
+  // belongs in. Jacobians computed above (before the re-anchoring) are stale for
+  // exactly those features, and `FilterUpdate` would apply them at the *new*
+  // group's offset. Recompute over the surviving set -- cheap, at most
+  // `kMaxFeature` features, and it refreshes the innovation too.
+  for (auto f : in_current_ekf_update_) {
+    f->ComputeJacobian(X_.Rsb.matrix(), X_.Tsb, X_.Rbc.matrix(), X_.Tbc,
+                       last_gyro_, imu_.Cg(), X_.bg, X_.Vsb, X_.td);
+  }
+
 #ifndef NDEBUG
   CHECK(sum(fsel_) == in_current_ekf_update_.size())
     << "bookkeeping error in removing floating groups";
@@ -324,10 +335,19 @@ void Estimator::DiscardAffectedGroups() {
     if ((num_instate_features_of_g < num_gauge_xy_features_) ||
         ((num_gauge_xy_features_ == 0) && (num_instate_features_of_g == 0))) {
       std::vector<FeaturePtr> nullrefs = FindNewOwnersForFeaturesOf(g);
-      DiscardFeatures(nullrefs);
+      // The status write has to sit between the two halves of `DiscardFeatures`:
+      // that function keys the filter-slot release off `instate()`, which
+      // `NULLREFED` makes false, and it ends by handing the object back to the
+      // memory-manager pool -- so marking afterwards, as this used to, wrote to a
+      // slot the manager was already free to recycle. Release the slot here and
+      // mark before `DiscardFeatures` sees the feature.
       for (auto f: nullrefs) {
+        if (f->instate()) {
+          RemoveFeatureFromState(f);
+        }
         f->SetStatus(FeatureStatus::NULLREFED);
       }
+      DiscardFeatures(nullrefs);
       DiscardGroup(g);
     }
   }

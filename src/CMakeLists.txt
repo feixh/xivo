@@ -148,6 +148,7 @@ add_test(NAME NumericalAlgorithms COMMAND unitTests_NumericalAlgorithms)
 add_executable(unitTests_Jacobians
                test/unittest_jacobians_instate.cpp
                test/unittest_jacobians_oos.cpp
+               test/unittest_reanchor.cpp
                test/unittest_helpers.cpp)
 target_link_libraries(unitTests_Jacobians ${libxivo} ${deps} gtest gtest_main)
 add_test(NAME Jacobians COMMAND unitTests_Jacobians)
@@ -176,6 +177,11 @@ add_executable(unitTests_triangulation
                test/unittest_triangulation.cpp)
 target_link_libraries(unitTests_triangulation xest ${deps} gtest gtest_main)
 add_test(NAME Triangulation COMMAND unitTests_triangulation)
+
+add_executable(unitTests_geometry
+               test/unittest_geometry.cpp)
+target_link_libraries(unitTests_geometry xapp xest ${deps} gtest gtest_main)
+add_test(NAME Geometry COMMAND unitTests_geometry)
 
 if (BUILD_G2O)
   message(INFO ${libxivo})

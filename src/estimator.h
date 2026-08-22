@@ -350,6 +350,14 @@ private:
                     std::unordered_set<GroupPtr>& groups);
 
   void FixFeatureXY(FeaturePtr f);
+  /** Propagates a re-anchoring through the filter covariance: P <- S P S^T,
+   *  where S is the identity except for this feature's three rows, which pick up
+   *  `jac.dxn_dx` at the feature's own block and `jac.dxn_dref_{old,new}` at the
+   *  two groups'. `scale` multiplies all three (i.e. inflates the feature block
+   *  by scale^2), which is how `feature_owner_change_cov_factor` is applied. */
+  void ReanchorFeatureCovariance(FeaturePtr f, GroupPtr old_ref, GroupPtr new_ref,
+                                 const Feature::ReanchorJacobians &jac,
+                                 number_t scale);
 
 private:
   Estimator(const Json::Value &cfg);
