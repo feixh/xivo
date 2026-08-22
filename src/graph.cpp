@@ -86,7 +86,18 @@ void Graph::AddGroupToFeature(GroupPtr g, FeaturePtr f) {
   CHECK(HasFeature(f)) << "feature #" << fid << " not exists";
   CHECK(HasGroup(g)) << "group #" << gid << " not exists";
 
-  feature_adj_.at(fid).Add({g, f->xp()});
+  // The right-camera pixel goes onto the edge, not just onto the feature: it is
+  // the observation made *at this group's frame*, and the out-of-state update
+  // revisits the whole track later, after `Feature::xp_r()` has moved on. Only
+  // the current frame has a right match to record, which is exactly the frame
+  // this group was created for (`Estimator::UpdateStep` creates the group and
+  // then associates the tracks with it).
+  Observation obs{g, f->xp()};
+  if (f->has_right()) {
+    obs.has_right = true;
+    obs.xp_r = f->xp_r();
+  }
+  feature_adj_.at(fid).Add(obs);
   LOG(INFO) << "group #" << gid << " added to feature #" << fid;
 }
 

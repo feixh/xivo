@@ -144,19 +144,32 @@ GraphBase::GetGroupsIf(std::function<bool(GroupPtr)> pred) const {
 }
 
 std::vector<Observation> GraphBase::GetObservationsOf(FeaturePtr f) const {
+  const FeatureAdj &adj = feature_adj_.at(f->id());
   std::vector<Observation> out;
-  for (const auto &obs : feature_adj_.at(f->id())) {
-    out.push_back({groups_.at(obs.first), obs.second});
+  for (const auto &obs : adj) {
+    Observation o{groups_.at(obs.first), obs.second};
+    auto it = adj.right.find(obs.first);
+    if (it != adj.right.end()) {
+      o.has_right = true;
+      o.xp_r = it->second;
+    }
+    out.push_back(o);
   }
   return out;
 }
 
 Observation GraphBase::GetObservationOf(FeaturePtr f, GroupPtr g) const {
-  for (const auto &obs : feature_adj_.at(f->id())) {
+  const FeatureAdj &adj = feature_adj_.at(f->id());
+  for (const auto &obs : adj) {
     if (obs.first == g->id()) {
       Observation ret;
       ret.g = g;
       ret.xp = obs.second;
+      auto it = adj.right.find(obs.first);
+      if (it != adj.right.end()) {
+        ret.has_right = true;
+        ret.xp_r = it->second;
+      }
       return ret;
     }
   }

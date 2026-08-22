@@ -109,12 +109,12 @@ protected:
    *  `A' * Hf`, which must vanish. */
   int FillJacobians() {
     f_->cache_.Xs = f_->Xs(Gbc());
-    f_->oos_jac_counter_ = 0;
+    int rows = 0;
     for (const auto &obs : obs_) {
-      f_->ComputeOOSJacobianInternal(obs, Gbc().so3().matrix(),
-                                     Gbc().translation());
+      rows += f_->ComputeOOSJacobianInternal(obs, Gbc().so3().matrix(),
+                                             Gbc().translation(), rows,
+                                             options_);
     }
-    int rows = 2 * f_->oos_jac_counter_;
     Hf0_ = f_->oos_.Hf.topRows(rows);
     f_->oos_.Hx.block(0, kFeatureBegin, rows, 3) = Hf0_;
     Hx0_ = f_->oos_.Hx.topRows(rows);

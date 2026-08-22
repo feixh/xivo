@@ -22,8 +22,16 @@ int Feature::num_bad_triangulations_ = 0;
 JacobianCache Feature::cache_ = {};
 
 // Operations for FeatureAdj
-void FeatureAdj::Add(const Observation &obs) { insert({obs.g->id(), obs.xp}); }
-void FeatureAdj::Remove(int id) { erase(id); }
+void FeatureAdj::Add(const Observation &obs) {
+  insert({obs.g->id(), obs.xp});
+  if (obs.has_right) {
+    right.insert({obs.g->id(), obs.xp_r});
+  }
+}
+void FeatureAdj::Remove(int id) {
+  erase(id);
+  right.erase(id);
+}
 
 
 namespace {

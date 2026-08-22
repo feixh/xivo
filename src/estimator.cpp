@@ -106,7 +106,11 @@ Estimator::~Estimator() {
     std::cout << "rows=" << total_oos_rows_ << "  observations=" << total_oos_obs_
               << "  obs/feature="
               << (total_oos_used_ ? number_t(total_oos_obs_) / total_oos_used_ : 0)
-              << std::endl;
+              << "  with_right=" << total_oos_right_obs_ << " ("
+              << (total_oos_obs_
+                      ? 100.0 * number_t(total_oos_right_obs_) / total_oos_obs_
+                      : 0)
+              << "%)" << std::endl;
     std::cout << "views/candidate: all="
               << (total_oos_candidates_
                       ? number_t(total_oos_views_all_) / total_oos_candidates_
@@ -174,6 +178,22 @@ Estimator::Estimator(const Json::Value &cfg)
     // Per-degree-of-freedom Mahalanobis gate; <= 0 disables it.
     oos_options_.MH_thresh = oos.get("MH_thresh", 5.991).asDouble();
 
+    // Right-camera rows on out-of-state tracks. On by default, and a no-op in a
+    // monocular run or on a frame the matcher found nothing in -- so the flag
+    // exists to *disable* them (to isolate their effect), not to opt in. The
+    // relative noise of a right row defaults to the one the in-state stereo
+    // update uses, so that a single `stereo_update.R_scale` governs both unless
+    // `OOS.stereo_R_scale` overrides it.
+    oos_options_.use_stereo = oos.get("use_stereo", true).asBool();
+    oos_options_.stereo_R_scale =
+        oos.get("stereo_R_scale",
+                cfg_["stereo_update"].get("R_scale", 1.0).asDouble())
+            .asDouble();
+    if (!(oos_options_.stereo_R_scale > 0.0)) {
+      LOG(FATAL) << "OOS.stereo_R_scale must be positive; got "
+                 << oos_options_.stereo_R_scale;
+    }
+
     // Sliding window of past poses kept in the state so that the observations of
     // a dropped track have something to constrain. 0 disables it, which leaves
     // group management exactly as it is without OOS.
@@ -184,6 +204,8 @@ Estimator::Estimator(const Json::Value &cfg)
               << "; max_observations=" << oos_options_.max_observations
               << "; max_mean_reproj_err=" << oos_options_.max_mean_reproj_err
               << "; MH_thresh=" << oos_options_.MH_thresh
+              << "; use_stereo=" << oos_options_.use_stereo
+              << "; stereo_R_scale=" << oos_options_.stereo_R_scale
               << "; pose_window=" << oos_pose_window_
               << "; augment_every=" << oos_augment_every_;
   }

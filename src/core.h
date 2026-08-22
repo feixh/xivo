@@ -237,6 +237,14 @@ struct Observation {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   GroupPtr g;
   Vec2 xp;
+  /** The right camera's observation of the same feature at the same frame, when
+   *  the stereo matcher found one. Recorded per (feature, group) edge by
+   *  `Graph::AddFeatureToGroup`, unlike `Feature::xp_r()` which only holds the
+   *  current frame: the out-of-state update revisits a whole track after the
+   *  tracker has dropped it, so it needs the history. Left at `has_right =
+   *  false` in monocular runs and for frames with no match. */
+  bool has_right{false};
+  Vec2 xp_r{Vec2::Zero()};
 };
 
 using Obs = Observation;

@@ -1,0 +1,500 @@
+{
+  "simulation": false,
+  "print_timing": false,
+  "use_canvas": true,
+  "use_debug_view": false,
+  "async_run": false,
+  "print_bias_info": true,
+  "draw_OOS": true,
+  "integration_method": "PrinceDormand",
+  "use_OOS": true,
+  // Out-of-state (MSCKF) update: when the tracker drops a track, its whole
+  // history of observations from in-state groups is triangulated and the 3D
+  // point is marginalized out, leaving a constraint on the poses it was seen
+  // from. Values tuned on TUM-VI room1-6 (notes-n-prompts/notes-oos/); this
+  // file is otherwise identical to tumvi_stereo.json, so the two
+  // measure the effect of the update and nothing else.
+  "OOS": {
+    // In-state views needed before a dropped track is used at all. The
+    // marginalization consumes 3 of the 2n (or 4n, in stereo) rows, so 2 is the
+    // hard floor -- also in stereo, where a single view's surviving row would
+    // have an identically zero Jacobian.
+    "min_observations": 3,
+    // Cap on the views used; a longer track is thinned, keeping both ends
+    // (where the parallax is), not dropped. Halved internally when the right
+    // camera contributes, to stay inside the per-feature Jacobian buffer.
+    "max_observations": 15,
+    // Gauss-Newton re-triangulation over all the views before marginalizing.
+    // The depth inherited from the sub-filter is a two-view estimate, and a
+    // wrong point yields a consistent but wrong constraint on the whole window.
+    "refine": true,
+    "max_iters": 10,
+    "eps": 1e-05,
+    "Rtri": 1.0,
+    "max_mean_reproj_err": 1.5,
+    "zmin": 0.05,
+    "zmax": 50.0,
+    // Mahalanobis gate on the marginalized innovation, per degree of freedom.
+    "MH_thresh": 5.991,
+    // Use the right camera's observation of a dropped track as well, where the
+    // matcher found one: an n-view track then yields 4n - 3 rows instead of
+    // 2n - 3, and its depth is pinned by the rig's baseline rather than by the
+    // parallax the trajectory happened to provide. `stereo_R_scale` is the
+    // variance of a right row relative to a left one; the rows are whitened by
+    // its square root, since the update feeds the filter a scalar noise.
+    "use_stereo": true,
+    "stereo_R_scale": 1.0,
+    // Sliding window of past poses kept in the state so that the observations
+    // of a dropped track have something to constrain: XIVO has no pose window
+    // of its own, every group in the state is there because a live feature is
+    // anchored on it. 0 disables it and leaves group management untouched.
+    "pose_window": 20,
+    "augment_every": 2
+  },
+  "use_depth_opt": false,
+  "use_MH_gating": true,
+  "use_1pt_RANSAC": false,
+  "use_compression": false,
+  "triangulate_pre_subfilter": true,
+  "compression_trigger_ratio": 1.5,
+  "max_group_lifetime": 60,
+  "remove_outlier_counter": 10,
+  "OOS_update_min_observations": 5,
+  "feature_owner_change_cov_factor": 1.5,
+  "group_degrees_fixed": 4,
+  "PrinceDormand": {
+    "control_stepsize": false,
+    "tolerance": 1e-15,
+    "attempts": 12,
+    "min_scale_factor": 0.125,
+    "max_scale_factor": 4.0,
+    "stepsize": 0.002
+  },
+  "RK4": {
+    "stepsize": 0.002
+  },
+  // The EKF capacity this config was tuned for. Capacity is compile-time
+  // (EKF_MAX_FEATURES/EKF_MAX_GROUPS in the top-level CMakeLists.txt, defaulted
+  // to these values), so a config and a binary can disagree with no symptom
+  // other than worse numbers. CheckMemoryPools in src/factory.cpp refuses to
+  // start when the binary is smaller than this.
+  "require_ekf_max_features": 90,
+  "require_ekf_max_groups": 45,
+
+  // Object pools, not EKF capacity -- raising these alone changes nothing (the
+  // EKF cap is EKF_MAX_FEATURES/EKF_MAX_GROUPS at build time, 90/45 here). They
+  // are a fixed pre-allocation whose exhaustion is a LOG(FATAL) partway through
+  // a run, so CheckMemoryPools in src/factory.cpp refuses anything below the
+  // tracker cap and advises 2x it. Measured peak over room1-room6 is about 1.7x
+  // the tracker cap; 800 is 4.4x, which is real headroom for pennies of memory.
+  "memory": {
+    "max_features": 800,
+    "max_groups": 300
+  },
+  "gravity": [
+    0,
+    0,
+    -9.8
+  ],
+  "X": {
+    "Wsb": [
+      0,
+      0,
+      0
+    ],
+    "Tsb": [
+      0,
+      0,
+      0
+    ],
+    "Vsb": [
+      0,
+      0,
+      0
+    ],
+    "bg": [
+      0,
+      0,
+      0
+    ],
+    "ba": [
+      0,
+      0,
+      0
+    ],
+    "Wbc": [
+      [
+        -0.99952504,
+        0.00750192,
+        -0.02989013
+      ],
+      [
+        0.02961534,
+        -0.03439736,
+        -0.99896935
+      ],
+      [
+        -0.00852233,
+        -0.99938008,
+        0.03415885
+      ]
+    ],
+    "Tbc": [
+      0.04557484,
+      -0.0711618,
+      -0.04468125
+    ],
+    "Wsg": [
+      0,
+      0,
+      0
+    ],
+    "td": 0
+  },
+  "P": {
+    "Wsb": 0.0001,
+    "Tsb": 0.001,
+    "Vsb": 0.5,
+    "bg": 0.0001,
+    "ba": 0.001,
+    "Wbc": 0.0001,
+    "Tbc": 0.001,
+    "Wsg": 3.01,
+    "td": 1e-05,
+    "Cg": 1e-05,
+    "Ca": 1e-05,
+    "FC": [
+      9,
+      0.9
+    ],
+    "distortion": 0.01
+  },
+  "Qmodel": {
+    "Wsb": 0,
+    "Tsb": 0.0,
+    "Vsb": 0.0,
+    "wb": 0.0,
+    "ab": 0.0,
+    "Wbc": 0,
+    "Tbc": 0.0,
+    "Wsg": 0
+  },
+  "Qimu": {
+    "gyro": [
+      0.00024,
+      0.00024,
+      0.00024
+    ],
+    "gyro_bias": [
+      6.6e-06,
+      6e-06,
+      6e-06
+    ],
+    "accel": [
+      0.0042,
+      0.0042,
+      0.0042
+    ],
+    "accel_bias": [
+      0.000258,
+      0.000258,
+      0.000258
+    ]
+  },
+  "initial_z": 2.5,
+  "initial_std_x": 1.0,
+  "initial_std_y": 1.0,
+  "initial_std_z": 1.0,
+  "initial_std_x_badtri": 1.0,
+  "initial_std_y_badtri": 1.0,
+  "initial_std_z_badtri": 1.0,
+  "max_subfilter_outlier": 0.01,
+  "strict_criteria_timesteps": 5,
+  "comparison_score_type": "DepthUncertainty",
+  // 0.75 px, halved from the monocular 1.5. Two right-image observations per
+  // feature make the update better conditioned, so trusting the pixels more pays
+  // off here where it did not before: six-room mean ATE 0.101 -> 0.084 m at
+  // otherwise-fixed settings.
+  "visual_meas_std": 0.75,
+  "outlier_thresh": 1.1,
+  "oos_meas_std": 3.5,
+  "max_depth": 5.0,
+  "min_depth": 0.05,
+  "adaptive_initial_depth": {
+    "median_weight": 0.99,
+    "minimum_feature_lifetime": 5
+  },
+  "loop_closure_meas_std": 4.0,
+  "subfilter": {
+    "visual_meas_std": 3.5,
+    "ready_steps": 2,
+    "MH_thresh": 8.991
+  },
+  "triangulation": {
+    "method": "direct_linear_transform_svd",
+    "zmin": 0.05,
+    "zmax": 5.0,
+    "max_theta_thresh": 0.1,
+    "beta_thesh": 0.25
+  },
+  "depth_opt": {
+    "two_view": false,
+    "use_hessian": true,
+    "max_iters": 5,
+    "eps": 0.001,
+    "damping": 0.001,
+    "max_res_norm": 2.5
+  },
+  "imu_calib": {
+    "Cas": [
+      1,
+      1,
+      1
+    ],
+    "Car": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1
+      ]
+    ],
+    "Cgs": [
+      1,
+      1,
+      1
+    ],
+    "Cgr": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1
+      ]
+    ]
+  },
+  "gravity_init_counter": 20,
+  "camera_cfg": {
+    "comment": "512-cam0 (from camchain)",
+    "model": "equidistant",
+    "max_iter": 15,
+    "rows": 512,
+    "cols": 512,
+    "fx": 190.97847715128717,
+    "fy": 190.9733070521226,
+    "cx": 254.93170605935475,
+    "cy": 256.8974428996504,
+    "k0123": [
+      0.0034823894022493434,
+      0.0007150348452162257,
+      -0.0020532361418706202,
+      0.00020293673591811182
+    ]
+  },
+  "min_inliers": 5,
+  "MH_thresh": 5.991,
+  "MH_adjust_factor": 1.15,
+  "1pt_RANSAC_thresh": 1.5,
+  "1pt_RANSAC_prob": 0.95,
+  "1pt_RANSAC_Chi2": 5.89,
+  "num_gauge_xy_features": 3,
+  "collinear_cross_prod_thresh": 0.001,
+  "tracker_cfg": {
+    // Was false here (and in 23 other configs) while the key was dead: the
+    // tracker always seeded KLT from the EKF's predicted measurement regardless.
+    // The auto-bugfix merge makes the key live, so the value that preserves the
+    // behaviour this config was tuned against -- and that produced the numbers
+    // in RESULTS_STEREO.md -- is true. It is also load-bearing: honoring false
+    // on TUM-VI mono diverges room4 (ATE 0.10 -> 1.04).
+    "use_prediction": true,
+    "mask_size": 15,
+    "margin": 8,
+    // 3x the upstream 45/60. This is the *other* half of the capacity change:
+    // the EKF cannot hold more features than the tracker supplies, which is why
+    // an EKF_MAX_FEATURES of 60 and of 90 were bit-identical while this stayed at
+    // 60. Raising both together is what takes mean ATE from 0.076 to 0.048 m;
+    // going further (240 tracked / 120 in state) gains 0.001, inside the noise.
+    "num_features_min": 135,
+    "num_features_max": 180,
+    "max_pixel_displacement": 64,
+    "normalize": false,
+    "match_dropped_tracks": false,
+    "do_outlier_rejection": false,
+    "KLT": {
+      "win_size": 15,
+      "max_level": 5,
+      "max_iter": 30,
+      "eps": 0.01
+    },
+    "outlier_rejection": {
+      "method": "LMEDS",
+      "RANSAC_reproj_thresh": 3.0,
+      "RANSAC_max_iters": 2000,
+      "confidence": 0.995
+    },
+    "extract_descriptor": false,
+    "descriptor_distance_thresh": -1,
+    "descriptor": "BRIEF",
+    "differential": false,
+    "tracker_type": "LK",
+    "detector": "FAST",
+    "FAST": {
+      "threshold": 20,
+      "nonmaxSuppression": true
+    },
+    "BRISK": {
+      "thresh": 25,
+      "octaves": 3,
+      "patternScale": 1.0
+    },
+    "ORB": {
+      "nfeatures": 500,
+      "scaleFactor": 1.2,
+      "nlevels": 4,
+      "edgeThreshold": 31,
+      "firstLevel": 0,
+      "WTA_K": 2,
+      "patchSize": 31,
+      "fastThreshold": 20
+    },
+    "AGAST": {
+      "threshold": 10,
+      "nonmaxSuppression": true
+    },
+    "GFTT": {
+      "maxCorners": 1000,
+      "qualityLevel": 0.01,
+      "minDistance": 1.0,
+      "blockSize": 3,
+      "useHarrisDetector": false,
+      "k": 0.04
+    },
+    "SIFT": {
+      "nfeatures": 0,
+      "nOctaveLayers": 2,
+      "contrastThreshold": 0.0,
+      "edgeThreshold": 500.0,
+      "sigma": 1.6
+    },
+    "SURF": {
+      "hessianThreshold": 100,
+      "nOctaves": 1,
+      "nOctaveLayers": 2,
+      "extended": false,
+      "upright": false
+    },
+    "BRIEF": {
+      "bytes": 32,
+      "use_orientation": false
+    },
+    "FREAK": {
+      "orientationNormalized": true,
+      "scaleNormalized": true,
+      "patternScale": 22.0,
+      "nOctaves": 4
+    },
+    "stereo_matching": {
+      "comment": "gates on the left->right KLT match; see notes-stereo/m3",
+      "epipolar_thresh": 0.005,
+      "circular_thresh": 1.0,
+      "min_disparity": 1.0,
+      "max_disparity": 150.0
+    }
+  },
+  "mapper_cfg": {
+    "detectLoopClosures": false,
+    "vocabulary": "cfg/ukbench10K_FASTBRIEF32.yml.gz",
+    "uplevel_word_search": 0,
+    "nn_dist_thresh": 20.0,
+    "merge_features": true,
+    "feature_merge_cov_factor": 1.0,
+    "RANSAC": {
+      "max_iter": 1000,
+      "min_iter": 100,
+      "threshold": 0.03,
+      "probability": 0.95,
+      "early_exit": false,
+      "early_exit_min_iter": 5,
+      "early_exit_inlier_ratio": 0.85
+    }
+  },
+  "camera1_cfg": {
+    "comment": "512-cam1 (from camchain)",
+    "model": "equidistant",
+    "max_iter": 15,
+    "rows": 512,
+    "cols": 512,
+    "fx": 190.44236969414825,
+    "fy": 190.4344384721956,
+    "cx": 252.59949716835982,
+    "cy": 254.91723064636983,
+    "k0123": [
+      0.0034003170790442797,
+      0.001766278153469831,
+      -0.00266312569781606,
+      0.0003299517423931039
+    ]
+  },
+  "stereo": true,
+  "stereo_init": {
+    "comment": "metric depth at first observation; see notes-stereo/m4",
+    "enable": true,
+    "sigma_px": 0.15,
+    "max_gap": 0.1,
+    "min_std_z": 0.01,
+    "max_std_z": 1.0
+  },
+  "stereo_update": {
+    "comment": "right-camera rows in the EKF update; see notes-stereo/m5",
+    "enable": true,
+    "R_scale": 1.0,
+    "mh_scale": 1.0
+  },
+  "stereo_cfg": {
+    "comment": "T_cn_cnm1 from camchain.yaml: maps a point cam0 -> cam1",
+    "T_c1c0": [
+      [
+        0.9999994457734953,
+        -0.0008233639921576076,
+        -0.0006561436136444361,
+        -0.10106110275180535
+      ],
+      [
+        0.0007916877528168117,
+        0.9988994619156757,
+        -0.04689603624058988,
+        -0.0019764575873431013
+      ],
+      [
+        0.0006940340102242531,
+        0.04689549078870055,
+        0.9988995601463054,
+        -0.0011756424802046581
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  }
+}

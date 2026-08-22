@@ -238,6 +238,15 @@ target_link_libraries(unitTests_jacobians_stereo xest ${deps} gtest gtest_main)
 add_test(NAME StereoJacobians COMMAND unitTests_jacobians_stereo
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The stereo out-of-state rows. Separate from unitTests_OOSUpdate for the same
+# reason as above: that one installs a perfect pinhole in camera slot 0, this one
+# needs the real fisheye pair and a StereoRig.
+add_executable(unitTests_oos_stereo
+               test/unittest_oos_stereo.cpp)
+target_link_libraries(unitTests_oos_stereo xest ${deps} gtest gtest_main)
+add_test(NAME OOSStereo COMMAND unitTests_oos_stereo
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # Builds a whole system through CreateSystem (one Estimator per process, since
 # that factory is a singleton), so it also cannot share a process with the
 # pinhole-installing Jacobian tests.

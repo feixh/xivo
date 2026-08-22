@@ -238,6 +238,7 @@ int Estimator::ComputeOOSMeasurements() {
     oos_used_.push_back(f);
     num_oos_rows_ += rows;
     total_oos_obs_ += f->oos_num_obs();
+    total_oos_right_obs_ += f->oos_num_right_obs();
   }
   num_oos_used_ = oos_used_.size();
 

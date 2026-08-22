@@ -809,6 +809,10 @@ private:
   long total_oos_candidates_{0}, total_oos_used_{0}, total_oos_short_{0},
       total_oos_bad_tri_{0}, total_oos_gated_{0}, total_oos_rows_{0},
       total_oos_obs_{0};
+  /** Of `total_oos_obs_` views, how many also contributed the right camera's
+   *  two rows -- the one number that says whether stereo out-of-state rows are
+   *  actually firing. */
+  long total_oos_right_obs_{0};
   /** Observation coverage of the candidates: how many observations they have in
    *  total versus how many come from groups that are actually in the state (the
    *  only ones an OOS update can constrain). `oos_instate_view_hist_[k]` counts

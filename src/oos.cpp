@@ -4,10 +4,26 @@
 #include "feature.h"
 #include "group.h"
 #include "helpers.h"
+#include "stereo.h"
 
 namespace xivo {
 
 namespace {
+
+/** True when the right camera's observations of an out-of-state track should be
+ *  used: asked for, a rig configured, and a second camera model available. */
+bool OOSUsesStereo(const OOSOptions &options) {
+  return options.use_stereo && StereoRig::enabled() &&
+         (Camera::instance(1) != nullptr);
+}
+
+/** Weight applied to a right-camera row so that the stacked measurement stays
+ *  isotropic with variance `Roos_`; see `OOSOptions::stereo_R_scale`. */
+number_t StereoRowWeight(const OOSOptions &options) {
+  return options.stereo_R_scale > 0
+             ? 1.0 / std::sqrt(options.stereo_R_scale)
+             : 1.0;
+}
 
 /** Pick at most `max_obs` observations out of `obs` (assumed sorted by group
  *  id, i.e. oldest first), evenly spaced, always keeping the first and the last
@@ -58,9 +74,18 @@ Feature::SelectOOSObservations(const std::vector<Observation> &vobs,
               return a.g->id() < b.g->id();
             });
 
-  const int max_obs = options.max_observations > 1
-                          ? std::min(options.max_observations, kMaxGroup)
-                          : kMaxGroup;
+  int max_obs = options.max_observations > 1
+                    ? std::min(options.max_observations, kMaxGroup)
+                    : kMaxGroup;
+  // `OOSJacobian` is sized `2 * kMaxGroup` rows and is a member of *every*
+  // pooled feature, so it is not something to grow lightly (it is
+  // kFullSize-wide). With the right camera in play a view can contribute 4 rows
+  // instead of 2, so halve the view budget rather than double the buffer --
+  // thinning is already the designed response to a long track, and the parallax
+  // that matters is between the ends of the track, not between adjacent frames.
+  if (OOSUsesStereo(options)) {
+    max_obs = std::min(max_obs, kMaxGroup / 2);
+  }
   return ThinObservations(out, max_obs);
 }
 
@@ -73,6 +98,16 @@ bool Feature::RefineOOSDepth(const SE3 &gbc,
   }
 
   const number_t invC = 1.0 / options.Rtri;
+  // The right camera sees the same point from a known baseline, so it pins the
+  // depth of a low-parallax track that the left views alone can only refine
+  // along the ray -- exactly the tracks whose triangulation gate would
+  // otherwise reject them. Same weighting as in the Jacobian, so the point that
+  // gets marginalized is the optimum of the measurements that marginalize it.
+  const bool use_stereo = OOSUsesStereo(options);
+  const number_t w_r = StereoRowWeight(options);
+  const number_t invC_r = use_stereo ? invC * w_r * w_r : 0.0;
+  auto cam1 = use_stereo ? Camera::instance(1) : nullptr;
+  const StereoRig *rig = use_stereo ? StereoRig::instance() : nullptr;
 
   Mat3 H;
   Vec3 b;
@@ -89,6 +124,7 @@ bool Feature::RefineOOSDepth(const SE3 &gbc,
     H.setZero();
     b.setZero();
     number_t res_norm{0};
+    int num_res{0};
 
     for (const auto &obs : views) {
       SE3 g_cn_s = (obs.g->gsb() * gbc).inverse(); // spatial -> this camera
@@ -107,12 +143,38 @@ bool Feature::RefineOOSDepth(const SE3 &gbc,
       H.noalias() += dxp_dx.transpose() * dxp_dx * invC;
       b.noalias() += dxp_dx.transpose() * res * invC;
       res_norm += res.norm();
+      ++num_res;
+
+      if (!use_stereo || !obs.has_right) {
+        continue;
+      }
+      // Right camera of the same frame. The rig is fixed, so the only new links
+      // in the chain are the rigid hop into camera 1 and camera 1's projection.
+      Vec3 Xc1 = rig->Rc1c0() * Xcn + rig->Tc1c0();
+      if (!(Xc1(2) > 0.0)) {
+        continue;
+      }
+      Mat23 dxc1_dXc1;
+      Vec2 xc1 = project(Xc1, &dxc1_dXc1);
+      Mat2 dxp1_dxc1;
+      Vec2 xp1 = cam1->Project(xc1, &dxp1_dxc1);
+      if (!xp1.allFinite() || !dxp1_dxc1.allFinite()) {
+        continue;
+      }
+      Mat23 dxp1_dx = dxp1_dxc1 * dxc1_dXc1 * rig->Rc1c0() * dXcn_dx;
+      Vec2 res1 = xp1 - obs.xp_r;
+
+      H.noalias() += dxp1_dx.transpose() * dxp1_dx * invC_r;
+      b.noalias() += dxp1_dx.transpose() * res1 * invC_r;
+      res_norm += res1.norm();
+      ++num_res;
     }
-    // Mean -- not sum -- of the per-view residual norms, so that the acceptance
-    // threshold below has the same meaning (pixels of reprojection error)
-    // whatever the length of the track. `Feature::RefineDepth` gates on the sum,
-    // which silently rejects every well-tracked feature.
-    res_norm /= views.size();
+    // Mean -- not sum -- of the per-observation residual norms, so that the
+    // acceptance threshold below has the same meaning (pixels of reprojection
+    // error) whatever the length of the track, and whether or not the right
+    // camera contributed. `Feature::RefineDepth` gates on the sum, which
+    // silently rejects every well-tracked feature.
+    res_norm /= num_res;
 
     if (!std::isfinite(res_norm)) {
       // A view behind the camera (or a saturated log-depth) makes the
@@ -167,24 +229,46 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
                                 const OOSOptions &options) {
   oos_jac_counter_ = 0;
   oos_num_obs_ = 0;
+  oos_num_right_obs_ = 0;
 
   std::vector<Observation> views{SelectOOSObservations(vobs, options)};
 
   // The 3D point has 3 degrees of freedom and each view contributes 2
   // equations, so at least 2 views are needed for `2n - 3` to be positive.
+  //
+  // A stereo view carries 4 equations, so on a row count alone a single one
+  // would look sufficient -- but it is not: with one group in the state, every
+  // row's dependence on the state flows through that group's `Xcn`, whose
+  // 3-dimensional column space is exactly what the marginalization annihilates.
+  // The surviving row would then have an identically zero Jacobian (a pure
+  // epipolar residual on the *fixed* rig) and carry no information at all. So
+  // the two-view floor is a property of the marginalization, not of the
+  // monocular measurement, and stereo does not relax it.
   if (static_cast<int>(views.size()) < std::max(2, options.min_observations)) {
     return 0;
   }
 
   cache_.Xs = this->Xs(SE3{SO3{Rbc}, Tbc});
+  const int row_budget = static_cast<int>(oos_.Hf.rows());
+  int rows = 0;
   for (const auto &obs : views) {
-    ComputeOOSJacobianInternal(obs, Rbc, Tbc);
+    // A view writes 2 rows, or 4 when the right camera contributes. The view cap
+    // in `SelectOOSObservations` already keeps this within the buffer; the check
+    // is here so that no combination of `max_observations` and `kMaxGroup` can
+    // overrun it silently (the block writes below are unchecked in a release
+    // build).
+    const int need = (OOSUsesStereo(options) && obs.has_right) ? 4 : 2;
+    if (rows + need > row_budget) {
+      LOG(WARNING) << "Feature::ComputeOOSJacobian: row budget " << row_budget
+                   << " exhausted after " << oos_num_obs_ << " views";
+      break;
+    }
+    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options);
+    ++oos_num_obs_;
   }
-  // `ComputeOOSJacobianInternal` uses oos_jac_counter_ as the observation
-  // counter; from here on it holds the number of rows of the marginalized
-  // measurement (see `ro()` / `Ho()`).
-  oos_num_obs_ = oos_jac_counter_;
-  oos_jac_counter_ = MarginalizeOOSPoint(2 * oos_num_obs_);
+  // From here on `oos_jac_counter_` holds the number of rows of the
+  // marginalized measurement (see `ro()` / `Ho()`).
+  oos_jac_counter_ = MarginalizeOOSPoint(rows);
 
   return oos_jac_counter_;
 }
@@ -220,8 +304,9 @@ int Feature::MarginalizeOOSPoint(int rows) {
   return out_rows;
 }
 
-void Feature::ComputeOOSJacobianInternal(const Observation &obs,
-                                         const Mat3 &Rbc, const Vec3 &Tbc) {
+int Feature::ComputeOOSJacobianInternal(const Observation &obs,
+                                        const Mat3 &Rbc, const Vec3 &Tbc,
+                                        int row, const OOSOptions &options) {
 
   auto g = obs.g;
   CHECK(g->sind() != -1);
@@ -255,21 +340,75 @@ void Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   cache_.dxp_dXcn = cache_.dxp_dxcn * cache_.dxcn_dXcn;
 
-  oos_.inn.segment<2>(2 * oos_jac_counter_) = obs.xp - cache_.xp;
+  oos_.inn.segment<2>(row) = obs.xp - cache_.xp;
 
-  oos_.Hf.block<2, 3>(2 * oos_jac_counter_, 0) =
+  oos_.Hf.block<2, 3>(row, 0) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  oos_.Hx.block<2, kFullSize>(2 * oos_jac_counter_, 0).setZero();
-  oos_.Hx.block<2, 3>(2 * oos_jac_counter_, goff) =
+  oos_.Hx.block<2, kFullSize>(row, 0).setZero();
+  oos_.Hx.block<2, 3>(row, goff) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
-  oos_.Hx.block<2, 3>(2 * oos_jac_counter_, goff + 3) =
+  oos_.Hx.block<2, 3>(row, goff + 3) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
-  oos_.Hx.block<2, 3>(2 * oos_jac_counter_, Index::Wbc) =
+  oos_.Hx.block<2, 3>(row, Index::Wbc) =
       cache_.dxp_dXcn * cache_.dXcn_dWbc;
-  oos_.Hx.block<2, 3>(2 * oos_jac_counter_, Index::Tbc) =
+  oos_.Hx.block<2, 3>(row, Index::Tbc) =
       cache_.dxp_dXcn * cache_.dXcn_dTbc;
-  ++oos_jac_counter_;
+
+  if (!OOSUsesStereo(options) || !obs.has_right) {
+    return 2;
+  }
+
+  // Two more rows for the right camera's observation of the same point at the
+  // same frame. Exactly as in `Feature::ComputeRightJacobian` for the in-state
+  // update: the rig is held fixed and lives outside the error state, so the
+  // whole dependence on the state still flows through `cache_.Xcn` and these
+  // rows reuse the left camera's `dXcn_d*` chain verbatim -- only the last two
+  // links, the rigid hop into camera 1 and camera 1's projection, differ.
+  //
+  // Note that these rows share the *same* `Hf` block structure as the left
+  // ones, which is the point: they constrain the same 3D point, so they enter
+  // the same nullspace projection and end up constraining the relative pose of
+  // the groups in the window. An n-view track yields `4n - 3` rows instead of
+  // `2n - 3`.
+  const StereoRig &rig = *StereoRig::instance();
+  const Vec3 Xc1 = rig.Rc1c0() * cache_.Xcn + rig.Tc1c0();
+  if (!(Xc1(2) > 0.0)) {
+    // The point is predicted behind the right camera; there is no meaningful
+    // linearization here, so contribute the left rows only.
+    return 2;
+  }
+  Mat23 dxc1_dXc1;
+  const Vec2 xc1 = project(Xc1, &dxc1_dXc1);
+  Mat2 dxp1_dxc1;
+  // No `jacc`/USE_ONLINE_CAMERA_CALIB block: only camera 0's intrinsics are in
+  // the error state, consistent with holding the rig fixed.
+  const Vec2 xp1 = Camera::instance(1)->Project(xc1, &dxp1_dxc1);
+  if (!xp1.allFinite() || !dxp1_dxc1.allFinite()) {
+    return 2;
+  }
+  // The weight is folded into the Jacobian and the innovation as they are
+  // written, which whitens the two rows in place; see
+  // `OOSOptions::stereo_R_scale` for why that is necessary here.
+  const number_t w = StereoRowWeight(options);
+  const Mat23 dxp1_dXcn = w * dxp1_dxc1 * dxc1_dXc1 * rig.Rc1c0();
+  const int r1 = row + 2;
+
+  oos_.inn.segment<2>(r1) = w * (obs.xp_r - xp1);
+
+  oos_.Hf.block<2, 3>(r1, 0) =
+      dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
+
+  oos_.Hx.block<2, kFullSize>(r1, 0).setZero();
+  oos_.Hx.block<2, 3>(r1, goff) =
+      dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
+  oos_.Hx.block<2, 3>(r1, goff + 3) =
+      dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
+  oos_.Hx.block<2, 3>(r1, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
+  oos_.Hx.block<2, 3>(r1, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
+
+  ++oos_num_right_obs_;
+  return 4;
 }
 
 

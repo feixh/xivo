@@ -23,6 +23,14 @@ namespace xivo {
 struct FeatureAdj : public std::unordered_map<int, Vec2> {
   void Add(const Observation &obs);
   void Remove(int id);
+
+  /** The right camera's observation of the same edge, for the group ids that had
+   *  a stereo match. A side map rather than a wider value type in the base map:
+   *  every existing reader of the adjacency wants the left pixel and nothing
+   *  else, and this way they keep working unchanged. Kept in step with the base
+   *  map by `Add`/`Remove` -- and by assignment, which is how `GraphBase`
+   *  creates a fresh adjacency (`feature_adj_[fid] = {}`). */
+  std::unordered_map<int, Vec2> right;
 };
 
 
@@ -182,6 +190,9 @@ public:
   int oos_inn_size() const { return oos_jac_counter_; }
   /** Number of observations that went into the out-of-state measurement. */
   int oos_num_obs() const { return oos_num_obs_; }
+  /** How many of those `oos_num_obs()` views also contributed the right
+   *  camera's two rows. Zero in monocular runs. */
+  int oos_num_right_obs() const { return oos_num_right_obs_; }
   /** Mean per-view reprojection error (pixels) of the last call to
    *  `RefineOOSDepth`. */
   number_t oos_mean_reproj_err() const { return oos_mean_reproj_err_; }
@@ -203,15 +214,19 @@ public:
 
   /** Computes the Jacobian for the out-of-state (MSCKF) measurement model, and
    *  marginalizes the 3D point out of it. Returns the number of rows of the
-   *  resulting measurement (`2n - 3` for n observations), or 0 if the feature
-   *  has too few observations from in-state groups. */
+   *  resulting measurement (`2n - 3` for n monocular observations, up to
+   *  `4n - 3` when the right camera contributed to all of them), or 0 if the
+   *  feature has too few observations from in-state groups. */
   int ComputeOOSJacobian(const std::vector<Obs> &obs, const Mat3 &Rbc,
                          const Vec3 &Tbc, const OOSOptions &options);
-  /** Contains the equations used in `Feature::ComputeOOSJacobian` for each
-   *  observation.
+  /** Contains the equations used in `Feature::ComputeOOSJacobian` for one
+   *  observation. Writes into `oos_.{Hf,Hx,inn}` starting at `row` and returns
+   *  the number of rows written: 2 for the left camera alone, 4 when the right
+   *  camera's observation of the same frame was recorded and usable.
    *  \todo make the following private */
-  void ComputeOOSJacobianInternal(const Obs &obs, const Mat3 &Rbc,
-                                  const Vec3 &Tbc);
+  int ComputeOOSJacobianInternal(const Obs &obs, const Mat3 &Rbc,
+                                 const Vec3 &Tbc, int row,
+                                 const OOSOptions &options);
   /** Projects the first `rows` rows of the out-of-state Jacobian onto the left
    *  nullspace of `oos_.Hf`, which eliminates the 3D point. Returns the number
    *  of rows left, `rows - 3`. */
@@ -467,12 +482,14 @@ private:
   /** Current MSCKF measurement Jacobians (both Hf and Hx) and innovation */
   OOSJacobian oos_;
 
-  /** While filling `oos_`: number of observations processed so far. Afterwards:
-   *  number of rows of the marginalized MSCKF measurement. */
+  /** Number of rows of the marginalized MSCKF measurement. */
   int oos_jac_counter_;
 
   /** Number of observations that went into the MSCKF measurement. */
   int oos_num_obs_;
+
+  /** How many of them also contributed the right camera's rows. */
+  int oos_num_right_obs_{0};
 
   /** Mean per-view reprojection error (pixels) after `RefineOOSDepth`. */
   number_t oos_mean_reproj_err_;

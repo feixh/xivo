@@ -49,7 +49,8 @@ struct OOSOptions {
   OOSOptions()
       : min_observations{4}, max_observations{kMaxGroup}, refine{true},
         max_iters{10}, eps{1e-5}, Rtri{1.0}, max_mean_reproj_err{1.5},
-        zmin{0.05}, zmax{50.0}, MH_thresh{0.0} {}
+        zmin{0.05}, zmax{50.0}, MH_thresh{0.0}, use_stereo{true},
+        stereo_R_scale{1.0} {}
 
   int min_observations; // minimal number of observations from in-state groups
   int max_observations; // cap on the observations used, to bound the cost of
@@ -63,6 +64,22 @@ struct OOSOptions {
   number_t zmin, zmax;          // admissible depth range after refinement
   number_t MH_thresh; // Mahalanobis gate on the marginalized innovation,
                       // per degree of freedom; <= 0 disables it
+
+  /** Use the right camera's observations of an out-of-state track as well,
+   *  when a stereo rig is configured and the matcher found one at that frame.
+   *  Each such view then contributes 4 rows instead of 2 before the 3D point is
+   *  marginalized out, so an n-view track yields `4n - 3` rows rather than
+   *  `2n - 3`. Ignored in monocular runs (`StereoRig::enabled()` false). */
+  bool use_stereo;
+  /** Variance of a right-camera row relative to a left-camera one, i.e. the
+   *  same role `stereo_update.R_scale` plays for the in-state update. The
+   *  out-of-state update feeds `Roos_` to the filter as a *scalar* (which is
+   *  only valid because the marginalization uses an orthonormal nullspace
+   *  basis), so instead of carrying a non-uniform R the right rows are whitened
+   *  by `1 / sqrt(stereo_R_scale)` as they are written -- after which the
+   *  stacked measurement really is isotropic and the existing algebra holds
+   *  unchanged. 1.0 leaves the right rows alone. */
+  number_t stereo_R_scale;
 };
 
 // Options for adaptive initial depth estimation

@@ -74,7 +74,9 @@ def resample_gt_at(gt, stamps):
 
 
 def rpe(tool, gt, est, extra=()):
-    cmd = ['python3', os.path.join(TOOLS, tool), gt, est,
+    # sys.executable, not 'python3': the evaluators need numpy, which is in the
+    # venv this script is run from and not necessarily in the one on PATH.
+    cmd = [sys.executable, os.path.join(TOOLS, tool), gt, est,
            '--delta', '1', '--delta_unit', 's'] + list(extra)
     if tool == 'evaluate_rpe.py':
         cmd.append('--fixed_delta')
