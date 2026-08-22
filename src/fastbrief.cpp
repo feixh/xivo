@@ -19,8 +19,11 @@ void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors
                           FastBrief::TDescriptor &mean)
 {
   // initialize
-  mean = new uint64_t[4];
-  memset( &mean, 0, sizeof( uint64_t ) * (BRIEF_BYTES >> 3) );
+  // (this used to be `mean = new uint64_t[4]` followed by
+  //  `memset(&mean, 0, 32)`, which wrote 32 bytes over the caller's 8-byte
+  //  pointer variable -- nulling the pointer it had just been handed -- and
+  //  leaked the array; `mean` owning its own storage removes both faults)
+  mean.fill(0);
 
   if(descriptors.empty()) return;
 
@@ -32,7 +35,7 @@ void FastBrief::meanValue(const std::vector<FastBrief::pDescriptor> &descriptors
   vector<FastBrief::pDescriptor>::const_iterator it;
   for(it = descriptors.begin(); it != descriptors.end(); ++it) {
     // v[ p >> 6 ] & ((unsigned long) 1 << ( i & ( (i << 6)-1) )
-    FastBrief::TDescriptor desc = **it;
+    const FastBrief::TDescriptor &desc = **it;
     for(int i = 0; i < L; ++i) {
       if ( desc[ i >> 6 ] & ((uint64_t)1 << ( i & ( (i<<6)-1 ) ) ) ) {
         ++counters[i];
@@ -107,7 +110,6 @@ std::string FastBrief::toString(const FastBrief::TDescriptor &a)
 
 void FastBrief::fromString(FastBrief::TDescriptor &a, const std::string &s)
 {
-  a = new uint64_t[4];
   stringstream ss(s);
   for(int i = 0; i < (BRIEF_BYTES >> 3); ++i) {
     ss >> a[i];

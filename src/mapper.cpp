@@ -54,8 +54,8 @@ std::unique_ptr<Mapper> Mapper::instance_{nullptr};
 Mapper* Mapper::instance() {  return instance_.get(); }
 
 
-cvl::PnpParams* GetRANSACParams(const Json::Value &cfg) {
-  cvl::PnpParams* params = new cvl::PnpParams();
+std::unique_ptr<cvl::PnpParams> GetRANSACParams(const Json::Value &cfg) {
+  auto params = std::make_unique<cvl::PnpParams>();
   params->min_iterations = cfg.get("min_iter", 1).asInt();
   params->max_iterations = cfg.get("max_iter", 100).asInt();
   params->threshold = cfg.get("threshold", 0.02).asDouble();
@@ -135,7 +135,7 @@ Mapper::Mapper(const Json::Value &cfg) {
 
   uplevel_word_search_ = cfg.get("uplevel_word_search", 0).asInt();
   nn_dist_thresh_ = cfg.get("nn_dist_thresh", 20.0).asDouble();
-  voc_ = new FastBriefVocabulary(vocab_file);
+  voc_ = std::make_unique<FastBriefVocabulary>(vocab_file);
 
   merge_features_ = cfg.get("merge_features", true).asBool();
   feature_merge_cov_factor_ = cfg.get("feature_merge_cov_factor", 1.0).asDouble();

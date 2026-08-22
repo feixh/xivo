@@ -13,6 +13,7 @@
 #define DBOW2_EXTENSION_FASTBRIEF_H
 
 #include <opencv2/core.hpp>
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -27,7 +28,18 @@ class FastBrief: protected DBoW2::FClass {
 public:
 
 //   typedef uint64_t TDescriptor __attribute__ ((vector_size (BRIEF_BYTES)));
-  typedef uint64_t * TDescriptor;
+
+  /** A 256-bit BRIEF descriptor, as four 64-bit words.
+   *
+   *  This has to be a value type. DBoW2's TemplatedVocabulary stores one
+   *  TDescriptor *by value* in every node (TemplatedVocabulary.h:284) and never
+   *  frees it, because for a generic value type there is nothing to free. When
+   *  this was `uint64_t *`, the descriptor that `fromString` allocates for each
+   *  node while loading a vocabulary, and the one `meanValue` allocates for each
+   *  cluster while training one, were leaked outright -- 32 bytes per node, and
+   *  nothing anywhere owned them.
+   */
+  typedef std::array<uint64_t, BRIEF_BYTES / sizeof(uint64_t)> TDescriptor;
   typedef const TDescriptor * pDescriptor;
 
   /**
