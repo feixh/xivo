@@ -14,6 +14,12 @@ dA_dAu(const Eigen::MatrixBase<Derived> &A) {
   EIGEN_STATIC_ASSERT_MATRIX_SPECIFIC_SIZE(Derived, N, N);
 
   Eigen::Matrix<typename Derived::Scalar, N * N, Sum1ToN(N)> D;
+  // Only the Sum1ToN(N) upper-triangular rows are written below; the rest are
+  // structurally zero (`Ca` is upper triangular -- see the CHECK in IMU::IMU --
+  // so its lower entries do not depend on the parameters). They were left
+  // uninitialised, and only came out zero because the build happens to pass
+  // -DEIGEN_INITIALIZE_MATRICES_BY_ZERO.
+  D.setZero();
   int idx_u{0}; // indexing to the upper triangular part of the matrix
   for (int i = 0; i < N; ++i) {
     for (int j = i; j < N; ++j) {
@@ -27,6 +33,7 @@ template <typename T, int N = 3>
 Eigen::Matrix<T, N * N, Sum1ToN(N)>
 dA_dAu() {
   Eigen::Matrix<T, N * N, Sum1ToN(N)> D;
+  D.setZero(); // see the comment in the overload above
   int idx_u{0}; // indexing to the upper triangular part of the matrix
   for (int i = 0; i < N; ++i) {
     for (int j = i; j < N; ++j) {
@@ -155,7 +162,7 @@ dAB_dA(const Eigen::MatrixBase<Derived> &B) {
   for (int n = 0; n < N; ++n) {
     for (int p = 0; p < P; ++p) {
       for (int m = 0; m < M; ++m) {
-        D(p * N + n, n * M + m) += B(m, p);
+        D(n * P + p, n * M + m) += B(m, p);
       }
     }
   }
@@ -220,7 +227,7 @@ dAB_dB(const Eigen::MatrixBase<Derived> &A) {
   for (int n = 0; n < N; ++n) {
     for (int p = 0; p < P; ++p) {
       for (int m = 0; m < M; ++m) {
-        D(p * N + n, m * P + p) = A(n, m);
+        D(n * P + p, m * P + p) = A(n, m);
       }
     }
   }

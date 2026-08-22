@@ -199,9 +199,28 @@ bool Feature::Merge(FeaturePtr f, const SE3& gbc) {
   // Change coordinates of new feature's estimates
   bool success = f->ChangeOwner(ref_, gbc);
   if (success) {
-    Mat3 P_den = (P_ + f->P()).inverse();
-    x_ = P_den*(P_*x_ + f->P()*f->x());
-    P_ = P_den*(P_ + f->P());
+    // Covariance-weighted fusion of two independent Gaussian estimates:
+    //
+    //   P = (P1^-1 + P2^-1)^-1        = P1 (P1 + P2)^-1 P2
+    //   x = P (P1^-1 x1 + P2^-1 x2)   = P2 (P1 + P2)^-1 x1 + P1 (P1 + P2)^-1 x2
+    //
+    // Each mean is weighted by the *other* estimate's covariance. The previous
+    // code had both parts wrong: it weighted each mean by its own covariance, so
+    // the more uncertain estimate dominated, and its fused covariance was
+    // `(P1 + P2)^-1 (P1 + P2)`, i.e. the identity -- a merged feature came out
+    // with a variance of 1 in normalised-pixel and log-depth units regardless of
+    // what either input said.
+    const Mat3 P1 = P_;
+    const Mat3 P2 = f->P();
+    const Mat3 S = P1 + P2;
+    if (!S.allFinite() || std::abs(S.determinant()) < 1e-12) {
+      return false;
+    }
+    const Mat3 S_inv = S.inverse();
+    x_ = S_inv * (P2 * x_ + P1 * f->x());
+    const Mat3 P_fused = P1 * S_inv * P2;
+    // Symmetric in exact arithmetic; enforce it against round-off.
+    P_ = 0.5 * (P_fused + P_fused.transpose());
     Xc();
     Xs(gbc);
 
@@ -218,7 +237,8 @@ bool Feature::Merge(FeaturePtr f, const SE3& gbc) {
 }
 
 
-bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc) {
+bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc,
+                          ReanchorJacobians *jac_out) {
   // now transfer
   SE3 g_cn_s =
       (nref->gsb() * gbc)
@@ -242,7 +262,45 @@ bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc) {
   x_ = xn;
   Mat3 J = dxn_dXcn * dXcn_dx;
 
+  // `P_` is the covariance only for an out-of-state (depth sub-filter) feature,
+  // whose reference pose is treated as exact -- there `J` alone is the whole
+  // story. Once the feature is in the EKF state its covariance lives in the 3x3
+  // block of `Estimator::P_` at `kFeatureBegin + 3 * sind()` plus the
+  // cross-covariance rows/columns against the rest of the state, none of which
+  // is reachable from here.
   P_ = J * P_ * J.transpose();
+
+  if (jac_out != nullptr) {
+    // xn also depends on the *poses* of both the outgoing and the incoming
+    // reference group, and both of those are error-state blocks:
+    //
+    //   xn = pi( (gsb_n gbc)^-1 gsb_o gbc pi^-1(x) )
+    //
+    // For an in-state feature the covariance transform is therefore a row
+    // operation over three blocks, not a similarity transform on one. Dropping
+    // the two pose terms understates the re-anchored uncertainty, and the
+    // outgoing group is about to be deleted from the state without being
+    // marginalized -- so if its contribution is not folded in here it is simply
+    // lost. Derivatives use the same right (local) perturbation convention as
+    // `ComputeJacobian`: Rsb <- Rsb exp(dW), Tsb <- Tsb + dT.
+    const Mat3 Rbc_t = gbc.so3().matrix().transpose();
+    const Mat3 R_cn_s = g_cn_s.so3().matrix();
+
+    const Mat3 Rsb_o = ref_->Rsb().matrix();
+    const Vec3 Xb_o = Rsb_o.transpose() * (Xs_ - ref_->Tsb());
+    const Mat3 Rsb_n = nref->Rsb().matrix();
+    const Vec3 Xb_n = Rsb_n.transpose() * (Xs_ - nref->Tsb());
+
+    jac_out->dxn_dx = J;
+    // d Xs / d[dW_o, dT_o] = [-Rsb_o hat(Xb_o), I], then through R_cn_s.
+    jac_out->dxn_dref_old.leftCols<3>() =
+        dxn_dXcn * R_cn_s * (-Rsb_o * SO3::hat(Xb_o));
+    jac_out->dxn_dref_old.rightCols<3>() = dxn_dXcn * R_cn_s;
+    // d Xcn / d[dW_n, dT_n] = [Rbc^T hat(Xb_n), -R_cn_s].
+    jac_out->dxn_dref_new.leftCols<3>() =
+        dxn_dXcn * (Rbc_t * SO3::hat(Xb_n));
+    jac_out->dxn_dref_new.rightCols<3>() = dxn_dXcn * (-R_cn_s);
+  }
 
   // Update other parameters
   ResetRef(nref);
@@ -313,10 +371,15 @@ bool Feature::RefineDepth(const SE3 &gbc,
 
   std::vector<Observation> views;
   if (options.two_view) {
+    // `o1.g->id() < o1.g->id()` compares o1 with itself and is therefore always
+    // false, so `minmax_element` returned two positions fixed by the algorithm's
+    // tie-breaking rather than the oldest and newest observation. When both
+    // landed on the same element the two "views" were identical, `H` stayed zero,
+    // and the refinement silently did nothing.
     auto[first, last] =
         std::minmax_element(std::begin(observations), std::end(observations),
                             [](const Observation &o1, const Observation &o2) {
-                              return o1.g->id() < o1.g->id();
+                              return o1.g->id() < o2.g->id();
                             });
     views = {*first, *last};
   } else {
@@ -327,6 +390,10 @@ bool Feature::RefineDepth(const SE3 &gbc,
   Vec3 b;           // F' * invC * residual
 
   number_t res_norm0{0}; // norm of residual corresponding to optimal state
+  // How many views actually contributed -- the reference group is skipped, and
+  // `views` may hold duplicates. Needed to turn the summed residual into a
+  // per-observation one for the acceptance test at the end.
+  int num_res0{0};
   // information matrix
   Mat2 invC;
   invC(0, 0) = 1. / options.Rtri;
@@ -342,6 +409,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     H.setZero();
     b.setZero();
     number_t res_norm{0};
+    int num_res{0};
 
     for (const auto &obs : views) {
       // skip reference group
@@ -368,6 +436,12 @@ bool Feature::RefineDepth(const SE3 &gbc,
       // jac_res.push_back(std::make_tuple(dxp_dx, res));
 
       res_norm += res.norm(); //  / (views.size() - 1);
+      ++num_res;
+    }
+
+    if (num_res == 0) {
+      // Every view was the reference group: nothing to refine against.
+      return false;
     }
 
     if (iter > 0 && res_norm > res_norm0) {
@@ -377,7 +451,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     }
 
     VLOG_IF(0, iter > 0) << StrFormat("iter=%d; |res|:%0.4f->%0.4f",
-        iter, res_norm0 / (views.size() - 1), res_norm / (views.size() - 1) );
+        iter, res_norm0 / num_res0, res_norm / num_res );
 
     // auto ldlt = H.ldlt();
     // std::cout << "D=" << ldlt.vectorD().transpose() << std::endl;
@@ -416,6 +490,7 @@ bool Feature::RefineDepth(const SE3 &gbc,
     x_ -= delta;
     ClampLogDepth();
     res_norm0 = res_norm;
+    num_res0 = num_res;
 
     // not much to progress
     if (delta.lpNorm<Eigen::Infinity>() < options.eps) {
@@ -423,9 +498,21 @@ bool Feature::RefineDepth(const SE3 &gbc,
     }
   }
 
-  if (res_norm0 > options.max_res_norm) {
+  if (num_res0 == 0) {
+    // The iteration never completed a usable pass.
+    return false;
+  }
+
+  // `res_norm0` is a *sum* of per-observation reprojection-error norms, while
+  // `max_res_norm` is a per-observation threshold -- the commented-out
+  // `/ (views.size() - 1)` on each accumulation, and the log line above that
+  // divides before printing, both say so. Comparing the sum made the test
+  // strictly harder the more observations a feature had, so well-fitted
+  // long-lived features were rejected while poorly-fitted two-view ones passed.
+  const number_t mean_res = res_norm0 / num_res0;
+  if (mean_res > options.max_res_norm) {
     VLOG(0) << StrFormat("feature #%d; status=%d; |res|=%f\n", id_,
-                               as_integer(status_), res_norm0);
+                               as_integer(status_), mean_res);
     return false;
   }
     // std::cout << "H=\n" << H << std::endl;
@@ -565,6 +652,13 @@ bool Feature::RefineDepth(const SE3 &gbc,
 void Feature::ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
                               const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
                               const Vec3 &bg, const Vec3 &Vsb, number_t td) {
+
+  // `J_` is a full-width row block of which only a handful of column blocks are
+  // ever written, so stale columns survive from one call to the next. That
+  // matters after `ChangeOwner`: the old reference group's six columns keep the
+  // Jacobian w.r.t. a group this feature is no longer anchored to, and
+  // `MHGating` forms `J_ * P_ * J_^T` over the *whole* row. Clear it.
+  J_.setZero();
 
   Mat3 Rsb_t = Rsb.transpose();
   Mat3 Rbc_t = Rbc.transpose();
@@ -760,11 +854,17 @@ void Feature::FillJacobianBlockFrom(
   int goff = kGroupBegin + 6 * ref_->sind();
   int foff = kFeatureBegin + 3 * sind();
 
-  // NOTE: the second destination used to be `goff` as well, so the reference
-  // group's rotation block was overwritten by its translation block and the
-  // translation block at `goff + 3` was never written at all. `J_` itself is
-  // correct (see ComputeJacobian above); only this copy into `H` was wrong,
-  // which is why OnePointRANSAC -- which reads `J_` directly -- was unaffected.
+  // Both of these used to be written to `goff`, so the rotation block was
+  // overwritten by the translation Jacobian and the translation block at
+  // `goff + 3` was left at zero (`H` is zeroed once per update in
+  // `FilterUpdate`). Every stacked measurement therefore saw a wrong reference-
+  // group rotation Jacobian and no translation Jacobian at all. `J_` itself was
+  // always correct -- only this copy was broken, which is why
+  // `unitTests_Jacobians` never caught it, and why OnePointRANSAC (which reads
+  // `J_` directly) was unaffected.
+  //
+  // Read from the `J` parameter, not from `J_`: this body is shared with
+  // `FillRightJacobianBlock`, which passes `J_r_`.
   H.block<2, 3>(offset, goff) = J.block<2, 3>(0, goff);
   H.block<2, 3>(offset, goff + 3) = J.block<2, 3>(0, goff + 3);
   H.block<2, 3>(offset, foff) = J.block<2, 3>(0, foff);
@@ -836,7 +936,14 @@ void Feature::Triangulate(const SE3 &gsb, const SE3 &gbc,
     return;
   }
 
-  if (auto z = Xc1(2); z < options.zmin || z > options.zmax) {
+  // Written as a negated "is good" test, not "is bad": with `z < zmin ||
+  // z > zmax` a NaN depth passed (every comparison against NaN is false) and
+  // fell into the success branch, which set x_ to NaN, x_(2) to log(NaN), and
+  // triangulation_successful_ to true. ClampLogDepth cannot rescue that either.
+  // The NaN then propagated into J_, inn_ and the covariance update, and MH
+  // gating could not reject it.
+  if (auto z = Xc1(2); !(std::isfinite(z) && z >= options.zmin &&
+                         z <= options.zmax && Xc1.allFinite())) {
     // triangulated depth is not great
     // stick to the constant depth
     num_bad_triangulations_++;

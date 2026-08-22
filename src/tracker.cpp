@@ -119,6 +119,11 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
   num_features_max_ = cfg_.get("num_features_max", 150).asInt();
   max_pixel_displacement_ = cfg_.get("max_pixel_displacement", 64).asInt();
   differential_ = cfg_.get("differential", true).asBool();
+  // Was declared in every shipped config but read by nothing, so measurement
+  // prediction was always on -- which closes a loop from the EKF state back
+  // into the front end: a diverging filter biases the KLT initial guess toward
+  // its own wrong prediction.
+  use_prediction_ = cfg_.get("use_prediction", true).asBool();
 
   std::string tracker_type = cfg_.get("tracker_type", "LK").asString();
   if (tracker_type == "LK") {
@@ -193,8 +198,8 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
       cfg_.get("descriptor_distance_thresh", -1).asInt();
   extract_descriptor_ = cfg_.get("extract_descriptor", false).asBool() ||
                         descriptor_distance_thresh_ > -1;
-  LOG(INFO) << "descriptor extraction " << extract_descriptor_ ? "ENABLED"
-                                                               : "DISABLED";
+  LOG(INFO) << "descriptor extraction "
+            << (extract_descriptor_ ? "ENABLED" : "DISABLED");
   if ((tracker_type_ == TrackerType::MATCH) && !extract_descriptor_) {
     LOG(FATAL) << "Using a matcher-tracker requires extracting descriptors";
   }
@@ -234,7 +239,7 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
 
 
 void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
-                       std::vector<FeaturePtr> newly_dropped_tracks,
+                       std::vector<FeaturePtr> &newly_dropped_tracks,
                        bool check_homography, cv::Mat H)
 {
   std::vector<cv::KeyPoint> kps;
@@ -291,8 +296,12 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
       if (!check_homography) {
         reprojection_error_check_passed = true;
       } else {
+        // `back()` (the last tracked pixel), not `keypoint().pt` -- the latter
+        // is where the feature was *first* detected, possibly hundreds of
+        // frames ago, and `H` is a frame-to-frame homography.
+        const Vec2 &last_pos = newly_dropped_tracks[D.queryIdx]->back();
         reprojection_error_check_passed =
-          CheckHomography(newly_dropped_tracks[D.queryIdx]->keypoint().pt,
+          CheckHomography(cv::Point2f(last_pos(0), last_pos(1)),
                           kps[D.trainIdx].pt, H,
                           outlier_rejection_reproj_thresh_);
       }
@@ -313,15 +322,21 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
     const cv::KeyPoint &kp = kps[i];
     if (MaskValid(mask_, kp.pt.x, kp.pt.y)) {
 
-      if (match_dropped_tracks_ && matched[i]) {
+      if (match_dropped_tracks_ && matched[i] &&
+          newly_dropped_tracks[matchIdx[i]]) {
         int idx = matchIdx[i];
         FeaturePtr f1 = newly_dropped_tracks[idx];
         if (differential_) {
           f1->SetDescriptor(descriptors.row(i));
         }
         f1->UpdateTrack(kp.pt.x, kp.pt.y);
+        f1->SetKeypoint(kp);
         f1->SetTrackStatus(TrackStatus::TRACKED);
         LOG(INFO) << "Potentially rescued dropped feature #" << f1->id();
+        // Tell the caller this one was rescued, so it does not get marked
+        // DROPPED again. Clearing the slot rather than erasing it keeps the
+        // `matchIdx` indices above valid.
+        newly_dropped_tracks[idx] = nullptr;
         MaskOut(mask_, kp.pt.x, kp.pt.y, mask_size_);
         --num_to_add;
         continue;
@@ -554,7 +569,10 @@ void Tracker::UpdateMatch(const cv::Mat &image) {
       std::vector<cv::Point2f> pts1;
       for (int i = 0; i < matches.size(); i++) {
         cv::DMatch D = matches[i][0];
-        pts0.push_back(feature_vec[D.queryIdx]->keypoint().pt);
+        // `back()`, not `keypoint().pt` -- findHomography must see the
+        // previous-frame pixel, not where the feature was first detected.
+        const Vec2 &last_pos = feature_vec[D.queryIdx]->back();
+        pts0.emplace_back(last_pos(0), last_pos(1));
         pts1.push_back(new_kps[D.trainIdx].pt);
       }
       cv::Mat H;
@@ -631,9 +649,9 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     // setup the mask
     ResetMask(mask_(
         cv::Rect(margin_, margin_, cols_ - 2 * margin_, rows_ - 2 * margin_)));
-    // detect an initial set of features
-    DetectLK(img_, num_features_max_, std::vector<FeaturePtr>(),
-             false, cv::Mat());
+    // detect an initial set of features (nothing to rescue on the first frame)
+    std::vector<FeaturePtr> no_dropped_tracks;
+    DetectLK(img_, num_features_max_, no_dropped_tracks, false, cv::Mat());
     initialized_ = true;
     return;
   }
@@ -663,11 +681,14 @@ void Tracker::UpdateLK(const cv::Mat &image) {
 
     // fill in predicted locations
     auto pred = f->pred();
-    if (pred(0) != -1 && pred(1) != -1) {
+    const bool have_pred = (pred(0) != -1) && (pred(1) != -1);
+    if (use_prediction_ && have_pred) {
       pts1.emplace_back(pred(0), pred(1));
-      f->ResetPred(); // reset
     } else {
       pts1.emplace_back(pt[0], pt[1]);
+    }
+    if (have_pred) {
+      f->ResetPred(); // consume it either way, so it cannot go stale
     }
   }
 
@@ -697,13 +718,20 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     }
     extractor_->compute(img_, kps, descriptors);
 
+    // `compute` above compacts `kps` -- BRIEF drops every keypoint within
+    // PATCH_SIZE/2 + KERNEL_SIZE/2 = 28 px of the border -- so `i` is no longer
+    // the index of the feature in `features_`/`status`/`pts1`. The original
+    // index was stashed in `class_id`; use it for `status` too, not just for
+    // `vf`. Indexing `status` with `i` dropped an arbitrary innocent track and
+    // let the mismatched one through.
     for (int i = 0; i < kps.size(); ++i) {
-      auto f = vf[kps[i].class_id];
+      const int fi = kps[i].class_id;
+      auto f = vf[fi];
       if (descriptor_distance_thresh_ != -1) {
         int dist = cv::norm(f->descriptor(), descriptors.row(i),
                             extractor_->defaultNorm());
         if (dist > descriptor_distance_thresh_) {
-          status[i] = 0; // enforce to be dropped
+          status[fi] = 0; // enforce to be dropped
         } else {
           if (differential_) {
             f->SetDescriptor(descriptors.row(i));
@@ -745,7 +773,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   num_failed_to_track_ =  num_zeros(status);
 
   cv::Mat H;
-  bool outlier_rejection_success;
+  bool outlier_rejection_success = false;
   if (do_outlier_rejection_) {
     outlier_rejection_success = OutlierRejection(pts0, pts1, status, H);
     num_valid_features -= num_outliers_rejected_;
@@ -764,16 +792,18 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   // detect a new set of features
   // this can rescue dropped featuers by matching them to newly detected ones
   if (num_valid_features < num_features_min_) {
-    bool check_homography = outlier_rejection_success && do_outlier_rejection_;
+    bool check_homography = do_outlier_rejection_ && outlier_rejection_success;
     DetectLK(img_, num_features_max_ - num_valid_features,
              newly_dropped_tracks, check_homography, H);
   }
 
-  // Mark all features that are still in newly_dropped_tracks_ at this point
-  // as dropped. Dropped features will get deleted later in the function
-  // Estimator::ProcessTracks()
+  // Mark every track that DetectLK did not rescue (rescued slots were set to
+  // nullptr) as dropped. Dropped features get deleted later in
+  // Estimator::ProcessTracks().
   for (auto f: newly_dropped_tracks) {
-    f->SetTrackStatus(TrackStatus::DROPPED);
+    if (f) {
+      f->SetTrackStatus(TrackStatus::DROPPED);
+    }
   }
 
   // swap buffers ...
@@ -849,8 +879,8 @@ void Tracker::UpdatePointCloud(const VecXi &feature_ids, const MatX2 &xps)
       FeaturePtr f = Feature::PointCloudWorldCreate(fid, xp(0), xp(1));
       f->SetKeypoint(cv::KeyPoint(xp(0), xp(1), 0.0));
       features_.push_back(f);
+      num_to_add--; // only a *new* feature consumes the budget
     }
-    num_to_add--;
   }
 }
 
@@ -861,6 +891,11 @@ bool Tracker::OutlierRejection(const std::vector<cv::Point2f> pts0,
                                cv::Mat& H)
 {
   CHECK(pts0.size() == pts1.size());
+
+  // Reset before any early return: this is a member that persists across
+  // frames, and callers subtract it from their valid-feature count
+  // unconditionally, so a stale value corrupted the next frame's budget.
+  num_outliers_rejected_ = 0;
 
   // Check that we have at least 4 valid points
   if (sum_total(match_status) < 4) {
@@ -890,6 +925,18 @@ bool Tracker::OutlierRejection(const std::vector<cv::Point2f> pts0,
     outlier_rejection_reproj_thresh_, inlier_outlier_mask,
     outlier_rejection_maxiters_, outlier_rejection_confidence_);
 
+  // When the registrator cannot fit a model, OpenCV releases `H` and replaces
+  // the mask with an empty one (the pre-allocation above is reallocated away).
+  // Reporting success then made the callers multiply by an empty `H` and index
+  // into a null mask -- `cv::Mat::at` only checks bounds under CV_DbgAssert, so
+  // in a release build that is a straight segfault.
+  if (H.empty() || inlier_outlier_mask.total() != pts0_valid.size()) {
+    LOG(WARNING) << "findHomography failed to fit a model; skipping outlier "
+                    "rejection for this frame";
+    H.release();
+    return false;
+  }
+
   // record number of rejected outliers
   num_outliers_rejected_ = num_zeros(inlier_outlier_mask);
 
@@ -913,7 +960,10 @@ bool Tracker::OutlierRejection(const std::vector<cv::Point2f> pts0,
 void ResetMask(cv::Mat mask) { mask.setTo(255); }
 
 void MaskOut(cv::Mat mask, number_t x, number_t y, int mask_size) {
-  static int half_size = (mask_size >> 1);
+  // Not `static`: that froze half_size at the first call's mask_size and
+  // silently ignored the parameter (and the header's default argument) forever
+  // after -- also a data race on first use when async_run is on.
+  const int half_size = (mask_size >> 1);
   cv::rectangle(mask, cv::Point2d(x - half_size, y - half_size),
                 cv::Point2d(x + half_size, y + half_size), cv::Scalar(0), -1);
 }
@@ -973,10 +1023,22 @@ bool CheckHomography(cv::Point2f p0,
                      cv::Mat H,
                      number_t reproj_threshold)
 {
+  if (H.empty()) {
+    return false;
+  }
   cv::Mat p0_h(cv::Vec3d(p0.x, p0.y, 1.0), true);
   cv::Mat p1_h(cv::Vec3d(p1.x, p1.y, 1.0), true);
+  // The reprojection has to be compared against p1 -- the old code computed
+  // `Hp0` and then measured ||p0 - p1||, so `H` had no effect at all and this
+  // degenerated into a (much tighter) duplicate of the pixel-displacement
+  // check. The homogeneous coordinate also has to be divided out.
   cv::Mat Hp0 = H * p0_h;
-  number_t dist = cv::norm(p0_h, p1_h, cv::NORM_L2);
+  const double w = Hp0.at<double>(2);
+  if (std::abs(w) < 1e-12) {
+    return false;
+  }
+  Hp0 /= w;
+  number_t dist = cv::norm(Hp0, p1_h, cv::NORM_L2);
   return (dist < reproj_threshold);
 }
 

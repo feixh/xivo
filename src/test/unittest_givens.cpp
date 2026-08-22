@@ -37,59 +37,120 @@ TEST(NumericalLinearAlgebra, GivensSub) {
 }
 
 
+// `Givens` and `SlowGivens` both project onto the left nullspace of Hf, but they
+// build *different orthonormal bases* of it -- one by a sequence of plane
+// rotations, one from a Householder QR. The two results therefore differ by an
+// arbitrary orthogonal transform of the (2M-3)-dimensional nullspace, and the
+// original version of this test compared them element by element. That is not a
+// property either function has or should have; it is why the test shipped
+// failing.
+//
+// What the EKF actually consumes is basis-invariant: for an orthonormal A,
+// H'H = Hx' Q Q' Hx and H'r = Hx' Q Q' r depend on Q only through the projector
+// QQ', which is the same subspace for both. Assert that instead.
 TEST(NumericalLinearAlgebra, SlowAndFastGivensMatch) {
-    number_t tol = 1e-4;
+    number_t tol = 1e-9;
 
     int M = 4;
-    VecX r, r2;
-    MatX Hf, Hx, Hf2, Hx2;
-    r = MatX::Random(2 * M, 1);
-    Hf = MatX::Random(2 * M, 3);
-    Hx = MatX::Random(2 * M, 5);
+    // Deliberately more state columns than Hf has: rotating only Hf.cols()
+    // columns of Hx used to leave columns 3 and 4 unmixed.
+    MatX Hf = MatX::Random(2 * M, 3);
+    MatX Hx = MatX::Random(2 * M, 5);
+    VecX r = VecX::Random(2 * M);
 
-    // For comparing Givens and SlowGivens
-    r2 = r;
-    Hf2 = Hf;
-    Hx2 = Hx;
+    MatX Hf2 = Hf, Hx2 = Hx;
+    VecX r2 = r;
 
-    std::cout << "===== Before givens =====\n";
-    std::cout << "r=\n";
-    std::cout << r.transpose() << std::endl;
-    std::cout << "Hf=\n";
-    std::cout << Hf << std::endl;
-    std::cout << "Hx=\n";
-    std::cout << Hx << std::endl;
+    const int rows1 = Givens(r, Hx, Hf);
+    MatX A;
+    const int rows2 = SlowGivens(Hf2, Hx2, r2, A);
 
-    int effective_rows = Givens(r, Hx, Hf);
-    std::cout << "===== After givens =====\n";
-    std::cout << "r=\n";
-    std::cout << r.transpose() << std::endl;
-    std::cout << "Hf=\n";
-    std::cout << Hf << std::endl;
-    std::cout << "Hx=\n";
-    std::cout << Hx << std::endl;
-    std::cout << "Effective Rows: " << effective_rows << std::endl;
-    JacobiSVD<MatX> svd(Hx);
-    std::cout << "Singular values are: " << std::endl << svd.singularValues() << std::endl;
+    ASSERT_EQ(rows1, 2 * M - 3);
+    ASSERT_EQ(rows2, 2 * M - 3);
+
+    const MatX H1 = Hx.topRows(rows1);
+    const MatX H2 = Hx2.topRows(rows2);
+    const VecX r1 = r.head(rows1);
+    const VecX r2h = r2.head(rows2);
+
+    // The feature block is eliminated by both.
+    CheckMatrixZero(Hf.topRows(rows1), 1e-9);
+    CheckMatrixZero(MatX(A.transpose() * Hf2), 1e-9);
+
+    // The information the update actually uses.
+    CheckMatrixEquality(MatX(H1.transpose() * H1), MatX(H2.transpose() * H2), tol);
+    CheckVectorEquality(VecX(H1.transpose() * r1), VecX(H2.transpose() * r2h), tol);
+    EXPECT_NEAR(r1.squaredNorm(), r2h.squaredNorm(), tol);
+}
+
+
+// The nullspace basis has to be orthonormal, or the projected measurement noise
+// is A'(sigma^2 I)A = sigma^2 A'A and no longer matches the isotropic R the
+// filter assumes. `FullPivLU::kernel()`, which this used to return, is not.
+TEST(NumericalLinearAlgebra, SlowGivensBasisIsOrthonormal) {
+    int M = 5;
+    MatX Hf = MatX::Random(2 * M, 3);
+    MatX Hx = MatX::Random(2 * M, 5);
+    VecX r = VecX::Random(2 * M);
 
     MatX A;
-    int effective_rows2 = SlowGivens(Hf2, Hx2, A);
-    VecX r2_after = A.transpose() * r2;
-    MatX Hf2_after = A.transpose() * Hf2;
-    std::cout << "===== After Slow Givens =====\n";
-    std::cout << "r=\n";
-    std::cout << r2_after.transpose() << std::endl;
-    std::cout << "Hf=\n";
-    std::cout << Hf2_after << std::endl;
-    std::cout << "Hx=\n";
-    std::cout << Hx2 << std::endl;
+    const int rows = SlowGivens(Hf, Hx, r, A);
+    ASSERT_EQ(rows, 2 * M - 3);
+    ASSERT_EQ(A.cols(), rows);
+    ASSERT_EQ(A.rows(), 2 * M);
+    CheckMatrixEquality(MatX(A.transpose() * A), MatX(MatX::Identity(rows, rows)),
+                        1e-9);
+}
 
-    EXPECT_EQ(effective_rows, effective_rows2);
-    CheckMatrixEquality(Hf.block(0,0,effective_rows, 3), Hf2_after, tol);
-    CheckMatrixZero(Hf, tol);
-    CheckMatrixZero(Hf2_after, tol);
-    CheckVectorEquality(r.head(effective_rows), r2_after, tol);
-    CheckMatrixEquality(Hx.block(0,0,effective_rows,5), Hx2, tol);
+
+// `Feature::oos_` is a fixed 2 * kMaxGroup buffer of which only the rows for the
+// observations of *this* feature are filled; the tail holds whatever the
+// previous user of the pooled object left behind. Reading the whole buffer folded
+// that garbage into both the nullspace and the projected measurement.
+TEST(NumericalLinearAlgebra, SlowGivensIgnoresTheUnfilledTail) {
+    const int kBuf = 20; // over-sized buffer, as in the real caller
+    const int filled = 8;
+
+    MatX Hf = MatX::Zero(kBuf, 3);
+    MatX Hx = MatX::Zero(kBuf, 5);
+    VecX r = VecX::Zero(kBuf);
+    Hf.topRows(filled) = MatX::Random(filled, 3);
+    Hx.topRows(filled) = MatX::Random(filled, 5);
+    r.head(filled) = VecX::Random(filled);
+
+    MatX Hf_dirty = Hf, Hx_dirty = Hx;
+    VecX r_dirty = r;
+    // Stale rows, as a recycled Feature would have.
+    Hf_dirty.bottomRows(kBuf - filled) = MatX::Random(kBuf - filled, 3);
+    Hx_dirty.bottomRows(kBuf - filled) = MatX::Random(kBuf - filled, 5);
+    r_dirty.tail(kBuf - filled) = VecX::Random(kBuf - filled);
+
+    MatX A, A_dirty;
+    const int rows = SlowGivens(Hf, Hx, r, A, filled);
+    const int rows_dirty =
+        SlowGivens(Hf_dirty, Hx_dirty, r_dirty, A_dirty, filled);
+
+    ASSERT_EQ(rows, filled - 3);
+    ASSERT_EQ(rows_dirty, filled - 3);
+    CheckMatrixEquality(Hx.topRows(rows), Hx_dirty.topRows(rows), 1e-9);
+    CheckVectorEquality(VecX(r.head(rows)), VecX(r_dirty.head(rows)), 1e-9);
+}
+
+
+// The buffer must keep its size: the caller goes on writing into it with
+// fixed-size blocks on the next frame, and shrinking it turned that into an
+// out-of-bounds write that NDEBUG hides.
+TEST(NumericalLinearAlgebra, SlowGivensPreservesBufferShape) {
+    const int kBuf = 30;
+    MatX Hf = MatX::Random(kBuf, 3);
+    MatX Hx = MatX::Random(kBuf, 5);
+    VecX r = VecX::Random(kBuf);
+
+    MatX A;
+    SlowGivens(Hf, Hx, r, A, 10);
+    EXPECT_EQ(Hx.rows(), kBuf);
+    EXPECT_EQ(Hx.cols(), 5);
+    EXPECT_EQ(r.rows(), kBuf);
 }
 
 

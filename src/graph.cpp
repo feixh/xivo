@@ -31,8 +31,14 @@ Graph* Graph::instance() {
 void Graph::RemoveFeature(const FeaturePtr f) {
   GraphBase::RemoveFeature(f);
 
-  // Removes feature from `gauge_features_` if it is a gauge feature.
-  gauge_features_[f->ref()].erase(f);
+  // Removes feature from `gauge_features_` if it is a gauge feature. Look the
+  // group up rather than indexing: `operator[]` default-constructs an entry for
+  // any group not already present -- including the `nullptr` reference of a
+  // feature that never got an owner -- and that empty set then outlives the
+  // group it is keyed by, because only `RemoveGroup` erases keys.
+  if (auto it = gauge_features_.find(f->ref()); it != gauge_features_.end()) {
+    it->second.erase(f);
+  }
 
   LOG(INFO) << "feature #" << f->id() << " removed from Graph";
 }
@@ -170,9 +176,9 @@ void Graph::SanityCheck() {
             << " ;#graph.groups=" << groups_.size();
 }
 
-std::vector<FeaturePtr> Graph::TransferFeatureOwnership(GroupPtr g,
-                                                        const SE3 &gbc,
-                                                        number_t cov_factor) {
+std::vector<FeaturePtr> Graph::TransferFeatureOwnership(
+    GroupPtr g, const SE3 &gbc, number_t cov_factor,
+    std::vector<Reanchored> *reanchored_instate) {
 
   CHECK(HasGroup(g));
 
@@ -184,17 +190,44 @@ std::vector<FeaturePtr> Graph::TransferFeatureOwnership(GroupPtr g,
 
     auto f = features_.at(fid);
     if (f->ref() == g) {
+      // A gauge feature has had the x/y rows and columns of its filter
+      // covariance zeroed (`Estimator::FixFeatureXY`) in order to fix the gauge
+      // of *this* group. Re-anchoring keeps those two directions pinned, but now
+      // under a group that has its own gauge features -- over-constraining it --
+      // and there is no covariance we could honestly restore for the released
+      // directions. So a gauge feature goes away with the group it fixes. This
+      // costs little: `DiscardAffectedGroups` only discards a group once it owns
+      // fewer than `num_gauge_xy_features` in-state features.
+      if (f->status() == FeatureStatus::GAUGE) {
+        LOG(WARNING) << "Graph::TransferFeatureOwnership: feature #" << fid
+                     << " is a gauge feature of group #" << gid
+                     << "; dropping it instead of re-anchoring";
+        failed.push_back(f);
+        continue;
+      }
       // transfer ownership
       auto nref = FindNewOwner(f);
       if (nref) {
-        bool success = f->ChangeOwner(nref, gbc);
-        f->inflate_cov(cov_factor);
+        const bool was_instate = f->instate();
+        Feature::ReanchorJacobians jac;
+        bool success = f->ChangeOwner(nref, gbc, &jac);
 
         if (success) {
+          if (was_instate && (reanchored_instate != nullptr)) {
+            // Covariance transform *and* inflation are the caller's job: they
+            // have to happen on the filter block, not on the local copy.
+            reanchored_instate->push_back(Reanchored{f, g, jac});
+          } else {
+            f->inflate_cov(cov_factor);
+          }
           LOG(INFO) << "feature #" << fid << " transfered from group #" << gid
                     << " to group #" << nref->id();
         }
         else {
+          // `ChangeOwner` returns false before touching anything, so the
+          // inflation that used to run here scaled the covariance of a feature
+          // that was about to be discarded -- and, for an in-state feature, the
+          // wrong matrix in any case.
           LOG(WARNING) << "Graph::TransferFeatureOwnership: " <<
             "negative depth; mark feature #" << fid << " as failed";
           //f->ResetRef(nullptr);
@@ -280,6 +313,11 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
 
   int num_gauge_features = gauge_features_[g].size();
   int num_to_find = directions_to_fix - num_gauge_features;
+  // In a release build the `CHECK`s below are compiled out. A negative
+  // `num_to_find` would then be converted to a huge `size_t` by the comparisons
+  // against `candidates.size()`, taking the "not enough features" branch and
+  // then `std::min(num_to_find, ...)` in `fill_slots`. Clamp instead.
+  num_to_find = std::max(0, num_to_find);
 
 #ifndef NDEBUG
   CHECK(num_to_find >= 0);
@@ -324,7 +362,7 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
     return new_gauge_feats;
   };
 
-  if (candidates.size() < num_to_find) {
+  if (static_cast<int>(candidates.size()) < num_to_find) {
     LOG(WARNING) << "[Graph::SwitchGaugeXYFeatures]: not enough instate features owned by group " << g->id();
   }
 
@@ -332,7 +370,7 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
   std::vector<FeaturePtr> new_gauge_features_for_g;
   if ((candidates.size() == 0) || (num_to_find == 0)) {
     // do nothing
-  } else if (candidates.size() <= num_to_find) {
+  } else if (static_cast<int>(candidates.size()) <= num_to_find) {
     new_gauge_features_for_g = fill_slots(g, candidates);
   } else {
     // Try up to 10 times to find a set of features that are not collinear.
@@ -340,18 +378,28 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
     for (int NT = 0; NT<10; NT++) {
       gauge_features_[g] = gauge_features_backup;
       new_gauge_features_for_g = fill_slots(g, candidates);
-      if (gauge_features_[g].size() >= 3) {
-        if (collinear_check(gauge_features_[g], collinear_cross_prod_thresh)) {
-          std::shuffle(candidates.begin(), candidates.end(), *random_generator);
-          if (NT==9) {
-            LOG(WARNING) << "Did not find a set of non-collinear features. defaulting to using those with smallest covariance";
-            gauge_features_[g] = gauge_features_backup;
-            fill_slots(g, candidates_backup);
-          }
-        } else {
-          break;
-        }
+      if (gauge_features_[g].size() < 3) {
+        // Collinearity is undefined for fewer than three points, and no
+        // reshuffle of `candidates` can change how many slots got filled --
+        // the loop used to spin all ten iterations recomputing the same answer.
+        break;
       }
+      if (!collinear_check(gauge_features_[g], collinear_cross_prod_thresh)) {
+        break;
+      }
+      if (NT == 9) {
+        LOG(WARNING) << "Did not find a set of non-collinear features. defaulting to using those with smallest covariance";
+        gauge_features_[g] = gauge_features_backup;
+        // The return value used to be discarded here. The features were still
+        // inserted into `gauge_features_[g]`, so the group counted three gauge
+        // features and would never look for more -- but they were never returned
+        // to the caller, so `FixFeatureXY` never ran on them and their status
+        // stayed `INSTATE`. The group's gauge was left entirely unfixed while
+        // the bookkeeping claimed otherwise.
+        new_gauge_features_for_g = fill_slots(g, candidates_backup);
+        break;
+      }
+      std::shuffle(candidates.begin(), candidates.end(), *random_generator);
     }
   }
 

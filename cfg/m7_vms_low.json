@@ -16,7 +16,7 @@
   "use_depth_opt": false,  // depth optimization
   "use_MH_gating": true,
   "use_1pt_RANSAC": false,
-  "use_compression": true,  // measurement compression
+  "use_compression": false,  // measurement compression
   "triangulate_pre_subfilter": true,
   "compression_trigger_ratio": 1.5,
   "max_group_lifetime": 60,
@@ -41,8 +41,8 @@
   // memory
   "memory": {
     // Values if mapper is not enabled
-    "max_features": 256,
-    "max_groups": 256
+    "max_features": 200,
+    "max_groups": 100
     // Values if mapper is enabled
     //"max_features": 30000,
     //"max_groups": 5000
@@ -126,7 +126,7 @@
                                   // the state
   "comparison_score_type": "DepthUncertainty",
  
-  "visual_meas_std":  1.5, // std of visual measurement for x and y (pixel)
+  "visual_meas_std":  1.0, // std of visual measurement for x and y (pixel)
   "outlier_thresh": 1.1,
   "oos_meas_std": 3.5,
   "max_depth": 5.0,

@@ -13,7 +13,10 @@ VecXi Estimator::InstateFeatureSinds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -45,7 +48,10 @@ VecXi Estimator::InstateFeatureRefGroups(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -77,7 +83,10 @@ VecXi Estimator::InstateFeatureIDs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -109,7 +118,10 @@ MatX3 Estimator::InstateFeaturePositions(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -143,7 +155,10 @@ MatX3 Estimator::InstateFeatureXc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -177,7 +192,10 @@ MatX3 Estimator::InstateFeaturexc(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -211,7 +229,10 @@ MatX2 Estimator::InstateFeaturePreds(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -244,7 +265,10 @@ MatX2 Estimator::InstateFeatureMeas(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -276,7 +300,10 @@ MatX6 Estimator::InstateFeatureCovs(int n_output) const {
   // Get vectors of instate features and all features
   std::vector<xivo::FeaturePtr> instate_features = graph.GetInstateFeatures();
   MakePtrVectorUnique(instate_features);
-  int npts = std::max((int) instate_features.size(), n_output);
+  // The fill loop below stops at `min(size, n_output)`, so `max` sized the
+  // returned array to include rows that are never written. Line 318 of this same
+  // file uses `min` for the identical computation.
+  int npts = std::min((int) instate_features.size(), n_output);
 
   // Sort features by uncertainty
   std::sort(instate_features.begin(), instate_features.end(),
@@ -630,9 +657,14 @@ MatX Estimator::InstateGroupCovs() const
     GroupPtr g = *it;
     Mat6 cov = InstateGroupCov(g);
 
-    int cnt;
+    // `cnt` is the flat index into the 21-entry row-major upper triangle -- the
+    // same packing `InstateFeatureCovs` uses for its 3x3. Resetting it per row
+    // of `cov`, as this used to, restarted at column 0 every time: columns 6..20
+    // were never written at all, and columns 0..5 were overwritten by each
+    // successive row, ending up holding cov(5,5), cov(4,5), ... rather than the
+    // first row of the triangle.
+    int cnt = 0;
     for (int ii = 0; ii<6; ii++) {
-      cnt = 0;
       for (int jj = ii; jj<6; jj++) {
         group_covs(i,cnt) = cov(ii,jj);
         cnt++;

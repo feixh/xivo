@@ -88,11 +88,12 @@ if __name__ == '__main__':
     # COMPUTE ATE
     ########################################
     cmd = 'python3 scripts/tum_rgbd_benchmark_tools/evaluate_ate.py \
---max_difference 0.001 \
+--max_difference {ate_max_difference:} \
 {groundtruth_file:} \
 {result_file:} {write_to:}'.format(
         groundtruth_file=groundtruth_file,
         result_file=result_file,
+        ate_max_difference=args.ate_max_difference,
         write_to='>> {}'.format(benchmark_file) if not args.stdout else '')
     if args.plot:
         cmd += " --plot {}_ate_plot.png".format(result_file)

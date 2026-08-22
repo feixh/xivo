@@ -128,7 +128,14 @@ struct State {
   Vec3 Tbc;
   SO3 Rsg;  // gravity -> spatial
 
-  number_t td;
+  // Declared unconditionally, but only assigned from the config under
+  // USE_ONLINE_TEMPORAL_CALIB -- which the shipped build leaves undefined. The
+  // constructor initialised only `counter`, so in the default build `td` held an
+  // indeterminate value that was still copied out (Estimator::td(), and the
+  // by-value argument to Feature::ComputeJacobian at update.cpp:29 and
+  // manager.cpp:105) and printed by ~Estimator under `print_calibration`. It read
+  // as zero in practice only because a freshly mapped heap page is zero.
+  number_t td{0};
 
   using Tangent = Eigen::Matrix<number_t, kMotionSize, 1>;
 

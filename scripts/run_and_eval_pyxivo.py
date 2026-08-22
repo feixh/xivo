@@ -88,11 +88,12 @@ if __name__ == '__main__':
         # COMPUTE ATE
         ########################################
         cmd = 'python3 scripts/tum_rgbd_benchmark_tools/evaluate_ate.py \
---max_difference 0.001 \
+--max_difference {ate_max_difference:} \
 {groundtruth_file:} \
 {result_file:} {write_to:}'.format(
             groundtruth_file=groundtruth_file,
             result_file=result_file,
+            ate_max_difference=args.ate_max_difference,
             write_to='>> {}'.format(benchmark_file) if not args.stdout else '')
         if args.plot:
             cmd += " --plot {}_ate_plot.png".format(result_file)
@@ -133,11 +134,12 @@ if __name__ == '__main__':
         # evaluate the fused trajectory
         result_file = os.path.join(args.out_dir, '{}_{}_fused'.format(args.dataset, args.seq))
         cmd = 'python3 scripts/tum_rgbd_benchmark_tools/evaluate_ate.py \
---max_difference 0.001 \
+--max_difference {ate_max_difference:} \
 {groundtruth_file:} \
 {result_file:} {write_to:}'.format(
             groundtruth_file=groundtruth_file,
             result_file=result_file,
+            ate_max_difference=args.ate_max_difference,
             write_to='>> {}'.format(benchmark_file) if not args.stdout else '')
         print('*** COMMAND TO BE EXECUTED ***')
         print(cmd)

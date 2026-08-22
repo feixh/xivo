@@ -10,6 +10,8 @@
 #include <gtest/gtest.h>
 
 #include <random>
+#include <utility>
+#include <vector>
 
 #define private public
 
@@ -26,9 +28,10 @@ namespace {
 
 const char *kStereoCfg = "cfg/tumvi_stereo.json";
 
-// The error-state variables the right rows must depend on. Everything else is
-// either compiled out (the online-calibration blocks) or genuinely absent from
-// the model, and `AllOtherColumnsAreZero` below pins that down.
+// The error-state variables the right rows must depend on *and* that a finite
+// difference through `ComputeRightPixel` can reach. The online-calibration
+// columns are live too when their flags are on, but they do not move the
+// predicted pixel -- see `LiveBlocks` below, which is the full list.
 enum class Var { Wsb, Tsb, Wbc, Tbc, Wsbr, Tsbr, x };
 
 } // namespace
@@ -59,13 +62,19 @@ protected:
                              Vec3{0.03, -0.01, 0.02});
     gbc_nom = SE3::sampleUniform(generator);
 
-    // Unused with the online-calibration options compiled out, but
-    // `ComputeJacobian` takes them.
+    // These reach only the online-calibration columns; none of them moves the
+    // predicted pixel (the pose `ComputeJacobian` is handed is already the
+    // td-corrected one), so they are free to be nonzero without disturbing any
+    // of the finite differences below.
     gyro = Vec3::Random();
     Cg_nom = Mat3::Identity();
     bg_nom = Vec3::Zero();
     Vsb_nom = Vec3::Random();
-    td_nom = 0.0;
+    // Nonzero on purpose, and about the magnitude the filter actually estimates
+    // on TUM-VI: `dXcn_dbg` carries a factor of td, so at td = 0 the whole bg
+    // block would be zero and `NoBlockIsAccidentallyZero` could not tell a
+    // filled block from a forgotten one.
+    td_nom = 5e-3;
 
     ClearErrors();
 
@@ -161,6 +170,33 @@ protected:
     return -1;
   }
 
+  /** Every (column, width) block the right rows are allowed to touch.
+   *
+   * The `Var` list is the part a finite difference can reach. The
+   * online-calibration blocks are live as well whenever their flag is set --
+   * `USE_ONLINE_TEMPORAL_CALIB` was off when this file was written and is on
+   * since the auto-bugfix merge -- but `td`, `bg` and `Cg` do not appear in the
+   * predicted pixel at all, only in its derivative, so there is no finite
+   * difference to compare them against here. They still have to be listed, or
+   * the structural tests below would read a correctly filled column as a stray
+   * write. `TemporalCalibColumnsShareTheLeftChain` is what checks their values.
+   */
+  std::vector<std::pair<int, int>> LiveBlocks() {
+    std::vector<std::pair<int, int>> blocks;
+    for (Var v : {Var::Wsb, Var::Tsb, Var::Wbc, Var::Tbc, Var::Wsbr, Var::Tsbr,
+                  Var::x}) {
+      blocks.emplace_back(ColumnOf(v), 3);
+    }
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+    blocks.emplace_back(Index::td, 1);
+#ifdef USE_ONLINE_IMU_CALIB
+    blocks.emplace_back(Index::Cg, 9);
+#endif
+    blocks.emplace_back(Index::bg, 3);
+#endif
+    return blocks;
+  }
+
   void CheckBlock(Var v, const char *name) {
     const int col = ColumnOf(v);
     for (int i = 0; i < 3; ++i) {
@@ -228,10 +264,9 @@ TEST_F(StereoJacobiansTest, NoBlockIsAccidentallyZero) {
   // block that is zero in *both* would pass silently -- which is exactly the
   // failure mode of forgetting to fill one. None of these are zero for a
   // generic pose.
-  for (Var v : {Var::Wsb, Var::Tsb, Var::Wbc, Var::Tbc, Var::Wsbr, Var::Tsbr,
-                Var::x}) {
-    const number_t n = f->J_r_.block<2, 3>(0, ColumnOf(v)).norm();
-    EXPECT_GT(n, 1e-6) << "block at column " << ColumnOf(v) << " is zero";
+  for (auto [col, width] : LiveBlocks()) {
+    const number_t n = f->J_r_.block(0, col, 2, width).norm();
+    EXPECT_GT(n, 1e-6) << "block at column " << col << " is zero";
   }
 }
 
@@ -241,9 +276,8 @@ TEST_F(StereoJacobiansTest, AllOtherColumnsAreZero) {
   // no *other* group's or feature's slot: a stray write there would silently
   // corrupt an unrelated part of the state.
   Eigen::Matrix<number_t, 2, kFullSize> J = f->J_r_;
-  for (Var v : {Var::Wsb, Var::Tsb, Var::Wbc, Var::Tbc, Var::Wsbr, Var::Tsbr,
-                Var::x}) {
-    J.block<2, 3>(0, ColumnOf(v)).setZero();
+  for (auto [col, width] : LiveBlocks()) {
+    J.block(0, col, 2, width).setZero();
   }
   EXPECT_NEAR(J.norm(), 0.0, 1e-12);
 }
@@ -255,6 +289,48 @@ TEST_F(StereoJacobiansTest, RightRowsAreNotTheLeftRows) {
   EXPECT_GT((f->J_r_ - f->J_).norm() / f->J_.norm(), 1e-3);
 }
 
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+TEST_F(StereoJacobiansTest, TemporalCalibColumnsShareTheLeftChain) {
+  // The td and bg columns are the one live part of the right rows a finite
+  // difference cannot reach (they do not move the predicted pixel), and turning
+  // USE_ONLINE_TEMPORAL_CALIB on made them live for the first time. They are
+  // still checkable: each camera's column is *its own* projection Jacobian times
+  // the *same* chain vector (`cache_.dXcn_dtd`, `cache_.dXcn_dbg`), so
+  //
+  //     [ dxp0_dXcn ]        [ J_  (:, c) ]
+  //     [ dxp1_dXcn ] * v =  [ J_r_(:, c) ]
+  //
+  // must be consistent for some 3-vector v. Each dxp_dXcn is recovered from the
+  // Tsb block -- which the finite differences above already pin down -- divided
+  // by the analytically known dXcn_dTsb = -Rbc^T Rsb^T. The obvious copy-paste,
+  // building the right column with the *left* camera's dxp_dXcn, fails this: the
+  // two projection Jacobians have different null directions, so no single v
+  // explains both halves.
+  ClearErrors();
+  const Mat3 Rsb = gsb_nom.so3().matrix();
+  const Mat3 Rbc = gbc_nom.so3().matrix();
+  const Mat3 dTsb_inv = (-Rbc.transpose() * Rsb.transpose()).inverse();
+
+  Eigen::Matrix<number_t, 4, 3> M;
+  M.topRows<2>() = f->J_.block<2, 3>(0, Index::Tsb) * dTsb_inv;
+  M.bottomRows<2>() = f->J_r_.block<2, 3>(0, Index::Tsb) * dTsb_inv;
+
+  for (auto [begin, width] :
+       std::vector<std::pair<int, int>>{{Index::td, 1}, {Index::bg, 3}}) {
+    for (int i = 0; i < width; ++i) {
+      const int c = begin + i;
+      Eigen::Matrix<number_t, 4, 1> rhs;
+      rhs.head<2>() = f->J_.block<2, 1>(0, c);
+      rhs.tail<2>() = f->J_r_.block<2, 1>(0, c);
+      EXPECT_GT(rhs.tail<2>().norm(), 1e-6) << "right column " << c << " is zero";
+      const Vec3 v = M.colPivHouseholderQr().solve(rhs);
+      EXPECT_LT((M * v - rhs).norm(), 1e-8 * (1.0 + rhs.norm()))
+          << "column " << c << " is not the left chain seen through camera 1";
+    }
+  }
+}
+#endif
+
 TEST_F(StereoJacobiansTest, FillJacobianBlockCopiesEveryLiveBlock) {
   // The deferred M0 coverage test: `FillJacobianBlock` used to write the
   // reference group's translation block over its rotation block, a bug invisible
@@ -264,22 +340,21 @@ TEST_F(StereoJacobiansTest, FillJacobianBlockCopiesEveryLiveBlock) {
   f->FillJacobianBlock(H, 0);
   f->FillRightJacobianBlock(H, 2);
 
-  for (Var v : {Var::Wsb, Var::Tsb, Var::Wbc, Var::Tbc, Var::Wsbr, Var::Tsbr,
-                Var::x}) {
-    const int col = ColumnOf(v);
-    EXPECT_NEAR((H.block<2, 3>(0, col) - f->J_.block<2, 3>(0, col)).norm(), 0.0,
-                1e-12)
+  for (auto [col, width] : LiveBlocks()) {
+    EXPECT_NEAR(
+        (H.block(0, col, 2, width) - f->J_.block(0, col, 2, width)).norm(), 0.0,
+        1e-12)
         << "left rows, column " << col;
-    EXPECT_NEAR((H.block<2, 3>(2, col) - f->J_r_.block<2, 3>(0, col)).norm(),
-                0.0, 1e-12)
+    EXPECT_NEAR(
+        (H.block(2, col, 2, width) - f->J_r_.block(0, col, 2, width)).norm(),
+        0.0, 1e-12)
         << "right rows, column " << col;
   }
 
   // And nothing outside those blocks was written, in either row pair.
   MatX H2 = H;
-  for (Var v : {Var::Wsb, Var::Tsb, Var::Wbc, Var::Tbc, Var::Wsbr, Var::Tsbr,
-                Var::x}) {
-    H2.block<4, 3>(0, ColumnOf(v)).setZero();
+  for (auto [col, width] : LiveBlocks()) {
+    H2.block(0, col, 4, width).setZero();
   }
   EXPECT_NEAR(H2.norm(), 0.0, 1e-12);
 }

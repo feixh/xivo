@@ -2,6 +2,9 @@
 // Author: Xiaohan Fei (feixh@cs.ucla.edu)
 #include "estimator.h"
 
+#include <cmath>
+#include <limits>
+
 namespace xivo {
 
 void Estimator::PrinceDormand(const Vec3 &gyro0, const Vec3 &accel0, number_t dt) {
@@ -26,6 +29,19 @@ void Estimator::PrinceDormand(const Vec3 &gyro0, const Vec3 &accel0, number_t dt
   }
 
   if (control_stepsize) {
+    // NOTE: this branch only ever *grows or shrinks the next* step; it never
+    // rejects and retries a step whose error exceeded `tolerance`, because
+    // `PrinceDormandStep` commits directly to X_/P_ and there is no rollback. The
+    // `attempts` config key exists for exactly that retry count and is read into
+    // a local that nothing reads back. Leaving the retry unimplemented rather
+    // than faking it: it needs a state/covariance snapshot per trial step. No
+    // shipped config enables control_stepsize.
+    static bool warned{false};
+    if (!warned) {
+      LOG(WARNING) << "PrinceDormand.control_stepsize is on, but step rejection "
+                      "is not implemented (`attempts` is ignored)";
+      warned = true;
+    }
 
     number_t total_step = 0.0, scale = 1.0;
 
@@ -46,7 +62,7 @@ void Estimator::PrinceDormand(const Vec3 &gyro0, const Vec3 &accel0, number_t dt
         scale = std::min(std::max(scale, min_scale_factor),
                          max_scale_factor); // clipping
       }
-      std::cout << "err=" << err << " ;h=" << h << " ;s=" << scale << std::endl;
+      VLOG(1) << "err=" << err << " ;h=" << h << " ;s=" << scale;
 
       h *= scale;
       if (total_step < dt) {
@@ -213,11 +229,19 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) =
       P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) *
       F_.transpose();
-  // static MatX diffK;
-  // diffK = 0.0002 * (44.0 * K1 - 330.0 * K3 + 891.0 * K4 - 660.0 * K5 -
-  //                   45.0 * K6 + 100.0 * K7);
-  // return std::max<number_t>(fabs(diffK.minCoeff()), fabs(diffK.maxCoeff()));
-  return 0;
+  // The embedded 4th-order solution differs from the 5th-order one by this
+  // combination of the stage slopes (Prince-Dormand v3(4,5); see reference 1),
+  // which is the local truncation error estimate the step controller in
+  // `PrinceDormand` above needs. Returning a hardcoded 0 made that controller
+  // take its `err == 0.0` branch on every single step, so it multiplied the step
+  // size by `max_scale_factor` unconditionally: "adaptive" stepping degenerated
+  // to "always take the largest step allowed". The slopes are increments per unit
+  // time and `ComposeMotion` applies them over `dt`, so the error in the state
+  // increment carries a factor of dt.
+  const Vec3 diffK = 0.0002 * (44.0 * K1 - 330.0 * K3 + 891.0 * K4 -
+                               660.0 * K5 - 45.0 * K6 + 100.0 * K7);
+  const number_t err = diffK.cwiseAbs().maxCoeff() * std::fabs(dt);
+  return std::isfinite(err) ? err : std::numeric_limits<number_t>::max();
 }
 
 }

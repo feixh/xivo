@@ -95,6 +95,17 @@ void Estimator::UpdateStep(const timestamp_t &ts,
     }
   }
 
+  // `DiscardAffectedGroups` may have re-anchored some of these features to a new
+  // reference group, which changes both `x_` and the state columns the Jacobian
+  // belongs in. Jacobians computed above (before the re-anchoring) are stale for
+  // exactly those features, and `FilterUpdate` would apply them at the *new*
+  // group's offset. Recompute over the surviving set -- cheap, at most
+  // `kMaxFeature` features, and it refreshes the innovation too.
+  for (auto f : in_current_ekf_update_) {
+    f->ComputeJacobian(X_.Rsb.matrix(), X_.Tsb, X_.Rbc.matrix(), X_.Tbc,
+                       last_gyro_, imu_.Cg(), X_.bg, X_.Vsb, X_.td);
+  }
+
 #ifndef NDEBUG
   CHECK(sum(fsel_) == in_current_ekf_update_.size())
     << "bookkeeping error in removing floating groups";
@@ -268,7 +279,14 @@ void Estimator::AdaptInitialDepth() {
     std::vector<number_t> depth(depth_features.size());
     std::transform(depth_features.begin(), depth_features.end(), depth.begin(),
                    [](FeaturePtr f) { return f->z(); });
-    number_t median_depth = depth[depth.size() >> 1];
+    // `depth` has to be (partially) ordered before the middle element is the
+    // median. Without this, `median_depth` was whatever depth happened to sit
+    // in the middle of the graph's traversal order -- an arbitrary feature, not
+    // a robust statistic. With `median_weight` at 0.99 the initial depth handed
+    // to every new feature was then essentially that arbitrary value.
+    auto mid = depth.begin() + depth.size() / 2;
+    std::nth_element(depth.begin(), mid, depth.end());
+    number_t median_depth = *mid;
 
     if (median_depth < min_z_ || median_depth > max_z_) {
       VLOG(0) << "Median depth out of bounds: " << median_depth;
@@ -333,10 +351,19 @@ void Estimator::DiscardAffectedGroups() {
     if ((num_instate_features_of_g < num_gauge_xy_features_) ||
         ((num_gauge_xy_features_ == 0) && (num_instate_features_of_g == 0))) {
       std::vector<FeaturePtr> nullrefs = FindNewOwnersForFeaturesOf(g);
-      DiscardFeatures(nullrefs);
+      // The status write has to sit between the two halves of `DiscardFeatures`:
+      // that function keys the filter-slot release off `instate()`, which
+      // `NULLREFED` makes false, and it ends by handing the object back to the
+      // memory-manager pool -- so marking afterwards, as this used to, wrote to a
+      // slot the manager was already free to recycle. Release the slot here and
+      // mark before `DiscardFeatures` sees the feature.
       for (auto f: nullrefs) {
+        if (f->instate()) {
+          RemoveFeatureFromState(f);
+        }
         f->SetStatus(FeatureStatus::NULLREFED);
       }
+      DiscardFeatures(nullrefs);
       DiscardGroup(g);
     }
   }
@@ -522,6 +549,10 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
     std::sort(features_of_group.begin(), features_of_group.end(),
               Criteria::CandidateComparison);
 
+    // How many of this group's features actually made it into the state. The
+    // group is only worth a group slot if that is nonzero -- see below.
+    int num_features_added = 0;
+
     // case 1: we're using depth optimization -- which means that we'll only add
     // the group if enough features optimize well.
     if (use_depth_opt_) {
@@ -542,7 +573,6 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
         }
       }
       if (good_features.size() >= num_gauge_xy_features_) {
-        int num_features_added = 0;
         for (auto f: good_features) {
           AddFeatureToState(f);
           instate_features_.push_back(f);
@@ -562,7 +592,6 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
 
     // No depth optimization = the simple case.
     else {
-      int num_features_added = 0;
       for (auto f: features_of_group) {
         AddFeatureToState(f);
         instate_features_.push_back(f);
@@ -575,7 +604,22 @@ void Estimator::AddGroupOfFeatures(int free_group_slots) {
       LOG(INFO) << "Added " << num_features_added << " features from group " << g->id();
     }
 
-    // Add group
+    // Add group -- but only if it contributed at least one in-state feature. The
+    // depth-optimization path above has an `else` that adds nothing (fewer than
+    // num_gauge_xy_features_ features refined well) and even files the group
+    // under affected_groups_ for cleanup; the non-depth-opt path adds nothing
+    // when features_of_group came back empty. Both then fell through to here, so
+    // a group with no measurements attached to it burned one of the
+    // kMaxGroup slots, contributed 6 state dimensions whose covariance could only
+    // grow, and was queued in needs_new_gauge_features_ -- asking
+    // FindNewGaugeFeatures for gauge features among features it does not have in
+    // the state.
+    if (num_features_added == 0) {
+      LOG(INFO) << "group #" << g->id()
+                << " contributed no instate features; not adding it to the state";
+      continue;
+    }
+
     AddGroupToState(g);
     needs_new_gauge_features_.push_back(g);
     LOG(INFO) << "group #" << g->id() << " added to EKF state" << std::endl;
@@ -662,6 +706,18 @@ void Estimator::InitializeJustCreatedTracks(GroupPtr g,
     CHECK(f->ref() == nullptr);
 #endif
     f->SetRef(g);
+    // Branch order matters here, and both halves of it were arrived at
+    // separately. The stereo seed comes first because it is the only branch
+    // carrying a *measured* depth for this frame (auto-stereo). Then the
+    // simulation branch, ahead of the triangulation one, because the
+    // `triangulate_pre_subfilter_ && !TriangulationSuccessful()` test the
+    // original used is a tautology here -- every feature reaching this point was
+    // created on *this* frame, so it has exactly one observation,
+    // `Feature::Reset` has just set triangulation_successful_ = false, and
+    // `Triangulate` needs two views. That tautology shadowed the simulation
+    // branch, so `sim_initialize_depths_` silently did nothing and simulation
+    // runs threw away their ground-truth depths (auto-bugfix). Test the branches
+    // that actually discriminate first.
     number_t stereo_z, stereo_std_z;
     if (StereoSeedDepth(f, &stereo_z, &stereo_std_z)) {
       // A metric depth from the stereo pair, available on the feature's very
@@ -672,10 +728,13 @@ void Estimator::InitializeJustCreatedTracks(GroupPtr g,
       // supplies scale that does not have to be recovered from the IMU.
       f->Initialize(stereo_z, {init_std_x_, init_std_y_, stereo_std_z});
       f->SetStereoSeeded();
-    } else if (triangulate_pre_subfilter_ && !f->TriangulationSuccessful()) {
-      f->Initialize(init_z_, {init_std_x_badtri_, init_std_y_badtri_, init_std_z_badtri_});
     } else if (sim_initialize_depths_) {
       f->Initialize(ids_to_depths_[f->id()], {init_std_x_, init_std_y_, init_std_z_});
+    } else if (triangulate_pre_subfilter_) {
+      // No triangulation is possible from a single view, so the wide "bad
+      // triangulation" prior is the correct one -- stated directly rather than
+      // via a condition that cannot be false.
+      f->Initialize(init_z_, {init_std_x_badtri_, init_std_y_badtri_, init_std_z_badtri_});
     } else {
       f->Initialize(init_z_, {init_std_x_, init_std_y_, init_std_z_});
     }

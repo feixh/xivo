@@ -97,8 +97,10 @@ Estimator::~Estimator() {
   }
 
   if (worker_) {
+    stop_.store(true, std::memory_order_release);
     worker_->join();
     delete worker_;
+    worker_ = nullptr;
   }
 }
 
@@ -314,13 +316,26 @@ Estimator::Estimator(const Json::Value &cfg)
   G_.resize(kMotionSize, 12);
   G_.setZero();
 
+  // Five of the eight keys every shipped config carries -- Tsb, Vsb, wb, ab and
+  // Tbc -- were never read. `cfg/pcw.json` sets Vsb to 0.01 and got zero, with no
+  // diagnostic. Read all of them, and take the values as standard deviations (the
+  // original squared the assembled matrix by *multiplying it with itself*, which
+  // happens to square the diagonal but reads as a typo and would be wrong for any
+  // off-diagonal term).
   auto Qmodel = cfg_["Qmodel"];
+  auto std2var = [&Qmodel](const char *key) {
+    const number_t s = Qmodel.get(key, 0.0).asDouble();
+    return s * s;
+  };
   Qmodel_.setZero(kMotionSize, kMotionSize);
-  Qmodel_.block<3, 3>(Index::Wsb, Index::Wsb) = I3 * Qmodel["Wsb"].asDouble();
-  Qmodel_.block<3, 3>(Index::Wbc, Index::Wbc) = I3 * Qmodel["Wbc"].asDouble();
-  Qmodel_.block<2, 2>(Index::Wsg, Index::Wsg) = I2 * Qmodel["Wsg"].asDouble();
-  Qmodel_.block<kMotionSize, kMotionSize>(0, 0) *=
-      Qmodel_.block<kMotionSize, kMotionSize>(0, 0);
+  Qmodel_.block<3, 3>(Index::Wsb, Index::Wsb) = I3 * std2var("Wsb");
+  Qmodel_.block<3, 3>(Index::Tsb, Index::Tsb) = I3 * std2var("Tsb");
+  Qmodel_.block<3, 3>(Index::Vsb, Index::Vsb) = I3 * std2var("Vsb");
+  Qmodel_.block<3, 3>(Index::bg, Index::bg) = I3 * std2var("wb");
+  Qmodel_.block<3, 3>(Index::ba, Index::ba) = I3 * std2var("ab");
+  Qmodel_.block<3, 3>(Index::Wbc, Index::Wbc) = I3 * std2var("Wbc");
+  Qmodel_.block<3, 3>(Index::Tbc, Index::Tbc) = I3 * std2var("Tbc");
+  Qmodel_.block<2, 2>(Index::Wsg, Index::Wsg) = I2 * std2var("Wsg");
   LOG(INFO) << "Covariance of process noises loaded";
 
   // /////////////////////////////
@@ -358,8 +373,18 @@ Estimator::Estimator(const Json::Value &cfg)
   init_std_z_ = cfg_["initial_std_z"].asDouble();
   min_z_ = cfg_["min_depth"].asDouble();
   max_z_ = cfg_["max_depth"].asDouble();
-  init_std_x_badtri_ = cfg_["initial_std_x_badtri"].asDouble();
-  init_std_y_badtri_ = cfg_["initial_std_y_badtri"].asDouble();
+  // Same pixels -> normalized-camera-coordinate conversion as the non-badtri
+  // pair above. These feed exactly the same sink -- Feature::Initialize, i.e.
+  // the covariance of x_ = (X/Z, Y/Z, log Z), whose first two components are
+  // normalized, not pixels -- and the configs give the two sets identical
+  // values, so they must be interpreted identically. Without the division the
+  // x/y variance was off by fl^2 ~ 3.6e4. This is not a corner case: the badtri
+  // branch in InitializeJustCreatedTracks is taken 100% of the time, because a
+  // feature there has exactly one observation and Triangulate needs two.
+  init_std_x_badtri_ =
+    cfg_["initial_std_x_badtri"].asDouble() / Camera::instance()->GetFocalLength();
+  init_std_y_badtri_ =
+    cfg_["initial_std_y_badtri"].asDouble() / Camera::instance()->GetFocalLength();
   init_std_z_badtri_ = cfg_["initial_std_z_badtri"].asDouble();
   LOG(INFO) << "Initial covariance for features loaded";
 
@@ -408,7 +433,7 @@ Estimator::Estimator(const Json::Value &cfg)
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
   feature_owner_change_cov_factor_ =
-    cfg_.get("filter_owner_change_cov_factor", 1.5).asDouble();
+    cfg_.get("feature_owner_change_cov_factor", 1.5).asDouble();
   strict_criteria_timesteps_ = cfg_.get("strict_criteria_timesteps", 5).asInt();
 
   // Feature Gauge Options
@@ -462,7 +487,10 @@ Estimator::Estimator(const Json::Value &cfg)
 
 void Estimator::Run() {
   worker_ = new std::thread([this]() {
-    for (;;) {
+    // `for (;;)` with no exit condition meant ~Estimator's join() waited on a
+    // thread that could never finish. It also spun at 100% CPU whenever the
+    // buffer was short of MAX_SIZE, starving the producer; yield when idle.
+    while (!stop_.load(std::memory_order_acquire)) {
       std::unique_ptr<internal::Message> msg;
       {
         std::scoped_lock lck(buf_.mtx);
@@ -475,6 +503,8 @@ void Estimator::Run() {
       if (msg != nullptr) {
         // std::cout << "executing\n";
         msg->Execute(this);
+      } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
       }
     }
   });
@@ -665,7 +695,14 @@ void Estimator::Propagate(bool visual_meas) {
     LOG(FATAL) << "Unknown integration method";
   }
 
-  P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += Qmodel_;
+  // Qmodel is a continuous-time process-noise density, so the amount injected
+  // has to be proportional to the elapsed time. Adding it once per call instead
+  // made the effective noise a function of the IMU rate: at 200 Hz a one-second
+  // interval got 200x the noise it got at 1 Hz, and doubling the sensor rate
+  // silently doubled the assumed model uncertainty. Every TUM-VI config leaves
+  // Qmodel at zero, which is why this never showed up there; `cfg/pcw.json` sets
+  // it nonzero.
+  P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += Qmodel_ * dt;
   timer_.Tock("propagation");
 }
 
@@ -722,7 +759,14 @@ void Estimator::ComputeMotionJacobianAt(
   Mat3 dV_dWsb = -Rsb * SO3::hat(accel_calib);
   Mat3 dV_dba = -Rsb;
 
-  Mat3 dV_dWsg = -Rsb * SO3::hat(g_); // effective dimension: 3x2, since Wg is 2-dim
+  // Rsg, not Rsb. The error state perturbs on the RIGHT (core.h: `Rsg *= dRsg`),
+  // so d/dd [Rsg*exp(d)*g] = -Rsg*hat(g)*d. Rsb does not appear in the gravity
+  // term of Vdot at all. The two agree only while Rsb == I (t=0), which is
+  // presumably how this survived; from then on the column was rotated by
+  // Rsb*Rsg' relative to the truth. Every neighbouring block uses the same
+  // right-perturbation convention (dV_dWsb = -Rsb*hat(accel_calib) for the
+  // Rsb*accel_calib term), which is what makes this one the odd man out.
+  Mat3 dV_dWsg = -X.Rsg.matrix() * SO3::hat(g_); // effective dim 3x2, Wg is 2-dim
   // Mat2 dWg_dWg = Mat2::Identity();
 
   F_.setZero(); // wipe out the delta added to F in the previous step
@@ -782,12 +826,15 @@ void Estimator::ComputeMotionJacobianAt(
 }
 
 bool Estimator::GoodTimestamp(const timestamp_t &now) {
-  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now);
-  auto curr_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(curr_time_);
-  if (now_ms < curr_ms) {
-    LOG(WARNING) << StrFormat("now=%ld ms < curr=%ld ms", now_ms.count(),
-                                    curr_ms.count());
+  // `timestamp_t` is nanoseconds. Truncating both sides to milliseconds before
+  // comparing let any measurement that arrived out of order by less than a
+  // millisecond -- or that merely landed in the same millisecond bucket as a
+  // later one -- through the guard, and it was then integrated with a negative
+  // dt. Compare at the resolution the timestamps actually carry.
+  if (now < curr_time_) {
+    LOG(WARNING) << StrFormat(
+        "now=%ld ns < curr=%ld ns (out of order by %ld ns)", now.count(),
+        curr_time_.count(), (curr_time_ - now).count());
     return false;
   } else {
     return true;
@@ -1460,10 +1507,76 @@ std::tuple<number_t, bool> Estimator::HuberOnInnovation(const Vec2 &inn,
 std::vector<FeaturePtr> Estimator::FindNewOwnersForFeaturesOf(const GroupPtr g) {
   Graph& graph{*Graph::instance()};
   std::vector<FeaturePtr> nullref_features;
-  auto failed =
-    graph.TransferFeatureOwnership(g, gbc(), feature_owner_change_cov_factor_);
+  std::vector<Graph::Reanchored> reanchored_instate;
+  auto failed = graph.TransferFeatureOwnership(
+      g, gbc(), feature_owner_change_cov_factor_, &reanchored_instate);
+
+  // Re-parameterizing an in-state feature against a new reference group is a
+  // change of state coordinates, so its filter covariance -- including every
+  // cross-covariance against the rest of the state -- has to be pushed through
+  // the same Jacobian. `Feature::ChangeOwner` can only reach the feature's local
+  // 3x3 copy, which is dead storage once the feature is in the state, so this
+  // never happened: the filter kept the old parameterization's uncertainty for
+  // the new coordinates. Fold the inflation factor in as sqrt(factor) * J, which
+  // scales the feature block by `factor` and its cross terms by sqrt(factor),
+  // preserving positive semi-definiteness.
+  const number_t s = std::sqrt(feature_owner_change_cov_factor_);
+  for (const auto &r : reanchored_instate) {
+    ReanchorFeatureCovariance(r.f, r.old_ref, r.f->ref(), r.jac, s);
+  }
+
   nullref_features.insert(nullref_features.end(), failed.begin(), failed.end());
   return nullref_features;
+}
+
+
+void Estimator::ReanchorFeatureCovariance(FeaturePtr f, GroupPtr old_ref,
+                                          GroupPtr new_ref,
+                                          const Feature::ReanchorJacobians &jac,
+                                          number_t scale) {
+#ifndef NDEBUG
+  CHECK(f->sind() != -1) << "feature not in state";
+  CHECK(new_ref->sind() != -1) << "new reference group not in state";
+#endif
+  const int foff = kFeatureBegin + kFeatureSize * f->sind();
+  const int n = P_.rows();
+
+  const Mat3 Jx = scale * jac.dxn_dx;
+  const Mat36 Jn = scale * jac.dxn_dref_new;
+  const int noff = kGroupBegin + kGroupSize * new_ref->sind();
+  // The outgoing group is not necessarily in the state -- `DiscardAffectedGroups`
+  // re-anchors before it knows whether the group had a state slot. If it does
+  // not, its pose carries no error state and the term simply drops out.
+  const bool old_in_state = (old_ref != nullptr) && (old_ref->sind() != -1);
+  const Mat36 Jo = old_in_state ? Mat36(scale * jac.dxn_dref_old)
+                                : Mat36(Mat36::Zero());
+  const int ooff =
+      old_in_state ? kGroupBegin + kGroupSize * old_ref->sind() : 0;
+
+  // P <- S P S^T with S = I except for rows [foff, foff+3), which hold Jx at
+  // foff, Jo at ooff and Jn at noff. Do it as (S P) first, then (S P) S^T: after
+  // the row pass the feature's rows are already S P, and reading the *updated*
+  // columns in the second pass is exactly what (S P) S^T needs -- including the
+  // diagonal block, which ends up as the full quadratic form.
+  const MatX row = Jx * P_.block(foff, 0, kFeatureSize, n) +
+                   Jn * P_.block(noff, 0, kGroupSize, n) +
+                   (old_in_state ? MatX(Jo * P_.block(ooff, 0, kGroupSize, n))
+                                 : MatX(MatX::Zero(kFeatureSize, n)));
+  P_.block(foff, 0, kFeatureSize, n) = row;
+
+  const MatX col = P_.block(0, foff, n, kFeatureSize) * Jx.transpose() +
+                   P_.block(0, noff, n, kGroupSize) * Jn.transpose() +
+                   (old_in_state
+                        ? MatX(P_.block(0, ooff, n, kGroupSize) * Jo.transpose())
+                        : MatX(MatX::Zero(n, kFeatureSize)));
+  P_.block(0, foff, n, kFeatureSize) = col;
+
+  // The error state is zero outside a filter update, but transform it anyway so
+  // this stays correct if it is ever called from within one.
+  err_.segment<3>(foff) = Jx * err_.segment<3>(foff) +
+                          Jn * err_.segment<6>(noff) +
+                          (old_in_state ? Vec3(Jo * err_.segment<6>(ooff))
+                                        : Vec3(Vec3::Zero()));
 }
 
 
@@ -1472,6 +1585,14 @@ void Estimator::DiscardGroup(const GroupPtr g) {
   if (g->id() == gauge_group_) {
     // just lost the gauge group
     gauge_group_ = -1;
+    // ...and the pointer has to go with the id. `Group::Deactivate` below hands
+    // this object back to MemoryManager's pool, so keeping the pointer left
+    // `update.cpp`'s `groups_with_low_inn_inlier.count(gauge_group_ptr_)` test
+    // comparing against a dangling address -- which, once the slot was recycled
+    // for a different group, could match a live group that is not the gauge
+    // group. Null is the honest answer and makes that test take the
+    // "pick a temporary reference group" branch, which is the safe one.
+    gauge_group_ptr_ = nullptr;
   }
 #ifdef USE_MAPPER
   Mapper::instance()->AddGroup(g, graph.GetGroupAdj(g));
@@ -1599,17 +1720,30 @@ void Estimator::RestoreState(std::unordered_set<FeaturePtr>& features,
 #endif
 }
 
+// Both of these are used as `std::sort` comparators, which requires a strict
+// weak ordering: `comp(a, a)` must be false. `<=` makes it true, and libstdc++'s
+// introsort relies on irreflexivity to bound its partition scan -- with an
+// invalid comparator it can run past the end of the range. Ties are not
+// hypothetical here: every feature initialised on the same frame carries the
+// identical covariance, so equal norms are routine. Tie-break on id so the
+// order does not depend on the pointer order `MakePtrVectorUnique` leaves.
 bool Estimator::FeatureCovComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).norm();
   number_t score2 = InstateFeatureCov(f2).norm();
-  return (score1 <= score2);
+  if (score1 != score2) {
+    return score1 < score2;
+  }
+  return f1->id() < f2->id();
 }
 
 
 bool Estimator::FeatureCovXYComparison(FeaturePtr f1, FeaturePtr f2) const {
   number_t score1 = InstateFeatureCov(f1).block<2,2>(0,0).norm();
   number_t score2 = InstateFeatureCov(f2).block<2,2>(0,0).norm();
-  return (score1 <= score2);
+  if (score1 != score2) {
+    return score1 < score2;
+  }
+  return f1->id() < f2->id();
 }
 
 

@@ -16,7 +16,7 @@
   "use_depth_opt": false,  // depth optimization
   "use_MH_gating": true,
   "use_1pt_RANSAC": false,
-  "use_compression": true,  // measurement compression
+  "use_compression": false,  // measurement compression
   "triangulate_pre_subfilter": true,
   "compression_trigger_ratio": 1.5,
   "max_group_lifetime": 60,
@@ -41,8 +41,8 @@
   // memory
   "memory": {
     // Values if mapper is not enabled
-    "max_features": 256,
-    "max_groups": 256
+    "max_features": 200,
+    "max_groups": 100
     // Values if mapper is enabled
     //"max_features": 30000,
     //"max_groups": 5000
@@ -195,7 +195,7 @@
 
   "min_inliers": 5, // minimum number of inlier measurements
 
-  "MH_thresh": 5.991, // 8.991
+  "MH_thresh": 11.345, // 8.991
   "MH_adjust_factor": 1.15,
 
   "1pt_RANSAC_thresh": 1.5,

@@ -275,7 +275,13 @@
   "num_gauge_xy_features": 3,
   "collinear_cross_prod_thresh": 0.001,
   "tracker_cfg": {
-    "use_prediction": false,
+    // Was false here (and in 23 other configs) while the key was dead: the
+    // tracker always seeded KLT from the EKF's predicted measurement regardless.
+    // The auto-bugfix merge makes the key live, so the value that preserves the
+    // behaviour this config was tuned against -- and that produced the numbers
+    // in RESULTS_STEREO.md -- is true. It is also load-bearing: honoring false
+    // on TUM-VI mono diverges room4 (ATE 0.10 -> 1.04).
+    "use_prediction": true,
     "mask_size": 15,
     "margin": 8,
     // 3x the upstream 45/60. This is the *other* half of the capacity change:

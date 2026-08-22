@@ -2,6 +2,8 @@
 // Xiaohan Fei (feixh@cs.ucla.edu)
 #pragma once
 #include <condition_variable>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -427,6 +429,14 @@ private:
                     std::unordered_set<GroupPtr>& groups);
 
   void FixFeatureXY(FeaturePtr f);
+  /** Propagates a re-anchoring through the filter covariance: P <- S P S^T,
+   *  where S is the identity except for this feature's three rows, which pick up
+   *  `jac.dxn_dx` at the feature's own block and `jac.dxn_dref_{old,new}` at the
+   *  two groups'. `scale` multiplies all three (i.e. inflates the feature block
+   *  by scale^2), which is how `feature_owner_change_cov_factor` is applied. */
+  void ReanchorFeatureCovariance(FeaturePtr f, GroupPtr old_ref, GroupPtr new_ref,
+                                 const Feature::ReanchorJacobians &jac,
+                                 number_t scale);
 
 private:
   Estimator(const Json::Value &cfg);
@@ -727,6 +737,10 @@ private:
   void MaintainBuffer();
 
   own<std::thread *> worker_;
+  /** Set by the destructor to break the worker's loop. Without it, `Run()`'s
+   *  `for (;;)` never returned and `~Estimator`'s `worker_->join()` deadlocked,
+   *  so destroying an estimator with `async_run: true` hung the process. */
+  std::atomic<bool> stop_{false};
 
   /** Computes the running average time for dynamics propatagion, visual measurement
    *  processing, tracker, update tracker, jacobian, MH gating. (Those quantities

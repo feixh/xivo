@@ -16,7 +16,7 @@
   "use_depth_opt": false,  // depth optimization
   "use_MH_gating": true,
   "use_1pt_RANSAC": false,
-  "use_compression": true,  // measurement compression
+  "use_compression": false,  // measurement compression
   "triangulate_pre_subfilter": true,
   "compression_trigger_ratio": 1.5,
   "max_group_lifetime": 60,
@@ -41,8 +41,8 @@
   // memory
   "memory": {
     // Values if mapper is not enabled
-    "max_features": 256,
-    "max_groups": 256
+    "max_features": 200,
+    "max_groups": 100
     // Values if mapper is enabled
     //"max_features": 30000,
     //"max_groups": 5000
@@ -211,8 +211,8 @@
     "use_prediction": true,
     "mask_size": 15,
     "margin": 8, // image boundary to mask out
-    "num_features_min": 45,
-    "num_features_max": 60,
+    "num_features_min": 60,
+    "num_features_max": 80,
     "max_pixel_displacement": 64,
     "normalize": false,
     "match_dropped_tracks": false,

@@ -112,7 +112,16 @@ public:
     f_t cos_phi = std::cos(phi);
     f_t sin_phi = std::sin(phi);
 
-    f_t rth = xn / (fx_ * cos_phi);
+    // `Project` gives xn = fx * rth * cos_phi and yn = fy * rth * sin_phi, so
+    // rth is recoverable either as xn / (fx cos_phi) or as the radius
+    // sqrt((xn/fx)^2 + (yn/fy)^2). The two agree analytically -- the xn cancels
+    // against cos_phi = fy xn / sqrt(a^2 + b^2) -- but the division form is 0/0
+    // on the whole line xp[0] == cx_, where cos_phi is exactly zero, and loses
+    // all significance next to it: cos_phi carries an absolute error of about
+    // eps, so once |cos_phi| ~ 1e-8 the quotient is noise. The live TUM-VI
+    // config uses this model, and the vertical centre line of the image is not a
+    // corner case. Use the radius.
+    f_t rth = std::sqrt((xn / fx_) * (xn / fx_) + (yn / fy_) * (yn / fy_));
 
     f_t th = rth;
     // solve th:
@@ -136,20 +145,52 @@ public:
       f_t delta = d / d2;
       th -= delta;
     }
+    // `Project` builds th as atan2(|xy|, 1), so it is confined to [0, pi/2):
+    // theta = pi/2 is the ray parallel to the image plane and there is no
+    // (X/Z, Y/Z) that represents it. The Newton iteration above has no such
+    // constraint, and for a pixel outside the model's valid radius it happily
+    // overshoots past pi/2 -- where tan(th) turns negative and this function
+    // returns a ray pointing *backwards* through the principal point, i.e. a
+    // mirrored measurement reported as a valid one. Clamp to the model's domain.
+    constexpr f_t kMaxTh = f_t(1.5706); // just under pi/2
+    if (!std::isfinite(th)) {
+      th = f_t(0);
+    } else if (th > kMaxTh) {
+      th = kMaxTh;
+    } else if (th < -kMaxTh) {
+      th = -kMaxTh;
+    }
+
     f_t tan_th = std::tan(th);
     xc[0] = tan_th * cos_phi;
     xc[1] = tan_th * sin_phi;
 
     if (jac != nullptr) {
       f_t a2b2 = a * a + b * b;
+      if (!(a2b2 > f_t(0)) || !(rth > f_t(0))) {
+        // The principal point. phi is undefined there and the expressions below
+        // are all 0/0; the limit of the model as xp -> [cx, cy] is
+        // xp ~ [fx * xc0 + cx, fy * xc1 + cy], so d xc / d xp is this diagonal.
+        (*jac) << 1 / fx_, 0, 0, 1 / fy_;
+        return xc;
+      }
       Vec2 dphi_dxy(-b / a2b2 * fy_, a / a2b2 * fx_);
       Vec2 dcosphi_dxy(-sin_phi * dphi_dxy);
       Vec2 dsinphi_dxy(cos_phi * dphi_dxy);
-      Vec2 drth_dxy(cos_phi - xn * dcosphi_dxy[0], -xn * dcosphi_dxy[1]);
-      drth_dxy /= (fx_ * cos_phi * cos_phi);
+      // d rth / d[xn, yn] for rth = sqrt((xn/fx)^2 + (yn/fy)^2).
+      Vec2 drth_dxy(xn / (fx_ * fx_ * rth), yn / (fy_ * fy_ * rth));
+
+      // d rth / d th of the distortion polynomial, at the *final* th. The loop
+      // variable `x1` held this at the second-to-last iterate, and was read
+      // uninitialised altogether when max_iter_ was 0.
+      const f_t thj2 = th * th;
+      const f_t thj4 = thj2 * thj2;
+      const f_t thj6 = thj4 * thj2;
+      const f_t drth_dth = 1 + 3 * k0_ * thj2 + 5 * k1_ * thj4 +
+                           7 * k2_ * thj6 + 9 * k3_ * thj6 * thj2;
 
       f_t cos_th(cos(th));
-      Vec2 dtanth_dxy(drth_dxy / x1 / (cos_th * cos_th));
+      Vec2 dtanth_dxy(drth_dxy / drth_dth / (cos_th * cos_th));
       Vec2 doutx_dxy(cos_phi * dtanth_dxy + tan_th * dcosphi_dxy);
       Vec2 douty_dxy(sin_phi * dtanth_dxy + tan_th * dsinphi_dxy);
       (*jac) << doutx_dxy[0], doutx_dxy[1], douty_dxy[0], douty_dxy[1];

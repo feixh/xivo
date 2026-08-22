@@ -24,9 +24,12 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
 
     // perform givens elimination
 //    oos_jac_counter_ = Givens(oos_.inn, oos_.Hx, oos_.Hf, 2 * oos_jac_counter_);
+    // Two rows per observation, and only those rows are filled -- the rest of
+    // `oos_` still holds whatever the previous user of this pooled Feature left
+    // there. `SlowGivens` used to read the whole buffer.
+    const int filled_rows = 2 * oos_jac_counter_;
     MatX A;
-    oos_jac_counter_ = SlowGivens(oos_.Hf, oos_.Hx, A);
-    oos_.inn = A.transpose() * oos_.inn;
+    oos_jac_counter_ = SlowGivens(oos_.Hf, oos_.Hx, oos_.inn, A, filled_rows);
     // std::cout << "feature #" << id_ << " got " << oos_jac_counter_ << " oos
     // jac blocks\n";
   } else {

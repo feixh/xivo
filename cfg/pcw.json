@@ -215,7 +215,7 @@
   "collinear_cross_prod_thresh": 0.001,
 
   "tracker_cfg": {
-    "use_prediction": false,
+    "use_prediction": true,
     "mask_size": 15,
     "margin": 8, // image boundary to mask out
     "num_features_min": 150,

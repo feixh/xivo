@@ -56,15 +56,18 @@ bool Criteria::CandidateComparison(FeaturePtr f1, FeaturePtr f2) {
     score2 = -1.0 * (f2->P().diagonal().norm() + f2->outlier_counter());
   }
   else {
-    LOG(ERROR) << "Invalid feature score type";
-    score1 = f1->score();
-    score2 = f2->score();
+    LOG(ERROR) << "Invalid feature score type " << score_type
+               << "; falling back to DepthUncertainty";
+    score1 = -1.0 * (f1->P())(2,2);
+    score2 = -1.0 * (f2->P())(2,2);
   }
 
-  // score1/score2 were previously computed and then dropped on the floor: the
-  // comparison used f->score() unconditionally, so `comparison_score_type` was
-  // a silently ignored knob. The default ("DepthUncertainty") is exactly what
-  // score() returns, so honoring it here leaves default behavior unchanged.
+  // score1/score2 used to be computed and then thrown away in favour of
+  // f->score(), which is hard-wired to -P_(2,2) -- so `comparison_score_type`
+  // was a silently ignored knob and "CovarianceDiagNorm" /
+  // "CovarianceDiagNormPlusOutlierCount" were unreachable. The default
+  // ("DepthUncertainty") is exactly what score() returns, so honoring it here
+  // leaves default behaviour unchanged.
   if (s1 != s2) {
     return s1 > s2;
   }
