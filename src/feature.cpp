@@ -8,6 +8,7 @@
 #include "param.h"
 #include "alias.h"
 #include "rodrigues.h"
+#include "stereo.h"
 
 #include "glog/logging.h"
 
@@ -81,6 +82,9 @@ void Feature::Reset(number_t x, number_t y) {
   stereo_seeded_ = false;
   J_.setZero();
   inn_ << 0, 0;
+  J_r_.setZero();
+  inn_r_ << 0, 0;
+  right_jac_valid_ = false;
   outlier_counter_ = 0;
   lc_match_ = -1;
   triangulation_successful_ = false;
@@ -672,20 +676,85 @@ void Feature::ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
   // innovation
   cache_.inn = back() - cache_.xp;
   inn_ = cache_.inn;
+
+  // The right camera's rows, while `cache_` still describes this feature.
+  right_jac_valid_ = false;
+  if (has_right_ && StereoRig::enabled()) {
+    ComputeRightJacobian();
+  }
 }
 
-void Feature::FillJacobianBlock(MatX &H, int offset) {
-  H.block<2, 3>(offset, Index::Wsb) = J_.block<2, 3>(0, Index::Wsb);
-  H.block<2, 3>(offset, Index::Tsb) = J_.block<2, 3>(0, Index::Tsb);
-  H.block<2, 3>(offset, Index::Wbc) = J_.block<2, 3>(0, Index::Wbc);
-  H.block<2, 3>(offset, Index::Tbc) = J_.block<2, 3>(0, Index::Tbc);
+void Feature::ComputeRightJacobian() {
+  auto cam1 = Camera::instance(1);
+  if (cam1 == nullptr) {
+    return;
+  }
+  const StereoRig &rig = *StereoRig::instance();
+
+  // The rig extrinsics are fixed and live outside the error state (see
+  // stereo.h), so the *entire* dependence of the right observation on the state
+  // flows through `cache_.Xcn` -- the same 3D point, in the left camera frame of
+  // the current group, that the left rows were linearized about. That is what
+  // lets these rows reuse the left camera's whole `dXcn_d*` chain verbatim: the
+  // two cameras differ only in the last two links of the chain, the rigid hop
+  // into camera 1 and camera 1's own projection.
+  const Vec3 Xc1 = rig.Rc1c0() * cache_.Xcn + rig.Tc1c0();
+  if (!(Xc1(2) > 0.0)) {
+    // The current state predicts the point *behind* the right camera while the
+    // tracker nonetheless matched something there. There is no meaningful
+    // linearization of the projection here (and `project` would divide by a
+    // negative depth), so contribute no rows rather than a garbage one.
+    return;
+  }
+
+  Mat23 dxc1_dXc1;
+  const Vec2 xc1 = project(Xc1, &dxc1_dXc1);
+  Mat2 dxp1_dxc1;
+  // NOTE: no `jacc` output, i.e. no USE_ONLINE_CAMERA_CALIB block below. Only
+  // camera 0's intrinsics are in the error state; camera 1's stay fixed at their
+  // calibrated values, which is consistent with holding the rig fixed.
+  const Vec2 xp1 = cam1->Project(xc1, &dxp1_dxc1);
+  if (!xp1.allFinite() || !dxp1_dxc1.allFinite()) {
+    return;
+  }
+  const Mat23 dxp1_dXcn = dxp1_dxc1 * dxc1_dXc1 * rig.Rc1c0();
+
+  J_r_.setZero();
+  J_r_.block<2, 3>(0, Index::Wsb) = dxp1_dXcn * cache_.dXcn_dWsb;
+  J_r_.block<2, 3>(0, Index::Tsb) = dxp1_dXcn * cache_.dXcn_dTsb;
+  J_r_.block<2, 3>(0, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
+  J_r_.block<2, 3>(0, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+  J_r_.block<2, 1>(0, Index::td) = dxp1_dXcn * cache_.dXcn_dtd;
+#ifdef USE_ONLINE_IMU_CALIB
+  J_r_.block<2, 9>(0, Index::Cg) = dxp1_dXcn * cache_.dXcn_dCg;
+#endif
+  J_r_.block<2, 3>(0, Index::bg) = dxp1_dXcn * cache_.dXcn_dbg;
+#endif
+
+  int goff = kGroupBegin + 6 * ref_->sind();
+  int foff = kFeatureBegin + 3 * sind();
+  J_r_.block<2, 3>(0, goff) = dxp1_dXcn * cache_.dXcn_dWsbr;
+  J_r_.block<2, 3>(0, goff + 3) = dxp1_dXcn * cache_.dXcn_dTsbr;
+  J_r_.block<2, 3>(0, foff) = dxp1_dXcn * cache_.dXcn_dx;
+
+  inn_r_ = xp_r_ - xp1;
+  right_jac_valid_ = true;
+}
+
+void Feature::FillJacobianBlockFrom(
+    MatX &H, int offset, const Eigen::Matrix<number_t, 2, kFullSize> &J) {
+  H.block<2, 3>(offset, Index::Wsb) = J.block<2, 3>(0, Index::Wsb);
+  H.block<2, 3>(offset, Index::Tsb) = J.block<2, 3>(0, Index::Tsb);
+  H.block<2, 3>(offset, Index::Wbc) = J.block<2, 3>(0, Index::Wbc);
+  H.block<2, 3>(offset, Index::Tbc) = J.block<2, 3>(0, Index::Tbc);
 
 #ifdef USE_ONLINE_TEMPORAL_CALIB
-  H.block<2, 1>(offset, Index::td) = J_.block<2, 1>(0, Index::td);
+  H.block<2, 1>(offset, Index::td) = J.block<2, 1>(0, Index::td);
 #ifdef USE_ONLINE_IMU_CALIB
-  H.block<2, 9>(offset, Index::Cg) = J_.block<2, 9>(0, Index::Cg);
+  H.block<2, 9>(offset, Index::Cg) = J.block<2, 9>(0, Index::Cg);
 #endif
-  H.block<2, 3>(offset, Index::bg) = J_.block<2, 3>(0, Index::bg);
+  H.block<2, 3>(offset, Index::bg) = J.block<2, 3>(0, Index::bg);
 #endif
 
   int goff = kGroupBegin + 6 * ref_->sind();
@@ -696,15 +765,26 @@ void Feature::FillJacobianBlock(MatX &H, int offset) {
   // translation block at `goff + 3` was never written at all. `J_` itself is
   // correct (see ComputeJacobian above); only this copy into `H` was wrong,
   // which is why OnePointRANSAC -- which reads `J_` directly -- was unaffected.
-  H.block<2, 3>(offset, goff) = J_.block<2, 3>(0, goff);
-  H.block<2, 3>(offset, goff + 3) = J_.block<2, 3>(0, goff + 3);
-  H.block<2, 3>(offset, foff) = J_.block<2, 3>(0, foff);
+  H.block<2, 3>(offset, goff) = J.block<2, 3>(0, goff);
+  H.block<2, 3>(offset, goff + 3) = J.block<2, 3>(0, goff + 3);
+  H.block<2, 3>(offset, foff) = J.block<2, 3>(0, foff);
 
 #ifdef USE_ONLINE_CAMERA_CALIB
   // fill-in jacobian w.r.t. camera intrinsics
   int dim{Camera::instance()->dim()};
-  H.block(offset, kCameraBegin, 2, dim) = J_.block(0, kCameraBegin, 2, dim);
+  H.block(offset, kCameraBegin, 2, dim) = J.block(0, kCameraBegin, 2, dim);
 #endif
+}
+
+void Feature::FillJacobianBlock(MatX &H, int offset) {
+  FillJacobianBlockFrom(H, offset, J_);
+}
+
+void Feature::FillRightJacobianBlock(MatX &H, int offset) {
+#ifndef NDEBUG
+  CHECK(right_jac_valid_);
+#endif
+  FillJacobianBlockFrom(H, offset, J_r_);
 }
 
 void Feature::Triangulate(const SE3 &gsb, const SE3 &gbc,

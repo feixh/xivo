@@ -105,6 +105,19 @@ def main():
         "max_std_z": 1.0,
     }
 
+    cfg['stereo_update'] = {
+        "comment": "right-camera rows in the EKF update; see notes-stereo/m5",
+        "enable": True,
+        # Variance of a right pixel as a multiple of `visual_meas_std`^2. A
+        # ratio rather than an absolute so that re-tuning the left camera's
+        # noise keeps the two cameras' relative weighting intact.
+        "R_scale": 1.0,
+        # Threshold of the (separate, 2-dof) right-camera Mahalanobis gate as a
+        # multiple of MH_thresh. Rejecting here costs a feature its right
+        # measurement only, not its place in the state.
+        "mh_scale": 1.0,
+    }
+
     # Left->right matching gates. Defaults live here rather than only in
     # tracker.cpp so a sweep can override them without a rebuild; see
     # notes-stereo/m3-stereo-tracking.md for how each was chosen.

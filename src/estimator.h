@@ -240,6 +240,11 @@ public:
   int num_stereo_init_rej_gap() const { return num_stereo_init_rej_gap_; };
   int num_stereo_init_rej_range() const { return num_stereo_init_rej_range_; };
   int num_stereo_init_rej_std() const { return num_stereo_init_rej_std_; };
+  /** Cumulative outcomes of the right-camera EKF rows; see
+   * `GateStereoMeasurements`. */
+  int num_stereo_upd_used() const { return num_stereo_upd_used_; };
+  int num_stereo_upd_rej_geom() const { return num_stereo_upd_rej_geom_; };
+  int num_stereo_upd_rej_mh() const { return num_stereo_upd_rej_mh_; };
   MatX3 InstateFeaturePositions(int n_output) const;
   MatX3 InstateFeaturePositions() const;
   MatX6 InstateFeatureCovs(int n_output) const;
@@ -363,6 +368,15 @@ private:
                                          std::list<FeaturePtr> &tracks);
   void OutlierRejection();
   void FindNewGaugeFeatures();
+
+  /** Decide which right-camera observations enter this frame's EKF update.
+   *
+   * Runs over `in_current_ekf_update_` immediately before the update -- i.e. on
+   * exactly the features whose rows will be assembled -- so it cannot be
+   * bypassed by the configurations that skip `MHGating` or `OnePointRANSAC`.
+   * Invalidates the right rows of any feature that fails, leaving the feature
+   * itself (and its left measurement) untouched. */
+  void GateStereoMeasurements();
 
   /** Computes measurement jacobians for all features in the EKF state. */
   void ComputeInstateJacobians();
@@ -554,6 +568,34 @@ private:
   int num_stereo_init_rej_gap_{0};
   int num_stereo_init_rej_range_{0};
   int num_stereo_init_rej_std_{0};
+
+  ////////////////////////////////////////
+  // Stereo EKF measurement update (M5)
+  ////////////////////////////////////////
+  /** Whether an in-state feature's right-camera observation contributes two
+   *  extra rows to the EKF measurement. Off unless `stereo_update.enable`. */
+  bool stereo_update_{false};
+  /** Measurement variance of a right-camera pixel, as a multiple of `R_`.
+   *
+   *  Kept as a *ratio* rather than an absolute variance so that re-tuning `R_`
+   *  keeps the two cameras' relative weighting intact. The default of 1 says
+   *  the right observation is exactly as trustworthy as the left, which is the
+   *  honest starting point for a hardware-synchronized pair of identical
+   *  sensors tracked by the same KLT; a value > 1 discounts it for the extra
+   *  error the left->right match adds on top of the temporal track. */
+  number_t stereo_update_R_scale_{1.0};
+  /** Threshold of the right-camera Mahalanobis gate, as a multiple of
+   *  `MH_thresh_`. The gate is deliberately *separate* and 2-dof rather than
+   *  folded into a 4-dof joint distance: the existing threshold is calibrated
+   *  for 2 dof, and a bad right match should cost the feature its right
+   *  measurement, not its place in the state. */
+  number_t stereo_update_mh_scale_{1.0};
+  /** Diagnostics, cumulative over the run: right measurements actually used,
+   *  and those dropped by the geometric check inside
+   *  `Feature::ComputeRightJacobian` or by the right MH gate. */
+  int num_stereo_upd_used_{0};
+  int num_stereo_upd_rej_geom_{0};
+  int num_stereo_upd_rej_mh_{0};
 
   /** The minimum depth that a feature can be given when it is first
    *  created. (i.e. minimum value of `init_z_`) */

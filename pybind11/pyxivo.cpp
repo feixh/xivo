@@ -368,6 +368,11 @@ public:
     return estimator_->num_stereo_init_rej_range();
   }
   int num_stereo_init_rej_std() { return estimator_->num_stereo_init_rej_std(); }
+  int num_stereo_upd_used() { return estimator_->num_stereo_upd_used(); }
+  int num_stereo_upd_rej_geom() {
+    return estimator_->num_stereo_upd_rej_geom();
+  }
+  int num_stereo_upd_rej_mh() { return estimator_->num_stereo_upd_rej_mh(); }
 
   bool StereoEnabled() { return StereoRig::enabled(); }
 
@@ -467,6 +472,9 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("num_stereo_init_rej_gap", &EstimatorWrapper::num_stereo_init_rej_gap)
       .def("num_stereo_init_rej_range", &EstimatorWrapper::num_stereo_init_rej_range)
       .def("num_stereo_init_rej_std", &EstimatorWrapper::num_stereo_init_rej_std)
+      .def("num_stereo_upd_used", &EstimatorWrapper::num_stereo_upd_used)
+      .def("num_stereo_upd_rej_geom", &EstimatorWrapper::num_stereo_upd_rej_geom)
+      .def("num_stereo_upd_rej_mh", &EstimatorWrapper::num_stereo_upd_rej_mh)
       .def("StereoEnabled", &EstimatorWrapper::StereoEnabled)
       .def("UsingLoopClosure", &EstimatorWrapper::UsingLoopClosure)
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)

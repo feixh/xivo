@@ -378,6 +378,24 @@ Estimator::Estimator(const Json::Value &cfg)
     LOG(FATAL) << "stereo_init.enable is set but no stereo rig is configured";
   }
 
+  // /////////////////////////////
+  // Stereo EKF measurement update
+  // /////////////////////////////
+  auto stereo_update_cfg = cfg_["stereo_update"];
+  stereo_update_ = stereo_update_cfg.get("enable", false).asBool();
+  stereo_update_R_scale_ = stereo_update_cfg.get("R_scale", 1.0).asDouble();
+  stereo_update_mh_scale_ = stereo_update_cfg.get("mh_scale", 1.0).asDouble();
+  if (stereo_update_ && !StereoRig::enabled()) {
+    LOG(FATAL) << "stereo_update.enable is set but no stereo rig is configured";
+  }
+  if (stereo_update_ && Camera::instance(1) == nullptr) {
+    LOG(FATAL) << "stereo_update.enable is set but camera 1 is not configured";
+  }
+  if (!(stereo_update_R_scale_ > 0.0)) {
+    LOG(FATAL) << "stereo_update.R_scale must be positive; got "
+               << stereo_update_R_scale_;
+  }
+
   MeasurementUpdateInitialized_ = false;
 
   // /////////////////////////////

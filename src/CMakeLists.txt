@@ -183,6 +183,14 @@ add_executable(unitTests_stereo
 target_link_libraries(unitTests_stereo xest ${deps} gtest gtest_main)
 add_test(NAME Stereo COMMAND unitTests_stereo)
 
+# Separate binary from unitTests_Jacobians on purpose: CameraManager's registry
+# is process-wide, and this one needs the real fisheye pair in slots 0/1 while
+# that one installs a perfect pinhole in slot 0.
+add_executable(unitTests_jacobians_stereo
+               test/unittest_jacobians_stereo.cpp)
+target_link_libraries(unitTests_jacobians_stereo xest ${deps} gtest gtest_main)
+add_test(NAME StereoJacobians COMMAND unitTests_jacobians_stereo)
+
 add_executable(unitTests_determinism
                test/unittest_determinism.cpp)
 target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)

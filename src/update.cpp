@@ -137,6 +137,54 @@ std::vector<FeaturePtr> Estimator::MHGating() {
 
 
 
+void Estimator::GateStereoMeasurements() {
+  if (!stereo_update_) {
+    // The right rows are computed unconditionally by `ComputeRightJacobian`
+    // whenever a right match exists, so they must be explicitly disowned here or
+    // a `stereo_update.enable = false` run would silently still use them.
+    for (auto f : in_current_ekf_update_) {
+      f->InvalidateRightJacobian();
+    }
+    return;
+  }
+
+  const number_t Rr = R_ * stereo_update_R_scale_;
+  const number_t thresh = MH_thresh_ * stereo_update_mh_scale_;
+
+  for (auto f : in_current_ekf_update_) {
+    if (!f->has_right()) {
+      continue;
+    }
+    if (!f->right_jac_valid()) {
+      // Had a match, but the geometry was unusable (point behind camera 1).
+      ++num_stereo_upd_rej_geom_;
+      continue;
+    }
+
+    // A 2-dof Mahalanobis gate on the right measurement alone, using the same
+    // threshold family as `MHGating`. Separate from the left gate on purpose:
+    // the left track and the left->right match fail independently, and a wrong
+    // right match should cost only its two rows.
+    const auto &Jr = f->Jr();
+    const Vec2 &res = f->inn_r();
+    Mat2 S = Jr * P_ * Jr.transpose();
+    S(0, 0) += Rr;
+    S(1, 1) += Rr;
+    number_t mh_dist = res.dot(S.llt().solve(res));
+    // A non-finite distance never compares less than the threshold, so this
+    // also catches a singular S.
+    if (!(mh_dist < thresh)) {
+      f->InvalidateRightJacobian();
+      ++num_stereo_upd_rej_mh_;
+      LOG(INFO) << "feature #" << f->id()
+                << ": right observation rejected by MH-gating";
+      continue;
+    }
+    ++num_stereo_upd_used_;
+  }
+}
+
+
 void Estimator::FilterUpdate() {
 
 #ifdef USE_GPERFTOOLS
@@ -145,17 +193,42 @@ void Estimator::FilterUpdate() {
 
   timer_.Tick("update");
 
- 
+  timer_.Tick("stereo-gating");
+  GateStereoMeasurements();
+  timer_.Tock("stereo-gating");
+
+  // Each in-state feature contributes two rows for the left camera and, when it
+  // was matched into the right image and survived gating, two more for the
+  // right. The measurement height is therefore data-dependent -- hence the
+  // running `row` cursor below rather than the old fixed `2 * i` stride.
+  const number_t Rr = R_ * stereo_update_R_scale_;
   int total_size = 2 * in_current_ekf_update_.size();
+  for (auto f : in_current_ekf_update_) {
+    if (f->right_jac_valid()) {
+      total_size += 2;
+    }
+  }
   H_.setZero(total_size, err_.size());
   inn_.setZero(total_size);
   diagR_.resize(total_size);
 
+  int row = 0;
   for (int i = 0; i < in_current_ekf_update_.size(); ++i) {
-    in_current_ekf_update_[i]->FillJacobianBlock(H_, 2 * i);
-    inn_.segment<2>(2 * i) = in_current_ekf_update_[i]->inn();
-    diagR_.segment<2>(2 * i) << R_, R_;
+    auto f = in_current_ekf_update_[i];
+    f->FillJacobianBlock(H_, row);
+    inn_.segment<2>(row) = f->inn();
+    diagR_.segment<2>(row) << R_, R_;
+    row += 2;
+    if (f->right_jac_valid()) {
+      f->FillRightJacobianBlock(H_, row);
+      inn_.segment<2>(row) = f->inn_r();
+      diagR_.segment<2>(row) << Rr, Rr;
+      row += 2;
+    }
   }
+#ifndef NDEBUG
+  CHECK(row == total_size);
+#endif
 
   timer_.Tick("actual-update");
   UpdateJosephForm();

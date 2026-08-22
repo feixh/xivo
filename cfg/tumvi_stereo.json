@@ -390,6 +390,12 @@
     "min_std_z": 0.01,
     "max_std_z": 1.0
   },
+  "stereo_update": {
+    "comment": "right-camera rows in the EKF update; see notes-stereo/m5",
+    "enable": true,
+    "R_scale": 1.0,
+    "mh_scale": 1.0
+  },
   "stereo_cfg": {
     "comment": "T_cn_cnm1 from camchain.yaml: maps a point cam0 -> cam1",
     "T_c1c0": [

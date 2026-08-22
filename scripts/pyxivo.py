@@ -258,6 +258,14 @@ def print_stereo_stats(estimator):
         estimator.num_stereo_init_rej_gap(),
         estimator.num_stereo_init_rej_range(),
         estimator.num_stereo_init_rej_std()))
+    used = estimator.num_stereo_upd_used()
+    rej_geom = estimator.num_stereo_upd_rej_geom()
+    rej_mh = estimator.num_stereo_upd_rej_mh()
+    offered = used + rej_geom + rej_mh
+    print('stereo_update: {} right measurements used, rejected geom={} mh={} '
+          '({:.1f}% of {} offered)'.format(
+              used, rej_geom, rej_mh,
+              100.0 * used / offered if offered else 0.0, offered))
 
 
 if __name__ == '__main__':
