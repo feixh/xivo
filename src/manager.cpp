@@ -134,6 +134,29 @@ void Estimator::UpdateStep(const timestamp_t &ts,
   GroupPtr g = Group::Create(X_.Rsb, X_.Tsb);
   graph.AddGroup(g);
 
+  // Augment the state with this pose. Without this, a group only ever enters the
+  // state as the reference group of a feature being promoted, so the in-state
+  // groups are a sparse, feature-driven scatter of poses rather than a window of
+  // recent ones -- and an out-of-state constraint, which lives entirely in the
+  // group-pose block of the state, has almost nothing to act on (62% of dropped
+  // tracks had zero in-state observations before this).
+  // `augment_every` > 1 keeps only every k-th pose, so the same number of slots
+  // covers k times as much time (more parallax per track) at the cost of holding
+  // fewer of any given track's observations.
+  if (use_OOS_ && oos_pose_window_ > 0 &&
+      vision_counter_ % oos_augment_every_ == 0) {
+    MaintainOOSPoseWindow(1);
+    if (std::count(gsel_.begin(), gsel_.end(), false) > 0) {
+      AddGroupToState(g);
+    } else {
+      // Every slot is spoken for by a group an in-state feature depends on.
+      // Skipping the augmentation only costs this pose's OOS constraints.
+      LOG(WARNING) << "no group slot free for the pose window at group #"
+                   << g->id();
+      ++num_oos_window_starved_;
+    }
+  }
+
   // reassemble the tracker's feature list with newly created features and
   // currently tracked features
   tracks.clear();
@@ -303,11 +326,72 @@ void Estimator::AdaptInitialDepth() {
 
 
 
+void Estimator::MaintainOOSPoseWindow(int slots_needed) {
+  Graph &graph{*Graph::instance()};
+
+  // A group that an in-state feature refers to is load bearing: the feature's
+  // position is parameterized w.r.t. that group, so evicting it would require
+  // re-anchoring the feature. Only groups nothing in the state depends on can go.
+  // The gauge group is excluded too -- dropping it forces the gauge to be
+  // re-established, and doing that every frame is not worth a window slot.
+  std::vector<GroupPtr> evictable = graph.GetGroupsIf([this, &graph](GroupPtr g) {
+    if (!g->instate() || g == gauge_group_ptr_) {
+      return false;
+    }
+    auto owned = graph.GetFeaturesOwnedBy(g);
+    return std::none_of(owned.begin(), owned.end(),
+                        [](FeaturePtr f) { return f->instate(); });
+  });
+  // Oldest first. Group ids increase with time.
+  std::sort(evictable.begin(), evictable.end(),
+            [](GroupPtr a, GroupPtr b) { return a->id() < b->id(); });
+
+  const int free_slots = std::count(gsel_.begin(), gsel_.end(), false);
+  // Evict enough to (a) make room for the caller and (b) keep the window itself
+  // within budget.
+  int to_evict = std::max(slots_needed - free_slots,
+                          static_cast<int>(evictable.size()) - oos_pose_window_);
+  if (to_evict <= 0) {
+    return;
+  }
+
+  // Plain FIFO: drop the oldest poses nothing depends on. (An earlier version
+  // tried to *thin* the window instead -- keep every k-th group so that the same
+  // number of slots spans more time and long tracks get more parallax. In steady
+  // state only one slot per frame needs freeing, so "thinning" reduced to always
+  // evicting the second-oldest and pinning the oldest pose forever; that stale
+  // anchor cost 0.010 m of mean ATE. The time span of the window is controlled by
+  // `augment_every` instead, which is the knob that actually does this.)
+  std::vector<GroupPtr> discards(
+      evictable.begin(),
+      evictable.begin() + std::min<int>(to_evict, evictable.size()));
+
+  for (auto g : discards) {
+    // Same order as `DiscardAffectedGroups`: re-home whatever the group owns
+    // before it disappears, and drop what cannot be re-homed.
+    std::vector<FeaturePtr> nullrefs = FindNewOwnersForFeaturesOf(g);
+    DiscardFeatures(nullrefs);
+    for (auto f : nullrefs) {
+      f->SetStatus(FeatureStatus::NULLREFED);
+    }
+    DiscardGroup(g);
+  }
+  num_oos_window_evictions_ += discards.size();
+}
+
+
 void Estimator::EnforceMaxGroupLifetime() {
   Graph& graph{*Graph::instance()};
   auto all_groups = graph.GetGroups();
   int max_group_lifetime = cfg_.get("max_group_lifetime", 1).asInt();
   for (auto g : all_groups) {
+    // Without a pose window a group owning no reference features cannot be
+    // in-state, and the original code asserted as much. With one it can, and
+    // removing it from the graph here would leak its state slot -- leave those
+    // to `MaintainOOSPoseWindow`.
+    if (g->instate()) {
+      continue;
+    }
     if (g->lifetime() > max_group_lifetime) {
       const auto &adj = graph.GetGroupAdj(g);
       if (std::none_of(adj.begin(), adj.end(), [&graph, g](int fid) {

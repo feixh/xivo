@@ -28,7 +28,7 @@
   // 3D point is then marginalized out of the stacked reprojection residuals,
   // leaving a constraint on the in-state group poses.
   "OOS": {
-    "min_observations": 5,      // observations from in-state groups needed
+    "min_observations": 3,      // observations from in-state groups needed
     "max_observations": 15,     // longer tracks are thinned to this many views
     "refine": true,             // multi-view Gauss-Newton before the update
     "max_iters": 10,
@@ -37,7 +37,9 @@
     "max_mean_reproj_err": 1.5, // px, per view, after refinement
     "zmin": 0.05,
     "zmax": 50.0,
-    "MH_thresh": 5.991          // Mahalanobis gate, per degree of freedom
+    "MH_thresh": 5.991,         // Mahalanobis gate, per degree of freedom
+    "pose_window": 20,          // poses kept in the state for OOS (0 = off)
+    "augment_every": 1          // add every k-th pose to the window
   },
   "feature_owner_change_cov_factor": 1.5,
   "group_degrees_fixed": 4,
@@ -145,7 +147,7 @@
  
   "visual_meas_std":  1.5, // std of visual measurement for x and y (pixel)
   "outlier_thresh": 1.1,
-  "oos_meas_std": 3.5,
+  "oos_meas_std": 2.0,
   "max_depth": 5.0,
   "min_depth": 0.05,
 

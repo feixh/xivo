@@ -48,6 +48,23 @@ add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_ZERO)
 # verbatim instead of formatting Eigen types; behaviour is otherwise unchanged.
 add_definitions(-DSOPHUS_USE_BASIC_LOGGING)
 
+# EKF state-size overrides for the defaults in src/core.h. These MUST live here
+# rather than in src/CMakeLists.txt: `add_definitions` only reaches the current
+# directory and its subdirectories, and the pyxivo module is built from this
+# top-level list, so a define set under src/ would give the Python bindings a
+# different kMaxGroup/kFullSize than the library they link against -- an ODR
+# violation that silently changes the trajectories the evaluation scripts see.
+#
+# The out-of-state update needs a sliding window of past poses in the state, on
+# top of the reference groups of the in-state features, so the default 15 group
+# slots is not enough (see notes-n-prompts/notes-oos/m3-pose-window.md). This is
+# not result-neutral even with the pose window off: the number of free group
+# slots decides which branch of SelectAndAddNewFeatures runs and how many groups
+# AddGroupOfFeatures admits. Both the baseline and the OOS numbers in the report
+# use this same value.
+add_definitions(-DEKF_MAX_GROUPS=60)
+add_definitions(-DEKF_MAX_FEATURES=200)
+
 find_package(OpenCV REQUIRED)
 find_package(Python3 REQUIRED Interpreter Development)
 

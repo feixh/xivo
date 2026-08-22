@@ -111,6 +111,10 @@ Estimator::~Estimator() {
                       ? number_t(total_oos_views_instate_) / total_oos_candidates_
                       : 0)
               << std::endl;
+    std::cout << "pose window: length=" << oos_pose_window_
+              << "  augment_every=" << oos_augment_every_
+              << "  evictions=" << num_oos_window_evictions_
+              << "  starved_frames=" << num_oos_window_starved_ << std::endl;
     std::cout << "instate-view histogram:";
     for (size_t k = 0; k < oos_instate_view_hist_.size(); ++k) {
       std::cout << " " << k << ":" << oos_instate_view_hist_[k];
@@ -162,11 +166,19 @@ Estimator::Estimator(const Json::Value &cfg)
     oos_options_.zmax = oos.get("zmax", 50.0).asDouble();
     // Per-degree-of-freedom Mahalanobis gate; <= 0 disables it.
     oos_options_.MH_thresh = oos.get("MH_thresh", 5.991).asDouble();
+
+    // Sliding window of past poses kept in the state so that the observations of
+    // a dropped track have something to constrain. 0 disables it, which leaves
+    // group management exactly as it is without OOS.
+    oos_pose_window_ = oos.get("pose_window", 0).asInt();
+    oos_augment_every_ = std::max(1, oos.get("augment_every", 1).asInt());
     LOG(INFO) << "use_OOS=" << use_OOS_
               << "; OOS min_observations=" << oos_options_.min_observations
               << "; max_observations=" << oos_options_.max_observations
               << "; max_mean_reproj_err=" << oos_options_.max_mean_reproj_err
-              << "; MH_thresh=" << oos_options_.MH_thresh;
+              << "; MH_thresh=" << oos_options_.MH_thresh
+              << "; pose_window=" << oos_pose_window_
+              << "; augment_every=" << oos_augment_every_;
   }
 
   // IMU clamping

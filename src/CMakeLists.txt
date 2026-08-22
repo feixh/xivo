@@ -23,9 +23,9 @@ project(estimator)
 # add_definitions(-DAPPROXIMATE_INIT_COVARIANCE)
 
 # Sets the maximum number of features and groups in the EKF. Otherwise
-# use the default values in core.h
-#add_definitions(-DEKF_MAX_FEATURES=125)
-#add_definitions(-DEKF_MAX_GROUPS=75)
+# use the default values in core.h.
+# NOTE: set these in the top-level CMakeLists.txt, not here -- pyxivo is built
+# there and would otherwise disagree with this library about the state layout.
 
 # Sets the frequency at which to project rotation matrices to SO(3) to get
 # rid of accumulated numeric error

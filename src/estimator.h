@@ -324,6 +324,11 @@ private:
    *  Fills `oos_used_` and returns the total number of measurement rows.
    *  Must run after all group management of this step, so that the state indices
    *  the Jacobians refer to are final. */
+  /** Free up group state slots so that the pose window stays within its budget
+   *  and at least `slots_needed` slots are available. Only groups that no
+   *  in-state feature refers to can go. */
+  void MaintainOOSPoseWindow(int slots_needed);
+
   int ComputeOOSMeasurements();
 
   /** Mahalanobis gate on the marginalized out-of-state measurement of `f`. */
@@ -609,6 +614,13 @@ private:
   int num_mh_rejected_;
   int num_oneptransac_rejected_;
 
+  /** Length of the sliding pose window kept in the state for the out-of-state
+   *  update (0 = no window, i.e. groups enter the state only as reference groups
+   *  of features being promoted), and how often a pose is added to it (1 = every
+   *  frame; k > 1 makes the same number of slots span k times as much time). */
+  int oos_pose_window_{0};
+  int oos_augment_every_{1};
+
   /** Out-of-state (MSCKF) update bookkeeping, per update step. */
   std::vector<FeaturePtr> oos_used_; ///< features actually used in the update
   int num_oos_candidates_{0};        ///< dropped out-of-state tracks
@@ -627,6 +639,9 @@ private:
    *  candidates with k in-state views, the last bin being a catch-all. */
   long total_oos_views_all_{0}, total_oos_views_instate_{0};
   std::array<long, 18> oos_instate_view_hist_{};
+  /** Pose-window bookkeeping: groups evicted to keep it within budget, and
+   *  frames whose pose could not be added because every slot was load bearing. */
+  long num_oos_window_evictions_{0}, num_oos_window_starved_{0};
 };
 
 } // xivo
