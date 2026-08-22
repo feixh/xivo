@@ -417,7 +417,16 @@ void Estimator::EnforceMaxGroupLifetime() {
 
 void Estimator::DiscardAffectedGroups() {
   Graph& graph{*Graph::instance()};
-  for (auto g : affected_groups_) {
+  // `affected_groups_` is keyed by pointer, so iterating it directly visits the
+  // groups in an order that depends on the heap addresses of the memory-manager
+  // slots -- i.e. on ASLR. Discarding groups re-homes features and changes which
+  // ones become NULLREFED, so that order feeds straight back into the estimate:
+  // the same config and binary could differ by ~0.02 m of ATE between runs.
+  // Visit them by id instead.
+  std::vector<GroupPtr> affected(affected_groups_.begin(), affected_groups_.end());
+  std::sort(affected.begin(), affected.end(),
+            [](GroupPtr a, GroupPtr b) { return a->id() < b->id(); });
+  for (auto g : affected) {
     std::vector<FeaturePtr> instate_features_of_g = graph.GetFeaturesIf(
       [g](FeaturePtr f) { return (f->ref() == g) && (f->instate()); }
     );

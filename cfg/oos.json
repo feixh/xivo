@@ -225,6 +225,8 @@
   // with fewer fixed degrees of freedom.
   "num_gauge_xy_features": 3,
   "collinear_cross_prod_thresh": 0.001,
+  // Spend the XY gauge on the best-known features instead of an arbitrary three.
+  "sort_gauge_features_by_cov": false,
 
   "tracker_cfg": {
     "use_prediction": false,
