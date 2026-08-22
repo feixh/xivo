@@ -73,7 +73,9 @@ the loader reads image pairs:
 On TUM-VI room1–room6 this reduces mean ATE from 0.121 m (monocular, upstream
 capacity) to 0.048 m. Roughly half of that gain is stereo itself and half is the
 capacity increase described below; a monocular run at the *same* capacity scores
-0.081 m, so stereo is worth 41% against a like-for-like control.
+0.079 m, so stereo is worth 40% against a like-for-like control. Per-sequence
+numbers, both ATE association protocols, and how to reproduce the controls are in
+[`RESULTS_STEREO.md`](RESULTS_STEREO.md).
 
 ### EKF capacity is a build option
 
