@@ -693,6 +693,24 @@ private:
   int gravity_init_counter_;
   std::vector<Vec3> gravity_init_buf_; // buffer of accel measurements for
                                        // gravity initialization
+  /** Gyro and timestamps alongside `gravity_init_buf_`, used only when
+   *  `gravity_init_derotate_` is on. */
+  std::vector<Vec3> gravity_init_gyro_buf_;
+  std::vector<timestamp_t> gravity_init_time_buf_;
+  /** Rotate each buffered accel sample into the body frame of the *last* sample
+   *  before averaging, integrating the gyro to get the relative attitude.
+   *
+   * `InitializeGravity` calls its buffer "stationary accel samples", but on
+   * TUM-VI's room sequences the rig is already turning at 0.11-0.32 rad/s when
+   * the first sample lands. Averaging body-frame accelerations across a turn
+   * smears the gravity direction by roughly |w| * window, which puts a hard
+   * ceiling on how long the window can usefully be -- and a short window cannot
+   * average away the carrier's own linear acceleration. De-rotating removes the
+   * smearing, so the window can grow until the linear acceleration averages out.
+   * Measured initial tilt error, mean over room1-room6: 1.47 deg as shipped
+   * (20 samples, no de-rotation) against 0.73 deg de-rotated over 200.
+   * See notes-stereo/m6-attitude-initialization.md. */
+  bool gravity_init_derotate_{false};
   // measurements buffer
   struct InternalBuffer
       : public std::vector<std::unique_ptr<internal::Message>> {

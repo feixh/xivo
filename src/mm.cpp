@@ -12,6 +12,8 @@ CircBufWithHash<T>::CircBufWithHash(int max_items, bool is_feature) {
   max_items_ = max_items;
   num_slots_initialized_ = 0;
   num_slots_active_ = 0;
+  peak_active_ = 0;
+  warned_nearly_full_ = false;
   slot_search_ind_ = 0;
   is_feature_buf_ = is_feature;
 
@@ -28,6 +30,29 @@ template<typename T>
 CircBufWithHash<T>::~CircBufWithHash() {
   for (auto p: slots_map_) {
     delete p.first;
+  }
+}
+
+// Exhausting a pool is a LOG(FATAL) that lands whenever the sequence happens to
+// need one more slot -- ten minutes into a run, with a stack trace inside the
+// tracker, and no hint that the culprit is a config number. Warning at 90% turns
+// that into something diagnosable before it happens; see `CheckMemoryPools` for
+// the up-front version of the same check.
+template<typename T>
+void CircBufWithHash<T>::NoteActivation() {
+  ++num_slots_active_;
+  if (num_slots_active_ > peak_active_) {
+    peak_active_ = num_slots_active_;
+    if (!warned_nearly_full_ && peak_active_ * 10 >= max_items_ * 9) {
+      warned_nearly_full_ = true;
+      // ERROR, not WARNING: glog's default stderrthreshold is ERROR, so a
+      // WARNING here would only reach the log files.
+      LOG(ERROR) << "MemoryManager: " << (is_feature_buf_ ? "feature" : "group")
+                 << " pool " << peak_active_ << "/" << max_items_
+                 << " active; raise memory.max_"
+                 << (is_feature_buf_ ? "features" : "groups")
+                 << " -- running out is fatal";
+    }
   }
 }
 
@@ -50,7 +75,7 @@ T* CircBufWithHash<T>::GetItem() {
 
         slot_found = true;
         num_slots_initialized_++;
-        num_slots_active_++;
+        NoteActivation();
 
         slot_search_ind_ = (slot_search_ind_ + 1) % max_items_;
 
@@ -80,7 +105,7 @@ T* CircBufWithHash<T>::GetItem() {
         slots_active_[slot_search_ind_] = true;
 
         slot_found = true;
-        num_slots_active_++;
+        NoteActivation();
 
         slot_search_ind_ = (slot_search_ind_ + 1) % max_items_;
         return ret;

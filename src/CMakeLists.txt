@@ -191,6 +191,21 @@ add_executable(unitTests_jacobians_stereo
 target_link_libraries(unitTests_jacobians_stereo xest ${deps} gtest gtest_main)
 add_test(NAME StereoJacobians COMMAND unitTests_jacobians_stereo)
 
+# Builds a whole system through CreateSystem (one Estimator per process, since
+# that factory is a singleton), so it also cannot share a process with the
+# pinhole-installing Jacobian tests.
+add_executable(unitTests_gravity_init
+               test/unittest_gravity_init.cpp)
+target_link_libraries(unitTests_gravity_init ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME GravityInit COMMAND unitTests_gravity_init)
+
+# Death tests, so each case forks a fresh CreateSystem singleton. Same linking
+# story as unitTests_gravity_init.
+add_executable(unitTests_memory_pools
+               test/unittest_memory_pools.cpp)
+target_link_libraries(unitTests_memory_pools ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME MemoryPools COMMAND unitTests_memory_pools)
+
 add_executable(unitTests_determinism
                test/unittest_determinism.cpp)
 target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)

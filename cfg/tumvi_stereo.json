@@ -30,9 +30,23 @@
   "RK4": {
     "stepsize": 0.002
   },
+  // The EKF capacity this config was tuned for. Capacity is compile-time
+  // (EKF_MAX_FEATURES/EKF_MAX_GROUPS in the top-level CMakeLists.txt, defaulted
+  // to these values), so a config and a binary can disagree with no symptom
+  // other than worse numbers. CheckMemoryPools in src/factory.cpp refuses to
+  // start when the binary is smaller than this.
+  "require_ekf_max_features": 90,
+  "require_ekf_max_groups": 45,
+
+  // Object pools, not EKF capacity -- raising these alone changes nothing (the
+  // EKF cap is EKF_MAX_FEATURES/EKF_MAX_GROUPS at build time, 90/45 here). They
+  // are a fixed pre-allocation whose exhaustion is a LOG(FATAL) partway through
+  // a run, so CheckMemoryPools in src/factory.cpp refuses anything below the
+  // tracker cap and advises 2x it. Measured peak over room1-room6 is about 1.7x
+  // the tracker cap; 800 is 4.4x, which is real headroom for pennies of memory.
   "memory": {
-    "max_features": 200,
-    "max_groups": 100
+    "max_features": 800,
+    "max_groups": 300
   },
   "gravity": [
     0,
@@ -154,7 +168,11 @@
   "max_subfilter_outlier": 0.01,
   "strict_criteria_timesteps": 5,
   "comparison_score_type": "DepthUncertainty",
-  "visual_meas_std": 1.5,
+  // 0.75 px, halved from the monocular 1.5. Two right-image observations per
+  // feature make the update better conditioned, so trusting the pixels more pays
+  // off here where it did not before: six-room mean ATE 0.101 -> 0.084 m at
+  // otherwise-fixed settings.
+  "visual_meas_std": 0.75,
   "outlier_thresh": 1.1,
   "oos_meas_std": 3.5,
   "max_depth": 5.0,
@@ -260,8 +278,13 @@
     "use_prediction": false,
     "mask_size": 15,
     "margin": 8,
-    "num_features_min": 45,
-    "num_features_max": 60,
+    // 3x the upstream 45/60. This is the *other* half of the capacity change:
+    // the EKF cannot hold more features than the tracker supplies, which is why
+    // an EKF_MAX_FEATURES of 60 and of 90 were bit-identical while this stayed at
+    // 60. Raising both together is what takes mean ATE from 0.076 to 0.048 m;
+    // going further (240 tracked / 120 in state) gains 0.001, inside the noise.
+    "num_features_min": 135,
+    "num_features_max": 180,
     "max_pixel_displacement": 64,
     "normalize": false,
     "match_dropped_tracks": false,

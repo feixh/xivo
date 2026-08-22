@@ -430,6 +430,12 @@ Estimator::Estimator(const Json::Value &cfg)
     gravity_init_counter_ = cfg_.get("gravity_init_counter", 20).asInt();
     gravity_initialized_ = false;
   }
+  // Default off: it changes the initial attitude on every dataset, so leaving it
+  // opt-in keeps the monocular baseline configs bit-for-bit as they were.
+  gravity_init_derotate_ = cfg_.get("gravity_init_derotate", false).asBool();
+  gravity_init_buf_.clear();
+  gravity_init_gyro_buf_.clear();
+  gravity_init_time_buf_.clear();
   vision_initialized_ = false;
   // reset measurement counter
   imu_counter_ = 0;
@@ -483,9 +489,38 @@ bool Estimator::InitializeGravity() {
     VLOG(0) << "initializing gravity";
 
     // got enough stationary samples, estimate gravity
-    Vec3 mean_accel = std::accumulate(gravity_init_buf_.begin(),
-                                      gravity_init_buf_.end(), Vec3{0, 0, 0});
-    mean_accel /= gravity_init_buf_.size();
+    Vec3 mean_accel = Vec3::Zero();
+    if (gravity_init_derotate_ && gravity_init_gyro_buf_.size() ==
+                                      gravity_init_buf_.size()) {
+      // The state starts propagating with Rsb = I in the body frame of the last
+      // buffered sample, so that is the frame gravity has to be expressed in.
+      // Integrate the gyro forward to get R_0k for every sample, then map each
+      // one to the final frame with R_Nk = R_0N^T R_0k.
+      const size_t n = gravity_init_buf_.size();
+      std::vector<Mat3> R_0k(n, Mat3::Identity());
+      for (size_t k = 1; k < n; ++k) {
+        const number_t dt = std::max<number_t>(
+            0.0, std::chrono::duration<number_t>(gravity_init_time_buf_[k] -
+                                                 gravity_init_time_buf_[k - 1])
+                     .count());
+        // Midpoint rule, and the gyro bias is still whatever the config seeded
+        // (zero, on every shipped config) -- there is no stationary stretch to
+        // estimate it from on these sequences.
+        const Vec3 dW =
+            0.5 * (gravity_init_gyro_buf_[k] + gravity_init_gyro_buf_[k - 1]) *
+            dt;
+        R_0k[k] = R_0k[k - 1] * SO3::exp(dW).matrix();
+      }
+      const Mat3 R_N0 = R_0k[n - 1].transpose();
+      for (size_t k = 0; k < n; ++k) {
+        mean_accel += R_N0 * R_0k[k] * gravity_init_buf_[k];
+      }
+      mean_accel /= n;
+    } else {
+      mean_accel = std::accumulate(gravity_init_buf_.begin(),
+                                   gravity_init_buf_.end(), Vec3{0, 0, 0});
+      mean_accel /= gravity_init_buf_.size();
+    }
 
     Vec3 accel_calib = imu_.Ca() * mean_accel - X_.ba;
 
@@ -500,7 +535,8 @@ bool Estimator::InitializeGravity() {
     X_.Rsg = SO3::exp(Wsg);
 
     LOG(INFO) << "===== Wsg initialization =====";
-    LOG(INFO) << "stationary accel samples=" << gravity_init_buf_.size();
+    LOG(INFO) << "accel samples=" << gravity_init_buf_.size()
+              << " derotated=" << gravity_init_derotate_;
     LOG(INFO) << "accel " << accel_calib.transpose();
     LOG(INFO) << "Wsg=" << Wsg.transpose();
     LOG(INFO) << "g=" << g_.transpose();
@@ -547,6 +583,8 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
   // initialize imu -- basically gravity
   if (!gravity_initialized_) {
     gravity_init_buf_.emplace_back(accel_new);
+    gravity_init_gyro_buf_.emplace_back(gyro_new);
+    gravity_init_time_buf_.emplace_back(ts);
 
     if (InitializeGravity()) {
       curr_imu_time_ = last_time_ = ts;
@@ -556,6 +594,8 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
 
       gravity_initialized_ = true;
       gravity_init_buf_.clear();
+      gravity_init_gyro_buf_.clear();
+      gravity_init_time_buf_.clear();
       LOG(INFO) << "IMU initialized";
     }
   } else {

@@ -54,6 +54,54 @@ All dependencies, except for OpenCV, are included in the `thirdparty` directory.
 Please see our [wiki](https://github.com/ucla-vision/xivo/wiki) for usage instructions and more detailed information about the algorithm.
 
 
+## Stereo
+
+This branch adds stereo-camera support: a second camera in the registry, a fixed
+rig geometry, left→right feature matching, depth seeding by triangulation at first
+observation, and right-image measurements in the EKF update. A config turns it on
+by setting `"stereo": true` and supplying `camera1_cfg` and `stereo_cfg` blocks;
+without those keys every stereo code path is skipped and behaviour is unchanged.
+`cfg/tumvi_stereo.json` is a worked example for TUM-VI, generated from the
+dataset's own `dso/camchain.yaml` by `scripts/make_stereo_cfg.py`.
+
+Run it exactly like a monocular config — the config, not a flag, decides whether
+the loader reads image pairs:
+
+    python scripts/pyxivo.py -root /path/to/tumvi -dataset tumvi \
+      -seq room1 -cfg cfg/tumvi_stereo.json -mode eval -dump /tmp/out
+
+On TUM-VI room1–room6 this reduces mean ATE from 0.121 m (monocular, upstream
+capacity) to 0.048 m. Roughly half of that gain is stereo itself and half is the
+capacity increase described below; a monocular run at the *same* capacity scores
+0.081 m, so stereo is worth 41% against a like-for-like control.
+
+### EKF capacity is a build option
+
+The number of features and groups the filter can hold is a compile-time constant.
+It used to require editing `add_definitions` in `src/CMakeLists.txt`; it is now a
+cache variable:
+
+    cmake -S . -B build -DEKF_MAX_FEATURES=90 -DEKF_MAX_GROUPS=45
+
+Those are the defaults, chosen because `cfg/tumvi_stereo.json` needs them —
+`core.h` still falls back to 30/15 if the definitions are absent. Two things to
+know:
+
+- **Capacity has to be raised in two places.** `tracker_cfg.num_features_max`
+  caps what reaches the filter, so raising `EKF_MAX_FEATURES` alone does nothing:
+  builds at 60 and at 90 were bit-identical while the tracker stayed at 60.
+- **`memory.max_features` is neither of those.** It sizes a fixed pre-allocated
+  object pool, and exhausting it is fatal mid-run. Keep it at ≥2× the tracker cap;
+  `src/factory.cpp` checks this at startup, along with `require_ekf_max_features`
+  in the config, so a mismatched build fails immediately instead of silently
+  scoring worse.
+
+Build with `-DEKF_MAX_FEATURES=30 -DEKF_MAX_GROUPS=15` to reproduce numbers taken
+at upstream capacity. `-DXIVO_OUTPUT_SUFFIX=_foo` puts a variant build in
+`bin_foo/` and `lib_foo/` so it can sit beside the default one; `scripts/pyxivo.py`
+reads `XIVO_LIB` to pick which to import.
+
+
 ## License and Disclaimer
 
 This software is property of the UC Regents, and is provided free of charge for research purposes only. It comes with no warranties, expressed or implied, according to these [terms and conditions](LICENSE). For commercial use, please contact [UCLA TDG](https://tdg.ucla.edu).

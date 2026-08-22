@@ -4,7 +4,11 @@ import os, glob
 import re
 
 import sys
-sys.path.insert(0, 'lib')
+# The EKF state size is a compile-time constant, so comparing state sizes means
+# comparing two builds. XIVO_LIB points at the matching output directory (see
+# XIVO_OUTPUT_SUFFIX in CMakeLists.txt); it must be read before `import pyxivo`,
+# which is why it is an environment variable rather than an argparse flag.
+sys.path.insert(0, os.environ.get('XIVO_LIB', 'lib'))
 import pyxivo
 import savers
 
