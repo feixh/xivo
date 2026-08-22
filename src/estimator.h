@@ -284,6 +284,13 @@ public:
 
   int OOS_update_min_observations() { return OOS_update_min_observations_; }
 
+  // out-of-state (MSCKF) update statistics of the last update step
+  int num_oos_candidates() const { return num_oos_candidates_; }
+  int num_oos_used() const { return num_oos_used_; }
+  int num_oos_rows() const { return num_oos_rows_; }
+  int num_oos_gated() const { return num_oos_gated_; }
+  int num_oos_bad_triangulation() const { return num_oos_bad_tri_; }
+
   // returns vector to information about tracked features per instance
   std::vector<std::tuple<int, Vec2, MatXf>> tracked_features();
   std::vector<std::tuple<int, Vec2>> tracked_features_no_descriptor();
@@ -387,8 +394,30 @@ private:
 
   /** Function that contains logic for outlier rejection, filter EKF update, and
    *  filter MSCKF update. It will mark features for removal from the state, but
-   *  does not do the actual removing and does not update the graph. */
-  void FilterUpdate();
+   *  does not do the actual removing and does not update the graph.
+   *  `oos_rows` is the number of rows contributed by the out-of-state features
+   *  in `oos_used_` (see `ComputeOOSMeasurements`), which are stacked below the
+   *  in-state ones. */
+  void FilterUpdate(int oos_rows = 0);
+
+  /** Free up group state slots so that the pose window stays within its budget
+   *  and at least `slots_needed` slots are available. Only groups that no
+   *  in-state feature refers to can go. */
+  void MaintainOOSPoseWindow(int slots_needed);
+
+  /** Triangulates every out-of-state (dropped) feature collected by
+   *  `ProcessTracks`, computes its marginalized MSCKF measurement and gates it.
+   *  Fills `oos_used_` and returns the total number of measurement rows.
+   *  Must run after all group management of this step, so that the state indices
+   *  the Jacobians refer to are final. */
+  int ComputeOOSMeasurements();
+
+  /** Mahalanobis gate on the marginalized out-of-state measurement of `f`. */
+  bool OOSGating(FeaturePtr f);
+
+  /** Removes the out-of-state features used (or rejected) in this step from the
+   *  graph and frees them. */
+  void CleanupOOSFeatures();
 
   /** Main (simple) tool for outlier rejection */
   std::vector<FeaturePtr> MHGating();
@@ -492,6 +521,7 @@ private:
   /** Minimum number of observations a feature needs by the time `Tracker` drops
    *  it in order to use it in a MSCKF update. */
   int OOS_update_min_observations_;
+  OOSOptions oos_options_;          // out-of-state (MSCKF) update options
   bool use_depth_opt_;              // use depth optimization or not
   RefinementOptions refinement_options_; // depth refinement options
   SubfilterOptions subfilter_options_;   // depth-subfilter options
@@ -759,6 +789,35 @@ private:
   /** Keep track of features rejected by MH-Gating and One-Pt RANSAC. */
   int num_mh_rejected_;
   int num_oneptransac_rejected_;
+
+  /** Length of the sliding pose window kept in the state for the out-of-state
+   *  update (0 = no window, i.e. groups enter the state only as reference groups
+   *  of features being promoted), and how often a pose is added to it (1 = every
+   *  frame; k > 1 makes the same number of slots span k times as much time). */
+  int oos_pose_window_{0};
+  int oos_augment_every_{1};
+
+  /** Out-of-state (MSCKF) update bookkeeping, per update step. */
+  std::vector<FeaturePtr> oos_used_; ///< features actually used in the update
+  int num_oos_candidates_{0};        ///< dropped out-of-state tracks
+  int num_oos_used_{0};
+  int num_oos_short_{0};   ///< rejected: too few in-state observations
+  int num_oos_bad_tri_{0}; ///< rejected: triangulation gate
+  int num_oos_gated_{0};   ///< rejected: Mahalanobis gate
+  int num_oos_rows_{0};    ///< measurement rows contributed
+  /** Same counters, accumulated over the whole run (for the run summary). */
+  long total_oos_candidates_{0}, total_oos_used_{0}, total_oos_short_{0},
+      total_oos_bad_tri_{0}, total_oos_gated_{0}, total_oos_rows_{0},
+      total_oos_obs_{0};
+  /** Observation coverage of the candidates: how many observations they have in
+   *  total versus how many come from groups that are actually in the state (the
+   *  only ones an OOS update can constrain). `oos_instate_view_hist_[k]` counts
+   *  candidates with k in-state views, the last bin being a catch-all. */
+  long total_oos_views_all_{0}, total_oos_views_instate_{0};
+  std::array<long, 18> oos_instate_view_hist_{};
+  /** Pose-window bookkeeping: groups evicted to keep it within budget, and
+   *  frames whose pose could not be added because every slot was load bearing. */
+  long num_oos_window_evictions_{0}, num_oos_window_starved_{0};
 };
 
 } // xivo

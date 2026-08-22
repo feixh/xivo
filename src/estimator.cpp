@@ -96,6 +96,37 @@ Estimator::~Estimator() {
     CameraManager::instance()->Print(std::cout);
   }
 
+  if (use_OOS_) {
+    std::cout << "===== Out-of-state (MSCKF) updates =====\n";
+    std::cout << "candidates=" << total_oos_candidates_
+              << "  used=" << total_oos_used_
+              << "  too_short=" << total_oos_short_
+              << "  bad_triangulation=" << total_oos_bad_tri_
+              << "  gated=" << total_oos_gated_ << std::endl;
+    std::cout << "rows=" << total_oos_rows_ << "  observations=" << total_oos_obs_
+              << "  obs/feature="
+              << (total_oos_used_ ? number_t(total_oos_obs_) / total_oos_used_ : 0)
+              << std::endl;
+    std::cout << "views/candidate: all="
+              << (total_oos_candidates_
+                      ? number_t(total_oos_views_all_) / total_oos_candidates_
+                      : 0)
+              << "  instate="
+              << (total_oos_candidates_
+                      ? number_t(total_oos_views_instate_) / total_oos_candidates_
+                      : 0)
+              << std::endl;
+    std::cout << "pose window: length=" << oos_pose_window_
+              << "  augment_every=" << oos_augment_every_
+              << "  evictions=" << num_oos_window_evictions_
+              << "  starved_frames=" << num_oos_window_starved_ << std::endl;
+    std::cout << "instate-view histogram:";
+    for (size_t k = 0; k < oos_instate_view_hist_.size(); ++k) {
+      std::cout << " " << k << ":" << oos_instate_view_hist_[k];
+    }
+    std::cout << std::endl;
+  }
+
   if (worker_) {
     stop_.store(true, std::memory_order_release);
     worker_->join();
@@ -124,8 +155,37 @@ Estimator::Estimator(const Json::Value &cfg)
       cfg_.get("compression_trigger_ratio", 1.5).asDouble();
   OOS_update_min_observations_ =
       cfg_.get("OOS_update_min_observations", 5).asInt();
-  if (use_OOS_) {
-    LOG(FATAL) << "MSCKF not implemented";
+  {
+    // `OOS_update_min_observations` is the pre-existing (top level) name for the
+    // same knob, kept as the default of OOS.min_observations.
+    auto oos = cfg_["OOS"];
+    oos_options_.min_observations =
+        oos.get("min_observations", OOS_update_min_observations_).asInt();
+    oos_options_.max_observations =
+        oos.get("max_observations", kMaxGroup).asInt();
+    oos_options_.refine = oos.get("refine", true).asBool();
+    oos_options_.max_iters = oos.get("max_iters", 10).asInt();
+    oos_options_.eps = oos.get("eps", 1e-5).asDouble();
+    oos_options_.Rtri = oos.get("Rtri", 1.0).asDouble();
+    oos_options_.max_mean_reproj_err =
+        oos.get("max_mean_reproj_err", 1.5).asDouble();
+    oos_options_.zmin = oos.get("zmin", 0.05).asDouble();
+    oos_options_.zmax = oos.get("zmax", 50.0).asDouble();
+    // Per-degree-of-freedom Mahalanobis gate; <= 0 disables it.
+    oos_options_.MH_thresh = oos.get("MH_thresh", 5.991).asDouble();
+
+    // Sliding window of past poses kept in the state so that the observations of
+    // a dropped track have something to constrain. 0 disables it, which leaves
+    // group management exactly as it is without OOS.
+    oos_pose_window_ = oos.get("pose_window", 0).asInt();
+    oos_augment_every_ = std::max(1, oos.get("augment_every", 1).asInt());
+    LOG(INFO) << "use_OOS=" << use_OOS_
+              << "; OOS min_observations=" << oos_options_.min_observations
+              << "; max_observations=" << oos_options_.max_observations
+              << "; max_mean_reproj_err=" << oos_options_.max_mean_reproj_err
+              << "; MH_thresh=" << oos_options_.MH_thresh
+              << "; pose_window=" << oos_pose_window_
+              << "; augment_every=" << oos_augment_every_;
   }
 
   // IMU clamping
@@ -432,6 +492,9 @@ Estimator::Estimator(const Json::Value &cfg)
   MH_thresh_multipler_ = cfg_.get("MH_adjust_factor", 1.1).asDouble();
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
+  // The key is `feature_owner_change_cov_factor` everywhere else -- in every
+  // shipped config and in the member name. Reading `filter_...` here meant the
+  // configured value was silently ignored and the 1.5 default always applied.
   feature_owner_change_cov_factor_ =
     cfg_.get("feature_owner_change_cov_factor", 1.5).asDouble();
   strict_criteria_timesteps_ = cfg_.get("strict_criteria_timesteps", 5).asInt();

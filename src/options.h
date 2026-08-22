@@ -40,6 +40,31 @@ struct TriangulateOptions {
   number_t max_theta_thresh, beta_thesh; // thresholds for angular reprojection error and parallax error 
 };
 
+/** Options for the out-of-state (MSCKF) update. A feature that leaves the
+ *  tracker without ever having been in the state is triangulated from all of its
+ *  observations, and the resulting stack of reprojection residuals is projected
+ *  onto the left nullspace of the Jacobian w.r.t. the 3D point, which
+ *  marginalizes the point and leaves a constraint on the poses in the state. */
+struct OOSOptions {
+  OOSOptions()
+      : min_observations{4}, max_observations{kMaxGroup}, refine{true},
+        max_iters{10}, eps{1e-5}, Rtri{1.0}, max_mean_reproj_err{1.5},
+        zmin{0.05}, zmax{50.0}, MH_thresh{0.0} {}
+
+  int min_observations; // minimal number of observations from in-state groups
+  int max_observations; // cap on the observations used, to bound the cost of
+                        // the update (the track is thinned, not dropped)
+  bool refine;          // Gauss-Newton refine the 3D point before marginalizing
+  int max_iters;        // maximal iterations of the refinement
+  number_t eps;         // convergence tolerance of the refinement
+  number_t Rtri;        // measurement covariance used in the refinement
+  number_t max_mean_reproj_err; // reject the feature if the mean per-view
+                                // reprojection error (pixels) exceeds this
+  number_t zmin, zmax;          // admissible depth range after refinement
+  number_t MH_thresh; // Mahalanobis gate on the marginalized innovation,
+                      // per degree of freedom; <= 0 disables it
+};
+
 // Options for adaptive initial depth estimation
 struct AdaptiveInitialDepthOptions {
   AdaptiveInitialDepthOptions() : median_weight{0.99}, min_feature_lifetime{5} {}

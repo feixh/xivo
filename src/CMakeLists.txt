@@ -24,7 +24,9 @@ project(estimator)
 # small nonzero offset (-0.077 ms on room1) and halves the run-to-run ATE spread
 # (sd 0.0047 -> 0.0020) at a slightly better mean. Requires the td plumbing
 # fixed in M6 (bug #46: State::td was read uninitialised).
-add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
+# NOTE: -DUSE_ONLINE_TEMPORAL_CALIB is set in the *top-level* CMakeLists.txt, not
+# here: pyxivo is built there and would otherwise disagree with this library
+# about the state layout.
 #add_definitions(-DUSE_ONLINE_CAMERA_CALIB)
 
 # if set, enables the mapper object (and loop closure)
@@ -36,9 +38,9 @@ add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
 # add_definitions(-DAPPROXIMATE_INIT_COVARIANCE)
 
 # Sets the maximum number of features and groups in the EKF. Otherwise
-# use the default values in core.h
-#add_definitions(-DEKF_MAX_FEATURES=125)
-#add_definitions(-DEKF_MAX_GROUPS=75)
+# use the default values in core.h.
+# NOTE: set these in the top-level CMakeLists.txt, not here -- pyxivo is built
+# there and would otherwise disagree with this library about the state layout.
 
 # Sets the frequency at which to project rotation matrices to SO(3) to get
 # rid of accumulated numeric error
@@ -171,6 +173,12 @@ add_executable(unitTests_Jacobians
                test/unittest_helpers.cpp)
 target_link_libraries(unitTests_Jacobians ${libxivo} ${deps} gtest gtest_main)
 add_test(NAME Jacobians COMMAND unitTests_Jacobians
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(unitTests_OOSUpdate
+               test/unittest_oos_update.cpp)
+target_link_libraries(unitTests_OOSUpdate ${libxivo} ${deps} gtest gtest_main)
+add_test(NAME OOSUpdate COMMAND unitTests_OOSUpdate
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_pinhole

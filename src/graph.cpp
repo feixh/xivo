@@ -332,20 +332,31 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
 
   // Candidates that could be gauge features
   std::vector<FeaturePtr> candidates = GetGaugeFeatureCandidates(g);
-  //std::sort(candidates.begin(), candidates.end(),
-  //          [est](FeaturePtr f1, FeaturePtr f2) -> bool {
-  //            return est->FeatureCovXYComparison(f1, f2);
-  //          });
+  // Fixing a feature's XY covariance asserts that we know those two directions
+  // exactly, so it should be spent on the features we already know best;
+  // picking them out of an unordered candidate list instead injects a random
+  // amount of fictitious information every frame. The feature id breaks ties so
+  // that the comparator is a strict weak ordering and the choice is repeatable.
+  if (P.get("sort_gauge_features_by_cov", false).asBool()) {
+    std::sort(candidates.begin(), candidates.end(),
+              [est](FeaturePtr f1, FeaturePtr f2) -> bool {
+                number_t s1 = est->InstateFeatureCov(f1).block<2, 2>(0, 0).norm();
+                number_t s2 = est->InstateFeatureCov(f2).block<2, 2>(0, 0).norm();
+                if (s1 != s2) return s1 < s2;
+                return f1->id() < f2->id();
+              });
+  }
   std::vector<FeaturePtr> candidates_backup = candidates;
 
-  // Lambda function that checks whether or not features are collinear
+  // Lambda function that checks whether or not features are collinear.
+  // `U` is keyed by pointer; the cross products in PointsAreCollinear are
+  // evaluated in iteration order, and the collinearity verdict is a thresholded
+  // cross product, which is not invariant to which point plays the role of the
+  // base -- so feeding it the raw set makes a decision at the 1e-3 threshold
+  // depend on heap addresses (i.e. on ASLR). Sort by id first. See
+  // notes-stereo/m3a-determinism.md and notes-oos/m4-capacity-and-determinism.md.
   auto collinear_check = [](std::unordered_set<FeaturePtr> U,
                             number_t collinear_thresh) {
-    // `U` is keyed by pointer, so iterating it directly hands
-    // PointsAreCollinear its points in an order that depends on heap addresses
-    // -- and the collinearity verdict is a thresholded cross product, which is
-    // not invariant to which point plays the role of the base. Ordering by id
-    // makes the test reproducible. See notes-stereo/m3a-determinism.md.
     std::vector<FeaturePtr> ordered(U.begin(), U.end());
     std::sort(ordered.begin(), ordered.end(),
               [](FeaturePtr a, FeaturePtr b) { return a->id() < b->id(); });

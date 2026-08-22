@@ -27,6 +27,16 @@ option(USE_GPERFTOOLS "use gperf for performance profiling" OFF)
 # Raising the *state* alone does nothing -- tracker_cfg.num_features_max caps
 # what reaches it -- so the shipped stereo config raises both together. Build
 # with -DEKF_MAX_FEATURES=30 -DEKF_MAX_GROUPS=15 to reproduce RESULTS.md.
+#
+# The out-of-state (MSCKF) update wants more still: its pose window occupies
+# group slots on top of the reference groups of the in-state features, and
+# cfg/oos.json was tuned at 200/60 with a 100-130 feature tracker (see
+# notes-n-prompts/notes-oos/). Note the group count is not result-neutral even
+# with the pose window off -- the number of free group slots decides which
+# branch of SelectAndAddNewFeatures runs and how many groups AddGroupOfFeatures
+# admits -- so a configuration has to be compared against a baseline built at
+# the same state size. Pair a non-default size with XIVO_OUTPUT_SUFFIX to keep
+# both builds on disk.
 set(EKF_MAX_FEATURES "90" CACHE STRING
     "features in the EKF state; blank uses core.h's default of 30")
 set(EKF_MAX_GROUPS "45" CACHE STRING
@@ -99,6 +109,14 @@ add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_ZERO)
 # compile. Basic logging keeps the assertions but prints the format string
 # verbatim instead of formatting Eigen types; behaviour is otherwise unchanged.
 add_definitions(-DSOPHUS_USE_BASIC_LOGGING)
+
+# Online temporal calibration: estimate the IMU-camera time offset td as part of
+# the state. Set here rather than in src/CMakeLists.txt (where it used to live)
+# for the same reason as the EKF_MAX_* cache variables above: `add_definitions`
+# only reaches the current directory and the subdirectories added after it, and
+# pyxivo is built from this top-level list, so a define under src/ gives the
+# Python bindings a different state layout than the library they link against.
+add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
 
 find_package(OpenCV REQUIRED)
 find_package(Python3 REQUIRED Interpreter Development)

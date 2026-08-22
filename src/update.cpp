@@ -185,7 +185,115 @@ void Estimator::GateStereoMeasurements() {
 }
 
 
-void Estimator::FilterUpdate() {
+int Estimator::ComputeOOSMeasurements() {
+  timer_.Tick("oos-jacobian");
+
+  Graph &graph{*Graph::instance()};
+
+  oos_used_.clear();
+  num_oos_candidates_ = oos_features_.size();
+  num_oos_used_ = 0;
+  num_oos_short_ = 0;
+  num_oos_bad_tri_ = 0;
+  num_oos_gated_ = 0;
+  num_oos_rows_ = 0;
+
+  const int min_obs = std::max(2, oos_options_.min_observations);
+
+  for (auto f : oos_features_) {
+    // Group management of this step (`DiscardAffectedGroups`) may have taken the
+    // feature out of the graph -- its reference group went away and no new owner
+    // could be found -- in which case there is nothing left to work with.
+    if (!graph.HasFeature(f)) {
+      continue;
+    }
+    auto all_obs = graph.GetObservationsOf(f);
+    auto views = f->SelectOOSObservations(all_obs, oos_options_);
+    total_oos_views_all_ += all_obs.size();
+    total_oos_views_instate_ += views.size();
+    oos_instate_view_hist_[std::min<size_t>(views.size(),
+                                            oos_instate_view_hist_.size() - 1)]++;
+    if (static_cast<int>(views.size()) < min_obs) {
+      ++num_oos_short_;
+      continue;
+    }
+    // Re-triangulate from all the views at once. The depth carried over from the
+    // sub-filter is a two-view estimate and is not accurate enough: a wrong 3D
+    // point yields a consistent but wrong constraint on the whole window of
+    // poses the feature was seen from.
+    if (oos_options_.refine && !f->RefineOOSDepth(gbc(), views, oos_options_)) {
+      ++num_oos_bad_tri_;
+      continue;
+    }
+    int rows = f->ComputeOOSJacobian(views, X_.Rbc.matrix(), X_.Tbc,
+                                     oos_options_);
+    if (rows <= 0) {
+      ++num_oos_short_;
+      continue;
+    }
+    if (!OOSGating(f)) {
+      ++num_oos_gated_;
+      continue;
+    }
+    oos_used_.push_back(f);
+    num_oos_rows_ += rows;
+    total_oos_obs_ += f->oos_num_obs();
+  }
+  num_oos_used_ = oos_used_.size();
+
+  total_oos_candidates_ += num_oos_candidates_;
+  total_oos_used_ += num_oos_used_;
+  total_oos_short_ += num_oos_short_;
+  total_oos_bad_tri_ += num_oos_bad_tri_;
+  total_oos_gated_ += num_oos_gated_;
+  total_oos_rows_ += num_oos_rows_;
+
+  VLOG(1) << "OOS: " << num_oos_used_ << "/" << num_oos_candidates_
+          << " features used, " << num_oos_rows_ << " rows (short="
+          << num_oos_short_ << ", bad_tri=" << num_oos_bad_tri_ << ", gated="
+          << num_oos_gated_ << ")";
+
+  timer_.Tock("oos-jacobian");
+  return num_oos_rows_;
+}
+
+bool Estimator::OOSGating(FeaturePtr f) {
+  if (oos_options_.MH_thresh <= 0) {
+    return true;
+  }
+  const int n = f->oos_inn_size();
+  MatX H = f->Ho();
+  VecX r = f->ro();
+
+  MatX S = H * P_ * H.transpose();
+  S.diagonal().array() += Roos_;
+  number_t mh_dist = r.dot(S.llt().solve(r));
+  // Normalized per degree of freedom, so that the threshold does not depend on
+  // the length of the track (an in-state measurement has 2 dofs, an OOS one
+  // 2n-3).
+  if (!std::isfinite(mh_dist) || mh_dist > oos_options_.MH_thresh * n) {
+    LOG(INFO) << "OOS feature #" << f->id() << " rejected by MH-gating, d="
+              << mh_dist / std::max(n, 1);
+    return false;
+  }
+  return true;
+}
+
+void Estimator::CleanupOOSFeatures() {
+  Graph &graph{*Graph::instance()};
+  for (auto f : oos_features_) {
+    if (graph.HasFeature(f)) {
+      graph.RemoveFeature(f);
+      Feature::Destroy(f);
+    }
+    // else: already removed from the graph and deactivated while discarding
+    // groups; the memory manager will recycle the slot.
+  }
+  oos_features_.clear();
+  oos_used_.clear();
+}
+
+void Estimator::FilterUpdate(int oos_rows) {
 
 #ifdef USE_GPERFTOOLS
   ProfilerStart(__PRETTY_FUNCTION__);
@@ -201,13 +309,15 @@ void Estimator::FilterUpdate() {
   // was matched into the right image and survived gating, two more for the
   // right. The measurement height is therefore data-dependent -- hence the
   // running `row` cursor below rather than the old fixed `2 * i` stride.
+  // The out-of-state rows are appended after all of the in-state ones.
   const number_t Rr = R_ * stereo_update_R_scale_;
-  int total_size = 2 * in_current_ekf_update_.size();
+  int instate_size = 2 * in_current_ekf_update_.size();
   for (auto f : in_current_ekf_update_) {
     if (f->right_jac_valid()) {
-      total_size += 2;
+      instate_size += 2;
     }
   }
+  int total_size = instate_size + oos_rows;
   H_.setZero(total_size, err_.size());
   inn_.setZero(total_size);
   diagR_.resize(total_size);
@@ -227,8 +337,23 @@ void Estimator::FilterUpdate() {
     }
   }
 #ifndef NDEBUG
-  CHECK(row == total_size);
+  CHECK(row == instate_size);
 #endif
+
+  // Out-of-state measurements below the in-state ones. Their noise is isotropic
+  // with variance Roos_ *because* the point was marginalized out with an
+  // orthonormal basis of the left nullspace of Hf (see
+  // Feature::MarginalizeOOSPoint) -- the diagonal diagR_ would otherwise be
+  // wrong.
+  int offset = instate_size;
+  for (auto f : oos_used_) {
+    int n = f->oos_inn_size();
+    H_.block(offset, 0, n, err_.size()) = f->Ho();
+    inn_.segment(offset, n) = f->ro();
+    diagR_.segment(offset, n).setConstant(Roos_);
+    offset += n;
+  }
+  CHECK_EQ(offset, total_size);
 
   timer_.Tick("actual-update");
   UpdateJosephForm();
