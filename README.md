@@ -54,7 +54,10 @@ All dependencies, except for OpenCV, are included in the `thirdparty` directory.
 Please see our [wiki](https://github.com/ucla-vision/xivo/wiki) for usage instructions and more detailed information about the algorithm.
 
 
-## Stereo
+
+## New Features (in the era of coding agent, developed by coding agent)
+
+### Stereo + IMU
 
 This branch adds stereo-camera support: a second camera in the registry, a fixed
 rig geometry, left→right feature matching, depth seeding by triangulation at first
@@ -92,7 +95,7 @@ and `tracker_cfg.num_features_max` together (60 / 120) to get back above real ti
 for 0.005 m of accuracy. Full breakdown, including where each millisecond goes, in
 [`RESULTS_STEREO.md`](RESULTS_STEREO.md#speed-and-memory).
 
-### EKF capacity is a build option
+#### EKF capacity is a build option
 
 The number of features and groups the filter can hold is a compile-time constant.
 It used to require editing `add_definitions` in `src/CMakeLists.txt`; it is now a
@@ -119,7 +122,10 @@ at upstream capacity. `-DXIVO_OUTPUT_SUFFIX=_foo` puts a variant build in
 reads `XIVO_LIB` to pick which to import.
 
 
-## License and Disclaimer
+---
+## [LICENSE AND DISCLAIMER ARE COPIED FROM THE ORIGINAL REPO]
+
+## License and Disclaimer 
 
 This software is property of the UC Regents, and is provided free of charge for research purposes only. It comes with no warranties, expressed or implied, according to these [terms and conditions](LICENSE). For commercial use, please contact [UCLA TDG](https://tdg.ucla.edu).
 
