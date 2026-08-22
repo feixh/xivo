@@ -429,8 +429,11 @@ Estimator::Estimator(const Json::Value &cfg)
   MH_thresh_multipler_ = cfg_.get("MH_adjust_factor", 1.1).asDouble();
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
+  // The key is `feature_owner_change_cov_factor` everywhere else -- in every
+  // shipped config and in the member name. Reading `filter_...` here meant the
+  // configured value was silently ignored and the 1.5 default always applied.
   feature_owner_change_cov_factor_ =
-    cfg_.get("filter_owner_change_cov_factor", 1.5).asDouble();
+    cfg_.get("feature_owner_change_cov_factor", 1.5).asDouble();
   strict_criteria_timesteps_ = cfg_.get("strict_criteria_timesteps", 5).asInt();
 
   // Feature Gauge Options

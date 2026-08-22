@@ -140,7 +140,7 @@
   "initial_std_z_badtri": 1.0,
   "max_subfilter_outlier": 0.01, // maximum outlier counter in subfilter allowed
                                  // for feature to be in main filter
-  "strict_criteria_timesteps": 5, // before this many RGB frames, we will use a
+  "strict_criteria_timesteps": 10, // before this many RGB frames, we will use a
                                   // looser criteria for admitting features to
                                   // the state
   "comparison_score_type": "DepthUncertainty",
@@ -148,7 +148,7 @@
   "visual_meas_std":  1.5, // std of visual measurement for x and y (pixel)
   "outlier_thresh": 1.1,
   "oos_meas_std": 2.0,
-  "max_depth": 5.0,
+  "max_depth": 10.0,
   "min_depth": 0.05,
 
   // Adaptive initial depth
