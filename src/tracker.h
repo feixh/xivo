@@ -38,6 +38,39 @@ public:
 
   void Update(const cv::Mat &img);
 
+  /** Stereo counterpart of `Update`.
+   *
+   * Temporal tracking on the left image is bit-for-bit the same work `Update`
+   * does; the right image is used only to attach a second observation to each
+   * surviving left feature. As of M2 the right image is merely validated and
+   * counted -- left->right matching arrives in M3 -- so a stereo run must
+   * currently produce a trajectory identical to the monocular one. That
+   * equality is the regression gate for the whole data path.
+   */
+  void UpdateStereo(const cv::Mat &img, const cv::Mat &img_r);
+
+  /** Number of frames for which a right image was received. */
+  int num_stereo_frames() const { return num_stereo_frames_; }
+
+  /** Left features that got a right-camera match on the most recent frame. */
+  int num_stereo_matched() const { return num_stereo_matched_; }
+  /** Left features considered for a right match on the most recent frame. */
+  int num_stereo_attempted() const { return num_stereo_attempted_; }
+  /** Cumulative counts of why a candidate right match was thrown out.
+   *  Separated because they diagnose different faults: a spike in epipolar
+   *  rejections points at the rig calibration, whereas a spike in
+   *  circular-consistency rejections points at repetitive texture. */
+  int num_stereo_rejected_klt() const { return num_stereo_rejected_klt_; }
+  int num_stereo_rejected_epipolar() const {
+    return num_stereo_rejected_epipolar_;
+  }
+  int num_stereo_rejected_circular() const {
+    return num_stereo_rejected_circular_;
+  }
+  int num_stereo_rejected_disparity() const {
+    return num_stereo_rejected_disparity_;
+  }
+
   void UpdatePointCloud(const VecXi &feature_ids, const MatX2 &xps);
 
   /** Called by function `CreateSystem` to force extraction of descriptors when
@@ -76,8 +109,44 @@ private:
   int num_outliers_rejected_ = 0;
   int num_failed_to_track_ = 0;
   int num_new_detections_ = 0;
+  // All of these are cumulative over the whole run, deliberately: a mix of
+  // per-frame and run-total counters makes any ratio computed from them wrong.
+  int num_stereo_frames_ = 0;
+  int num_stereo_matched_ = 0;
+  int num_stereo_attempted_ = 0;
+  int num_stereo_rejected_klt_ = 0;
+  int num_stereo_rejected_epipolar_ = 0;
+  int num_stereo_rejected_circular_ = 0;
+  int num_stereo_rejected_disparity_ = 0;
+
+  /** Match left features into the right image and attach the result to each
+   * feature via `Feature::SetRightObs`. Called by `UpdateStereo` after the
+   * left image's temporal tracking has finished, so it works on the features'
+   * current-frame pixel locations. */
+  void MatchStereo();
+
+  // stereo matching params; see the config documentation in cfg/tumvi_stereo.json
+  /** Reject a right match whose angular epipolar residual exceeds this, in
+   * radians. `StereoRig::EpipolarResidual` returns the sine of the angular
+   * miss, hence the unit. */
+  number_t stereo_epipolar_thresh_;
+  /** Reject a right match that does not track back to within this many pixels
+   * of the original left point (circular / left-right consistency). */
+  number_t stereo_circular_thresh_;
+  /** Reject a match whose disparity is below this many pixels: too little
+   * parallax to triangulate usefully, and near-zero disparity is also what a
+   * KLT that simply failed to move looks like. */
+  number_t stereo_min_disparity_;
+  /** Reject a match displaced further than this many pixels from the left
+   * point. With a 10 cm baseline nothing closer than ~0.2 m is plausible, so a
+   * huge displacement means the KLT latched onto unrelated texture. */
+  number_t stereo_max_disparity_;
+  int stereo_win_size_;
+  int stereo_max_level_;
 
   cv::Mat img_;
+  /** Right image of the current stereo pair; empty on monocular runs. */
+  cv::Mat img_r_;
 
   /** Last computed LK pyramid */
   std::vector<cv::Mat> pyramid_;

@@ -1,10 +1,28 @@
 import argparse
+import json
 import os, glob
+import re
 
 import sys
-sys.path.insert(0, 'lib')
+# The EKF state size is a compile-time constant, so comparing state sizes means
+# comparing two builds. XIVO_LIB points at the matching output directory (see
+# XIVO_OUTPUT_SUFFIX in CMakeLists.txt); it must be read before `import pyxivo`,
+# which is why it is an environment variable rather than an argparse flag.
+sys.path.insert(0, os.environ.get('XIVO_LIB', 'lib'))
 import pyxivo
 import savers
+
+
+def is_stereo_cfg(cfg_path):
+    """True if the estimator config asks for stereo.
+
+    The config is the single source of truth for stereo-vs-mono; there is no
+    command-line flag, so a config and a run mode cannot disagree. XIVO's configs
+    permit // comments, which json.loads does not, so strip them first.
+    """
+    with open(cfg_path) as f:
+        text = re.sub(r'(?m)//.*$', '', f.read())
+    return bool(json.loads(text).get('stereo', False))
 
 
 
@@ -78,12 +96,18 @@ def main(args):
     ########################################
     # LOAD DATA
     ########################################
+    stereo = is_stereo_cfg(args.cfg)
+    img_dir_r = None
     if args.dataset == 'tumvi':
         img_dir = os.path.join(args.root, 'dataset-{}_512_16'.format(args.seq),
                                'mav0', 'cam{}'.format(args.cam_id), 'data')
 
         imu_path = os.path.join(args.root, 'dataset-{}_512_16'.format(args.seq),
                                 'mav0', 'imu0', 'data.csv')
+        if stereo:
+            img_dir_r = os.path.join(
+                args.root, 'dataset-{}_512_16'.format(args.seq), 'mav0',
+                'cam{}'.format(1 - args.cam_id), 'data')
     elif args.dataset == 'cosyvio':
         img_dir = os.path.join(args.root, 'data', args.sen, args.seq, 'frames')
         imu_path = os.path.join(args.root, 'data', args.sen, args.seq, 'data.csv')
@@ -96,11 +120,30 @@ def main(args):
     else:
         raise ValueError('unknown dataset argument; choose from tumvi, xivo, cosyvio, carla')
 
+    if stereo and img_dir_r is None:
+        raise ValueError(
+            'config {} requests stereo, but dataset {} has no stereo pair '
+            'configured'.format(args.cfg, args.dataset))
+
     data = []
+
+    # Stereo: map each left timestamp to its right-image path. TUM-VI names both
+    # files after the (shared, hardware-triggered) timestamp, so pairing is exact
+    # -- but the pairing is still built by *checking the right file exists*, not
+    # by assuming it does, so a partial download shows up as dropped frames
+    # rather than as a crash mid-run.
+    right_of = {}
+    if stereo:
+        right_ts = {int(os.path.basename(p)[:-4]): p
+                    for p in glob.glob(os.path.join(img_dir_r, '*.png'))}
 
     if args.dataset in ['tumvi', 'xivo', 'carla', 'void']:
         for p in glob.glob(os.path.join(img_dir, '*.png')):
             ts = int(os.path.basename(p)[:-4])
+            if stereo:
+                if ts not in right_ts:
+                    continue
+                right_of[ts] = right_ts[ts]
             data.append((ts, p))
     elif args.dataset == 'cosyvio':
         img_filelist = os.path.join(img_dir, 'data.csv')
@@ -122,6 +165,18 @@ def main(args):
                 data.append((ts, (w, t)))
 
     data.sort(key=lambda tup: tup[0])
+
+    if stereo:
+        n_left = len(glob.glob(os.path.join(img_dir, '*.png')))
+        print('stereo: {} pairs from {} left / {} right frames'.format(
+            len(right_of), n_left, len(right_ts)))
+        if len(right_of) < n_left:
+            print('stereo: WARNING dropped {} left frames with no right '
+                  'partner'.format(n_left - len(right_of)))
+        if not right_of:
+            raise ValueError(
+                'stereo requested but no timestamp matched between {} and '
+                '{}'.format(img_dir, img_dir_r))
 
     ########################################
     # INITIALIZE ESTIMATOR
@@ -147,6 +202,9 @@ def main(args):
     #########################################
     # this is wrapped in a try/finally block so that data will save even when
     # we hit an exception (namely, KeyboardInterrupt)
+    # Bound before the try so a constructor failure surfaces as itself rather
+    # than as a NameError from the finally block.
+    estimator = None
     try:
         estimator = pyxivo.Estimator(args.cfg, viewer_cfg, args.seq, False)
         for i, (ts, content) in enumerate(data):
@@ -157,7 +215,10 @@ def main(args):
                 estimator.InertialMeas(ts, gyro[0], gyro[1], gyro[2], accel[0],
                                     accel[1], accel[2])
             else:
-                estimator.VisualMeas(ts, content)
+                if stereo:
+                    estimator.VisualMeasStereo(ts, content, right_of[ts])
+                else:
+                    estimator.VisualMeas(ts, content)
                 if estimator.UsingLoopClosure():
                     estimator.CloseLoop()
                 estimator.Visualize()
@@ -165,8 +226,50 @@ def main(args):
                     saver.onVisionUpdate(estimator, datum=(ts, content))
 
     finally:
+        if stereo and estimator is not None:
+            print_stereo_stats(estimator)
         if args.mode != 'runOnly':
             saver.onResultsReady()
+
+
+def print_stereo_stats(estimator):
+    """Summarize left->right matching and stereo depth seeding.
+
+    Printed at the end of every stereo run so the numbers land in the eval logs
+    alongside the ATE, rather than needing a separate harness to recover them.
+    """
+    frames = estimator.num_stereo_frames()
+    attempted = estimator.num_stereo_attempted()
+    matched = estimator.num_stereo_matched()
+    print('stereo: {} frames, {} match attempts, {} matched ({:.1f}%)'.format(
+        frames, attempted, matched,
+        100.0 * matched / attempted if attempted else 0.0))
+    print('stereo: rejected klt={} epipolar={} circular={} disparity={}'.format(
+        estimator.num_stereo_rejected_klt(),
+        estimator.num_stereo_rejected_epipolar(),
+        estimator.num_stereo_rejected_circular(),
+        estimator.num_stereo_rejected_disparity()))
+    ok = estimator.num_stereo_init_ok()
+    no_match = estimator.num_stereo_init_no_match()
+    rejected = estimator.num_stereo_init_rejected()
+    total = ok + no_match + rejected
+    print('stereo_init: {} seeded, {} no-match, {} rejected '
+          '({:.1f}% of {} new features seeded)'.format(
+              ok, no_match, rejected,
+              100.0 * ok / total if total else 0.0, total))
+    print('stereo_init: rejected degenerate={} gap={} range={} std={}'.format(
+        estimator.num_stereo_init_rej_degenerate(),
+        estimator.num_stereo_init_rej_gap(),
+        estimator.num_stereo_init_rej_range(),
+        estimator.num_stereo_init_rej_std()))
+    used = estimator.num_stereo_upd_used()
+    rej_geom = estimator.num_stereo_upd_rej_geom()
+    rej_mh = estimator.num_stereo_upd_rej_mh()
+    offered = used + rej_geom + rej_mh
+    print('stereo_update: {} right measurements used, rejected geom={} mh={} '
+          '({:.1f}% of {} offered)'.format(
+              used, rej_geom, rej_mh,
+              100.0 * used / offered if offered else 0.0, offered))
 
 
 if __name__ == '__main__':

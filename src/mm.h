@@ -22,10 +22,19 @@ public:
   void DeactivateItem(T* item);
   void DestroyItem(T *item);
 
+  int max_items() const { return max_items_; }
+  /** High-water mark of simultaneously-active slots. Running out is a
+   *  `LOG(FATAL)` in `GetItem`, so this is the number to compare `max_items()`
+   *  against when sizing the pool. */
+  int peak_active() const { return peak_active_; }
+
 private:
   int max_items_;
   int num_slots_initialized_;
   int num_slots_active_;
+  int peak_active_;
+  /** So the 90%-full warning is emitted once per pool, not once per frame. */
+  bool warned_nearly_full_;
   int slot_search_ind_;
   std::vector<bool> slots_initialized_;
   std::vector<bool> slots_active_;
@@ -34,6 +43,8 @@ private:
   bool is_feature_buf_; // true if storing features, false if storing groups
 
   void RemoveFromMapper(T* item);
+  /** Bump the active count, tracking the high-water mark. */
+  void NoteActivation();
 };
 
 
@@ -48,6 +59,13 @@ public:
 
   static MemoryManagerPtr Create(int max_features, int max_groups);
   static MemoryManagerPtr instance();
+
+  /** Pool sizes and their high-water marks, for `CheckMemoryPools` and for
+   *  reporting how much headroom a config actually had. */
+  int max_features() const { return feature_slots_->max_items(); }
+  int peak_features() const { return feature_slots_->peak_active(); }
+  int max_groups() const { return group_slots_->max_items(); }
+  int peak_groups() const { return group_slots_->peak_active(); }
 
   FeaturePtr GetFeature();
   void DeactivateFeature(FeaturePtr);

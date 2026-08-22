@@ -57,6 +57,19 @@ private:
   cv::Mat img_;
 };
 
+/** A synchronized stereo pair. `img_` is the left/primary image -- the same one
+ * `Visual` would carry -- so the two paths differ only by the extra right
+ * image. */
+class VisualStereo : public Message {
+public:
+  VisualStereo(const timestamp_t &ts, const cv::Mat &img, const cv::Mat &img_r)
+      : Message{ts}, img_{img}, img_r_{img_r} {}
+  void Execute(EstimatorPtr est);
+
+private:
+  cv::Mat img_, img_r_;
+};
+
 class VisualTrackerOnly : public Message {
 public:
   VisualTrackerOnly(const timestamp_t &ts, const cv::Mat &img) : Message{ts}, img_{img} {}
@@ -114,6 +127,7 @@ private:
 
 class Estimator : public Component<Estimator, State> {
   friend class internal::Visual;
+  friend class internal::VisualStereo;
   friend class internal::VisualTrackerOnly;
   friend class internal::VisualPointCloud;
   friend class internal::VisualPointCloudTrackerOnly;
@@ -133,6 +147,13 @@ public:
   void InertialMeas(const timestamp_t &ts, const Vec3 &gyro, const Vec3 &accel);
   // perform tracking/matching to generate tracks
   void VisualMeas(const timestamp_t &ts_raw, const cv::Mat &img);
+  /** Same as `VisualMeas`, for a synchronized stereo pair.
+   *
+   * Requires a stereo rig to have been configured ("stereo": true); calling it
+   * on a monocular system is fatal rather than a silent fall-back to the left
+   * image alone, which would look like a merely-disappointing stereo result. */
+  void VisualMeasStereo(const timestamp_t &ts_raw, const cv::Mat &img,
+                        const cv::Mat &img_r);
   // perform tracking/matching for feature tracker only application
   void VisualMeasTrackerOnly(const timestamp_t &ts_raw, const cv::Mat &img);
 
@@ -188,6 +209,42 @@ public:
   int num_tracker_new_detections() const {
     return Tracker::instance()->num_new_detections();
   };
+  int num_stereo_frames() const {
+    return Tracker::instance()->num_stereo_frames();
+  };
+  int num_stereo_matched() const {
+    return Tracker::instance()->num_stereo_matched();
+  };
+  int num_stereo_attempted() const {
+    return Tracker::instance()->num_stereo_attempted();
+  };
+  int num_stereo_rejected_klt() const {
+    return Tracker::instance()->num_stereo_rejected_klt();
+  };
+  int num_stereo_rejected_epipolar() const {
+    return Tracker::instance()->num_stereo_rejected_epipolar();
+  };
+  int num_stereo_rejected_circular() const {
+    return Tracker::instance()->num_stereo_rejected_circular();
+  };
+  int num_stereo_rejected_disparity() const {
+    return Tracker::instance()->num_stereo_rejected_disparity();
+  };
+  /** Cumulative outcomes of stereo depth seeding; see `StereoSeedDepth`. */
+  int num_stereo_init_ok() const { return num_stereo_init_ok_; };
+  int num_stereo_init_no_match() const { return num_stereo_init_no_match_; };
+  int num_stereo_init_rejected() const { return num_stereo_init_rejected_; };
+  int num_stereo_init_rej_degenerate() const {
+    return num_stereo_init_rej_degenerate_;
+  };
+  int num_stereo_init_rej_gap() const { return num_stereo_init_rej_gap_; };
+  int num_stereo_init_rej_range() const { return num_stereo_init_rej_range_; };
+  int num_stereo_init_rej_std() const { return num_stereo_init_rej_std_; };
+  /** Cumulative outcomes of the right-camera EKF rows; see
+   * `GateStereoMeasurements`. */
+  int num_stereo_upd_used() const { return num_stereo_upd_used_; };
+  int num_stereo_upd_rej_geom() const { return num_stereo_upd_rej_geom_; };
+  int num_stereo_upd_rej_mh() const { return num_stereo_upd_rej_mh_; };
   MatX3 InstateFeaturePositions(int n_output) const;
   MatX3 InstateFeaturePositions() const;
   MatX6 InstateFeatureCovs(int n_output) const;
@@ -242,6 +299,10 @@ private:
    *  packet arrives */
   void VisualMeasInternal(const timestamp_t &ts, const cv::Mat &img);
 
+  /** Stereo counterpart of `VisualMeasInternal`. */
+  void VisualMeasStereoInternal(const timestamp_t &ts, const cv::Mat &img,
+                                const cv::Mat &img_r);
+
   /** Top-level function for update when an image packet arrives for
    * feature tracker*/
   void VisualMeasInternalTrackerOnly(const timestamp_t &ts, const cv::Mat &img);
@@ -294,12 +355,28 @@ private:
   void ZeroGaugeXYAddFeatures();
   void AddFeaturesWithInGroups();
   void AddGroupOfFeatures(int free_group_slots);
+  /** Metric depth for a just-created feature from its stereo pair.
+   *
+   * Returns false -- and leaves the caller to use the monocular prior -- when
+   * stereo seeding is disabled, when this feature has no right match on the
+   * current frame, or when the triangulation fails any of its gates. The three
+   * outcomes are counted separately so a poor seed rate can be attributed. */
+  bool StereoSeedDepth(FeaturePtr f, number_t *z, number_t *std_z);
   void InitializeJustCreatedTracks(GroupPtr g,
                                    std::list<FeaturePtr> &tracks);
   void AssociateTrackedFeaturesWithGroup(GroupPtr g,
                                          std::list<FeaturePtr> &tracks);
   void OutlierRejection();
   void FindNewGaugeFeatures();
+
+  /** Decide which right-camera observations enter this frame's EKF update.
+   *
+   * Runs over `in_current_ekf_update_` immediately before the update -- i.e. on
+   * exactly the features whose rows will be assembled -- so it cannot be
+   * bypassed by the configurations that skip `MHGating` or `OnePointRANSAC`.
+   * Invalidates the right rows of any feature that fails, leaving the feature
+   * itself (and its left measurement) untouched. */
+  void GateStereoMeasurements();
 
   /** Computes measurement jacobians for all features in the EKF state. */
   void ComputeInstateJacobians();
@@ -455,6 +532,71 @@ private:
    *  initialization when triangulation is poor.*/
   number_t init_std_z_badtri_;
 
+  ////////////////////////////////////////
+  // Stereo depth initialization (M4)
+  ////////////////////////////////////////
+  /** Whether to seed a new feature's depth by triangulating its stereo pair
+   *  instead of using `init_z_`. Off unless `stereo_init.enable` is set. */
+  bool stereo_init_{false};
+  /** Assumed left->right matching error, in pixels. Sets how tight the seeded
+   *  log-depth covariance is; see `StereoRig::TriangulateFromPixels`. */
+  number_t stereo_init_sigma_px_;
+  /** Reject a triangulation whose two rays miss each other by more than this
+   *  many metres. A large gap means the match is inconsistent with the rig
+   *  geometry even if it passed the tracker's epipolar gate. */
+  number_t stereo_init_max_gap_;
+  /** Clamp on the seeded log-depth std. The floor stops a very close, very
+   *  well-conditioned feature from being seeded so confidently that the filter
+   *  cannot correct a calibration error; the ceiling means "no better than the
+   *  monocular prior", at which point there is no reason to prefer stereo. */
+  number_t stereo_init_min_std_z_;
+  number_t stereo_init_max_std_z_;
+  /** Let the two-frame temporal triangulation overwrite a stereo-seeded depth.
+   *
+   * Off by default, and that default is the whole point: `Feature::Triangulate`
+   * rewrites `x_` without touching `P_`, so allowing it pairs a temporal depth
+   * with the stereo's covariance. Exposed as a knob only so the choice stays
+   * measurable without a rebuild; see notes-stereo/m4-stereo-depth-init.md. */
+  bool stereo_init_allow_retriangulation_{false};
+  /** Diagnostics: how often the stereo seed was used vs fell back. The four
+   *  `rej_` counters partition `num_stereo_init_rejected_` by cause, which is
+   *  what makes a low seed rate attributable rather than merely visible. */
+  int num_stereo_init_ok_{0};
+  int num_stereo_init_no_match_{0};
+  int num_stereo_init_rejected_{0};
+  int num_stereo_init_rej_degenerate_{0};
+  int num_stereo_init_rej_gap_{0};
+  int num_stereo_init_rej_range_{0};
+  int num_stereo_init_rej_std_{0};
+
+  ////////////////////////////////////////
+  // Stereo EKF measurement update (M5)
+  ////////////////////////////////////////
+  /** Whether an in-state feature's right-camera observation contributes two
+   *  extra rows to the EKF measurement. Off unless `stereo_update.enable`. */
+  bool stereo_update_{false};
+  /** Measurement variance of a right-camera pixel, as a multiple of `R_`.
+   *
+   *  Kept as a *ratio* rather than an absolute variance so that re-tuning `R_`
+   *  keeps the two cameras' relative weighting intact. The default of 1 says
+   *  the right observation is exactly as trustworthy as the left, which is the
+   *  honest starting point for a hardware-synchronized pair of identical
+   *  sensors tracked by the same KLT; a value > 1 discounts it for the extra
+   *  error the left->right match adds on top of the temporal track. */
+  number_t stereo_update_R_scale_{1.0};
+  /** Threshold of the right-camera Mahalanobis gate, as a multiple of
+   *  `MH_thresh_`. The gate is deliberately *separate* and 2-dof rather than
+   *  folded into a 4-dof joint distance: the existing threshold is calibrated
+   *  for 2 dof, and a bad right match should cost the feature its right
+   *  measurement, not its place in the state. */
+  number_t stereo_update_mh_scale_{1.0};
+  /** Diagnostics, cumulative over the run: right measurements actually used,
+   *  and those dropped by the geometric check inside
+   *  `Feature::ComputeRightJacobian` or by the right MH gate. */
+  int num_stereo_upd_used_{0};
+  int num_stereo_upd_rej_geom_{0};
+  int num_stereo_upd_rej_mh_{0};
+
   /** The minimum depth that a feature can be given when it is first
    *  created. (i.e. minimum value of `init_z_`) */
   number_t min_z_;
@@ -551,6 +693,24 @@ private:
   int gravity_init_counter_;
   std::vector<Vec3> gravity_init_buf_; // buffer of accel measurements for
                                        // gravity initialization
+  /** Gyro and timestamps alongside `gravity_init_buf_`, used only when
+   *  `gravity_init_derotate_` is on. */
+  std::vector<Vec3> gravity_init_gyro_buf_;
+  std::vector<timestamp_t> gravity_init_time_buf_;
+  /** Rotate each buffered accel sample into the body frame of the *last* sample
+   *  before averaging, integrating the gyro to get the relative attitude.
+   *
+   * `InitializeGravity` calls its buffer "stationary accel samples", but on
+   * TUM-VI's room sequences the rig is already turning at 0.11-0.32 rad/s when
+   * the first sample lands. Averaging body-frame accelerations across a turn
+   * smears the gravity direction by roughly |w| * window, which puts a hard
+   * ceiling on how long the window can usefully be -- and a short window cannot
+   * average away the carrier's own linear acceleration. De-rotating removes the
+   * smearing, so the window can grow until the linear acceleration averages out.
+   * Measured initial tilt error, mean over room1-room6: 1.47 deg as shipped
+   * (20 samples, no de-rotation) against 0.73 deg de-rotated over 200.
+   * See notes-stereo/m6-attitude-initialization.md. */
+  bool gravity_init_derotate_{false};
   // measurements buffer
   struct InternalBuffer
       : public std::vector<std::unique_ptr<internal::Message>> {

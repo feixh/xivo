@@ -156,6 +156,9 @@ public:
   // H: the big jacobian matrix of all measurements
   // offset: of the block in H
   void FillJacobianBlock(MatX &H, int offset);
+  /** Same, for the right camera's two rows. Only call when
+   * `right_jac_valid()`; otherwise `J_r_` is stale. */
+  void FillRightJacobianBlock(MatX &H, int offset);
   // fill-in the corresponding covariance block when inserting the feature into state
   // P: the covariance matrix of the estimator
   void FillCovarianceBlock(MatX &P);
@@ -164,6 +167,20 @@ public:
 
   const Eigen::Matrix<number_t, 2, kFullSize> &J() const { return J_; }
   const Vec2 &inn() const { return inn_; }
+
+  /** The right camera's two measurement rows, in the same error-state layout as
+   * `J()`, and the matching innovation `xp_r() - predicted right pixel`.
+   *
+   * Only meaningful when `right_jac_valid()`, which `ComputeJacobian` sets from
+   * scratch on every call: a feature with no right match this frame, or one
+   * whose predicted right point falls behind camera 1, contributes nothing. */
+  const Eigen::Matrix<number_t, 2, kFullSize> &Jr() const { return J_r_; }
+  const Vec2 &inn_r() const { return inn_r_; }
+  bool right_jac_valid() const { return right_jac_valid_; }
+  /** Drop this frame's right measurement from the EKF update. Used by the
+   * right-camera Mahalanobis gate, which rejects a bad *match* without
+   * condemning the feature itself -- the left track may be perfectly good. */
+  void InvalidateRightJacobian() { right_jac_valid_ = false; }
 
   /** Gets the last measurement (from the `Tracker`) of this feature */
   const Vec2 &xp() const { return back(); }
@@ -180,6 +197,40 @@ public:
   /** Sets variable `pred_`, the last computed predicted measurement to (-1,-1),
    *  the default "invalid" value for a predicted measurement. */
   void ResetPred() { pred_ << -1, -1; }
+
+  ////////////////////////////////////////
+  // Stereo: the right camera's observation of this feature
+  ////////////////////////////////////////
+  /** Record a right-camera observation for the current frame, in *pixels*.
+   *
+   * Only the current frame's right observation is kept. Unlike the left track
+   * (a full history in `Track`), the right observation is consumed by the
+   * update at the timestamp it was made and never revisited, so keeping a
+   * history would cost memory for nothing. */
+  void SetRightObs(const Vec2 &xp_r) {
+    xp_r_ = xp_r;
+    has_right_ = true;
+  }
+  /** Forget the right observation. Called at the start of each stereo frame, so
+   * `has_right()` always refers to the *current* frame and a stale match from a
+   * previous frame can never be fed to the filter. */
+  void ClearRightObs() { has_right_ = false; }
+  bool has_right() const { return has_right_; }
+  /** Right-camera pixel observation for the current frame; only meaningful when
+   * `has_right()`. */
+  const Vec2 &xp_r() const { return xp_r_; }
+
+  /** True once this feature's depth was seeded by stereo triangulation.
+   *
+   * Consumed by `Estimator::ProcessTracks` to suppress the two-frame *temporal*
+   * pre-subfilter triangulation. That path rewrites `x_` but leaves `P_`
+   * untouched, so letting it run on a stereo-seeded feature would pair a depth
+   * the stereo never vouched for with the tight covariance the stereo earned --
+   * strictly worse than either estimate alone. The stereo baseline (101 mm,
+   * known from calibration) also beats the inter-frame baseline of a slow
+   * handheld rig at 20 Hz, so there is nothing to gain by overwriting. */
+  void SetStereoSeeded() { stereo_seeded_ = true; }
+  bool stereo_seeded() const { return stereo_seeded_; }
 
   ////////////////////////////////////////
   // OOS Jacobians accessors
@@ -256,6 +307,18 @@ private:
   /** Resets a `Feature` object. Calls `Track::Reset` */
   void Reset(number_t x, number_t y);
 
+  /** The right camera's two rows of the measurement model. Called at the end of
+   * `ComputeJacobian`, which must already have filled `cache_`: the whole
+   * dependence on the state runs through `cache_.Xcn`, so the right rows reuse
+   * the left camera's entire `dXcn_d*` chain and only differ in the final
+   * projection. Sets `right_jac_valid_`. */
+  void ComputeRightJacobian();
+  /** Shared body of `FillJacobianBlock`/`FillRightJacobianBlock`: which blocks
+   * of the (mostly zero) 2 x kFullSize row pair are live is a property of the
+   * error-state layout, not of which camera made the measurement. */
+  void FillJacobianBlockFrom(MatX &H, int offset,
+                             const Eigen::Matrix<number_t, 2, kFullSize> &J);
+
 private:
   /** Total number of features ever created (never decremented) +
    *  (static constexpr) `counter0`. Used for getting ID values of newly created
@@ -294,6 +357,13 @@ private:
    *  measurement update step in `Feature::Predict`. */
   Vec2 pred_;
 
+  /** Right-camera pixel observation for the current frame, and whether one was
+   * found. Reset every stereo frame; see `SetRightObs`. */
+  Vec2 xp_r_;
+  bool has_right_{false};
+  /** Sticky for the lifetime of the feature, unlike `has_right_`. */
+  bool stereo_seeded_{false};
+
   /** 3D coordinates of the feature with respect to the current camera frame. */
   Vec3 Xc_;
 
@@ -305,6 +375,13 @@ private:
 
   /** `xp` - predicted observation used in the filter for this particular feature. */
   Vec2 inn_;
+
+  /** The right camera's counterparts of `J_`/`inn_`, and whether they were
+   * computed for the current frame. Recomputed (or invalidated) on every
+   * `ComputeJacobian`, so unlike `stereo_seeded_` these never persist. */
+  Eigen::Matrix<number_t, 2, kFullSize> J_r_;
+  Vec2 inn_r_;
+  bool right_jac_valid_{false};
 
   /** Measurement model Jacobian with respect to the error state used in the filter. */
   Mat23 Hx_;

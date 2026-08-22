@@ -14,6 +14,37 @@ message(STATUS "IS_MAC ${IS_MAC}")
 option(BUILD_G2O "build with g2o support" OFF)
 option(USE_GPERFTOOLS "use gperf for performance profiling" OFF)
 
+# EKF state size. These were compile-time only, set by hand-editing the
+# commented-out add_definitions() in src/CMakeLists.txt; core.h falls back to 30
+# features / 15 groups, which is what every number in RESULTS.md was produced
+# with. Exposing them as cache variables makes a larger-state variant a build
+# argument instead of a source edit -- and, paired with XIVO_OUTPUT_SUFFIX, lets
+# it live beside the default build rather than overwriting bin/ and lib/.
+#
+# The defaults are 90/45 rather than core.h's 30/15 because that is what
+# cfg/tumvi_stereo.json needs: at 30 features the filter discards most of what a
+# stereo pair gives it, and the six-room mean ATE goes from 0.048 m to 0.076 m.
+# Raising the *state* alone does nothing -- tracker_cfg.num_features_max caps
+# what reaches it -- so the shipped stereo config raises both together. Build
+# with -DEKF_MAX_FEATURES=30 -DEKF_MAX_GROUPS=15 to reproduce RESULTS.md.
+set(EKF_MAX_FEATURES "90" CACHE STRING
+    "features in the EKF state; blank uses core.h's default of 30")
+set(EKF_MAX_GROUPS "45" CACHE STRING
+    "groups in the EKF state; blank uses core.h's default of 15")
+if (EKF_MAX_FEATURES)
+  add_definitions(-DEKF_MAX_FEATURES=${EKF_MAX_FEATURES})
+  message(STATUS "EKF_MAX_FEATURES ${EKF_MAX_FEATURES}")
+endif ()
+if (EKF_MAX_GROUPS)
+  add_definitions(-DEKF_MAX_GROUPS=${EKF_MAX_GROUPS})
+  message(STATUS "EKF_MAX_GROUPS ${EKF_MAX_GROUPS}")
+endif ()
+
+# Appended to the bin/ and lib/ output directories, so two builds with different
+# state sizes can coexist. `scripts/pyxivo.py` takes -lib to match.
+set(XIVO_OUTPUT_SUFFIX "" CACHE STRING
+    "suffix on the bin/ and lib/ output directories")
+
 if (USE_GPERFTOOLS)
   add_definitions(-DUSE_GPERFTOOLS)
 endif (USE_GPERFTOOLS)
@@ -32,9 +63,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops")
 set(CMAKE_BUILD_TYPE "Release")
 #add_definitions(-DNDEBUG)
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin${XIVO_OUTPUT_SUFFIX})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib${XIVO_OUTPUT_SUFFIX})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib${XIVO_OUTPUT_SUFFIX})
 
 # disable logging whose severity level is below the given integer
 add_definitions(-DGOOGLE_STRIP_LOG=1)

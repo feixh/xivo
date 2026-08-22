@@ -16,6 +16,7 @@
 #include "tracker.h"
 #include "helpers.h"
 #include "mapper.h"
+#include "stereo.h"
 
 #ifdef USE_G2O
 #include "optimizer.h"
@@ -57,6 +58,10 @@ void Inertial::Execute(Estimator *est) {
 }
 
 void Visual::Execute(Estimator *est) { est->VisualMeasInternal(ts_, img_); }
+
+void VisualStereo::Execute(Estimator *est) {
+  est->VisualMeasStereoInternal(ts_, img_, img_r_);
+}
 
 void VisualTrackerOnly::Execute(Estimator *est) { est->VisualMeasInternalTrackerOnly(ts_, img_); }
 
@@ -358,6 +363,39 @@ Estimator::Estimator(const Json::Value &cfg)
   init_std_z_badtri_ = cfg_["initial_std_z_badtri"].asDouble();
   LOG(INFO) << "Initial covariance for features loaded";
 
+  // /////////////////////////////
+  // Stereo depth initialization
+  // /////////////////////////////
+  auto stereo_init_cfg = cfg_["stereo_init"];
+  stereo_init_ = stereo_init_cfg.get("enable", false).asBool();
+  stereo_init_sigma_px_ = stereo_init_cfg.get("sigma_px", 0.5).asDouble();
+  stereo_init_max_gap_ = stereo_init_cfg.get("max_gap", 0.10).asDouble();
+  stereo_init_min_std_z_ = stereo_init_cfg.get("min_std_z", 0.01).asDouble();
+  stereo_init_max_std_z_ = stereo_init_cfg.get("max_std_z", 1.0).asDouble();
+  stereo_init_allow_retriangulation_ =
+      stereo_init_cfg.get("allow_retriangulation", false).asBool();
+  if (stereo_init_ && !StereoRig::enabled()) {
+    LOG(FATAL) << "stereo_init.enable is set but no stereo rig is configured";
+  }
+
+  // /////////////////////////////
+  // Stereo EKF measurement update
+  // /////////////////////////////
+  auto stereo_update_cfg = cfg_["stereo_update"];
+  stereo_update_ = stereo_update_cfg.get("enable", false).asBool();
+  stereo_update_R_scale_ = stereo_update_cfg.get("R_scale", 1.0).asDouble();
+  stereo_update_mh_scale_ = stereo_update_cfg.get("mh_scale", 1.0).asDouble();
+  if (stereo_update_ && !StereoRig::enabled()) {
+    LOG(FATAL) << "stereo_update.enable is set but no stereo rig is configured";
+  }
+  if (stereo_update_ && Camera::instance(1) == nullptr) {
+    LOG(FATAL) << "stereo_update.enable is set but camera 1 is not configured";
+  }
+  if (!(stereo_update_R_scale_ > 0.0)) {
+    LOG(FATAL) << "stereo_update.R_scale must be positive; got "
+               << stereo_update_R_scale_;
+  }
+
   MeasurementUpdateInitialized_ = false;
 
   // /////////////////////////////
@@ -392,6 +430,12 @@ Estimator::Estimator(const Json::Value &cfg)
     gravity_init_counter_ = cfg_.get("gravity_init_counter", 20).asInt();
     gravity_initialized_ = false;
   }
+  // Default off: it changes the initial attitude on every dataset, so leaving it
+  // opt-in keeps the monocular baseline configs bit-for-bit as they were.
+  gravity_init_derotate_ = cfg_.get("gravity_init_derotate", false).asBool();
+  gravity_init_buf_.clear();
+  gravity_init_gyro_buf_.clear();
+  gravity_init_time_buf_.clear();
   vision_initialized_ = false;
   // reset measurement counter
   imu_counter_ = 0;
@@ -445,9 +489,38 @@ bool Estimator::InitializeGravity() {
     VLOG(0) << "initializing gravity";
 
     // got enough stationary samples, estimate gravity
-    Vec3 mean_accel = std::accumulate(gravity_init_buf_.begin(),
-                                      gravity_init_buf_.end(), Vec3{0, 0, 0});
-    mean_accel /= gravity_init_buf_.size();
+    Vec3 mean_accel = Vec3::Zero();
+    if (gravity_init_derotate_ && gravity_init_gyro_buf_.size() ==
+                                      gravity_init_buf_.size()) {
+      // The state starts propagating with Rsb = I in the body frame of the last
+      // buffered sample, so that is the frame gravity has to be expressed in.
+      // Integrate the gyro forward to get R_0k for every sample, then map each
+      // one to the final frame with R_Nk = R_0N^T R_0k.
+      const size_t n = gravity_init_buf_.size();
+      std::vector<Mat3> R_0k(n, Mat3::Identity());
+      for (size_t k = 1; k < n; ++k) {
+        const number_t dt = std::max<number_t>(
+            0.0, std::chrono::duration<number_t>(gravity_init_time_buf_[k] -
+                                                 gravity_init_time_buf_[k - 1])
+                     .count());
+        // Midpoint rule, and the gyro bias is still whatever the config seeded
+        // (zero, on every shipped config) -- there is no stationary stretch to
+        // estimate it from on these sequences.
+        const Vec3 dW =
+            0.5 * (gravity_init_gyro_buf_[k] + gravity_init_gyro_buf_[k - 1]) *
+            dt;
+        R_0k[k] = R_0k[k - 1] * SO3::exp(dW).matrix();
+      }
+      const Mat3 R_N0 = R_0k[n - 1].transpose();
+      for (size_t k = 0; k < n; ++k) {
+        mean_accel += R_N0 * R_0k[k] * gravity_init_buf_[k];
+      }
+      mean_accel /= n;
+    } else {
+      mean_accel = std::accumulate(gravity_init_buf_.begin(),
+                                   gravity_init_buf_.end(), Vec3{0, 0, 0});
+      mean_accel /= gravity_init_buf_.size();
+    }
 
     Vec3 accel_calib = imu_.Ca() * mean_accel - X_.ba;
 
@@ -462,7 +535,8 @@ bool Estimator::InitializeGravity() {
     X_.Rsg = SO3::exp(Wsg);
 
     LOG(INFO) << "===== Wsg initialization =====";
-    LOG(INFO) << "stationary accel samples=" << gravity_init_buf_.size();
+    LOG(INFO) << "accel samples=" << gravity_init_buf_.size()
+              << " derotated=" << gravity_init_derotate_;
     LOG(INFO) << "accel " << accel_calib.transpose();
     LOG(INFO) << "Wsg=" << Wsg.transpose();
     LOG(INFO) << "g=" << g_.transpose();
@@ -509,6 +583,8 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
   // initialize imu -- basically gravity
   if (!gravity_initialized_) {
     gravity_init_buf_.emplace_back(accel_new);
+    gravity_init_gyro_buf_.emplace_back(gyro_new);
+    gravity_init_time_buf_.emplace_back(ts);
 
     if (InitializeGravity()) {
       curr_imu_time_ = last_time_ = ts;
@@ -518,6 +594,8 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
 
       gravity_initialized_ = true;
       gravity_init_buf_.clear();
+      gravity_init_gyro_buf_.clear();
+      gravity_init_time_buf_.clear();
       LOG(INFO) << "IMU initialized";
     }
   } else {
@@ -959,6 +1037,31 @@ void Estimator::VisualMeas(const timestamp_t &ts_raw, const cv::Mat &img) {
   }
 }
 
+void Estimator::VisualMeasStereo(const timestamp_t &ts_raw, const cv::Mat &img,
+                                 const cv::Mat &img_r) {
+  if (!StereoRig::enabled()) {
+    LOG(FATAL) << "VisualMeasStereo called but no stereo rig is configured; "
+                  "set \"stereo\": true in the config";
+  }
+  timestamp_t ts{ts_raw};
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+  if (X_.td >= 0) {
+    ts += timestamp_t(uint64_t(X_.td * 1e9)); // seconds -> nanoseconds
+  } else {
+    ts -= timestamp_t(uint64_t(-X_.td * 1e9)); // seconds -> nanoseconds
+  }
+#endif
+  // The rig is hardware-triggered, so one td correction applies to both images.
+  if (async_run_) {
+    std::scoped_lock lck(buf_.mtx);
+    buf_.push_back(std::make_unique<internal::VisualStereo>(ts, img, img_r));
+    MaintainBuffer();
+  } else {
+    buf_.push_back(std::make_unique<internal::VisualStereo>(ts, img, img_r));
+    MaintainBuffer();
+  }
+}
+
 void Estimator::VisualMeasTrackerOnly(const timestamp_t &ts_raw, const cv::Mat &img) {
   timestamp_t ts{ts_raw};
 #ifdef USE_ONLINE_TEMPORAL_CALIB
@@ -1129,6 +1232,54 @@ void Estimator::VisualMeasInternal(const timestamp_t &ts, const cv::Mat &img) {
     // track features
     timer_.Tick("track");
     tracker->Update(img);
+    timer_.Tock("track");
+    // process features
+    timer_.Tick("process-tracks");
+    UpdateStep(ts, tracker->features_);
+    timer_.Tock("process-tracks");
+
+    if (gauge_group_ == -1) {
+      SwitchRefGroup();
+    }
+  }
+  timer_.Tock("visual-meas");
+}
+
+
+void Estimator::VisualMeasStereoInternal(const timestamp_t &ts,
+                                         const cv::Mat &img,
+                                         const cv::Mat &img_r) {
+  // Deliberately mirrors VisualMeasInternal step for step. The only difference
+  // is `tracker->UpdateStereo(img, img_r)` in place of `tracker->Update(img)`:
+  // propagation, prediction and the update step are shared, so a divergence
+  // between the mono and stereo trajectories can only come from tracking or
+  // from what the update step makes of the right observations.
+  if (!GoodTimestamp(ts)) {
+    std::cout << "Dropping a visual frame because its timestamp was delayed too far back in the past. Make MESSAGE_BUFFER_SIZE bigger." << std::endl;
+    return;
+  }
+  if (simulation_) {
+    throw std::invalid_argument(
+        "function VisualMeasStereo cannot be called in simulation");
+  }
+
+  ++vision_counter_;
+  timer_.Tick("visual-meas");
+  UpdateSystemClock(ts);
+  if (vision_initialized_) {
+    // propagate state upto current timestamp
+    Propagate(true);
+    if (use_canvas_) {
+      // Only the left image is drawn: the canvas geometry (and everything that
+      // reads it) is in left-camera pixels.
+      Canvas::instance()->Update(img);
+    }
+    // measurement prediction for feature tracking
+    auto tracker = Tracker::instance();
+    Predict(tracker->features_);
+    // track features
+    timer_.Tick("track");
+    tracker->UpdateStereo(img, img_r);
     timer_.Tock("track");
     // process features
     timer_.Tick("process-tracks");

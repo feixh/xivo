@@ -3,13 +3,18 @@
 #include "camera_manager.h"
 
 namespace xivo {
-std::unique_ptr<CameraManager> CameraManager::instance_ = nullptr;
+std::vector<std::unique_ptr<CameraManager>> CameraManager::instances_;
 
-CameraManager *CameraManager::Create(const Json::Value &cfg) {
-  if (!instance_) {
-    instance_ = std::unique_ptr<CameraManager>(new CameraManager(cfg));
+CameraManager *CameraManager::Create(const Json::Value &cfg, int cam_id) {
+  CHECK_GE(cam_id, 0) << "negative camera id";
+  if (cam_id >= instances_.size()) {
+    instances_.resize(cam_id + 1);
   }
-  return instance_.get();
+  if (!instances_[cam_id]) {
+    instances_[cam_id] =
+        std::unique_ptr<CameraManager>(new CameraManager(cfg));
+  }
+  return instances_[cam_id].get();
 }
 
 CameraManager::CameraManager(const Json::Value &cfg) : model_{Unknown{}} {

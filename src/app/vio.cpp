@@ -41,13 +41,26 @@ int main(int argc, char **argv) {
   std::tie(image_dir, imu_dir, mocap_dir) =
       GetDirs(FLAGS_dataset, FLAGS_root, FLAGS_seq, FLAGS_cam_id);
 
-  std::unique_ptr<DataLoader> loader(new DataLoader{image_dir, imu_dir});
+  // The estimator config decides whether this is a stereo run, so read it before
+  // choosing a loader.
+  auto est_cfg = LoadJson(cfg["estimator_cfg"].asString());
+  const bool stereo = est_cfg.get("stereo", false).asBool();
+
+  std::unique_ptr<DataLoader> loader;
+  if (stereo) {
+    const int cam_id_r = est_cfg.get("cam_id_right", 1).asInt();
+    std::string image_dir_r =
+        StereoPairDir(image_dir, FLAGS_cam_id, cam_id_r);
+    LOG(INFO) << "stereo run: left=" << image_dir << " right=" << image_dir_r;
+    loader.reset(new DataLoader{image_dir, image_dir_r, imu_dir});
+  } else {
+    loader.reset(new DataLoader{image_dir, imu_dir});
+  }
 
   // create estimator
   // auto est = std::make_unique<Estimator>(
   //     LoadJson(cfg["estimator_cfg"].asString()));
-  auto est = CreateSystem(
-      LoadJson(cfg["estimator_cfg"].asString()));
+  auto est = CreateSystem(est_cfg);
 
   // create viewer
   std::unique_ptr<Viewer> viewer;
@@ -68,10 +81,22 @@ int main(int argc, char **argv) {
         std::cout << i << "/" << loader->size() << std::endl;
       }
 
-      if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
+      // `StereoImage` does not derive from `Image`, so the two branches are
+      // mutually exclusive and a stereo pair cannot be mistaken for a left-only
+      // frame.
+      bool did_visual = false;
+      if (auto msg = dynamic_cast<msg::StereoImage *>(raw_msg)) {
+        auto image = cv::imread(msg->image_path_);
+        auto image_r = cv::imread(msg->image_path_r_);
+        est->VisualMeasStereo(msg->ts_, image, image_r);
+        did_visual = true;
+      } else if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
         auto image = cv::imread(msg->image_path_);
         est->VisualMeas(msg->ts_, image);
+        did_visual = true;
+      }
 
+      if (did_visual) {
         if (est->UsingLoopClosure()) {
           est->CloseLoop();
         }

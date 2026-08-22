@@ -106,6 +106,7 @@ add_library(xest STATIC
         mm.cpp
         mapper.cpp
         camera_manager.cpp
+        stereo.cpp
         imu.cpp)
 if (IS_MAC)
   target_link_libraries(xest INTERFACE ${deps} "-Wl, -framework OpenGL")
@@ -176,6 +177,48 @@ add_executable(unitTests_triangulation
                test/unittest_triangulation.cpp)
 target_link_libraries(unitTests_triangulation xest ${deps} gtest gtest_main)
 add_test(NAME Triangulation COMMAND unitTests_triangulation)
+
+add_executable(unitTests_stereo
+               test/unittest_stereo.cpp)
+target_link_libraries(unitTests_stereo xest ${deps} gtest gtest_main)
+add_test(NAME Stereo COMMAND unitTests_stereo)
+
+# Separate binary from unitTests_Jacobians on purpose: CameraManager's registry
+# is process-wide, and this one needs the real fisheye pair in slots 0/1 while
+# that one installs a perfect pinhole in slot 0.
+add_executable(unitTests_jacobians_stereo
+               test/unittest_jacobians_stereo.cpp)
+target_link_libraries(unitTests_jacobians_stereo xest ${deps} gtest gtest_main)
+add_test(NAME StereoJacobians COMMAND unitTests_jacobians_stereo)
+
+# Builds a whole system through CreateSystem (one Estimator per process, since
+# that factory is a singleton), so it also cannot share a process with the
+# pinhole-installing Jacobian tests.
+add_executable(unitTests_gravity_init
+               test/unittest_gravity_init.cpp)
+target_link_libraries(unitTests_gravity_init ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME GravityInit COMMAND unitTests_gravity_init)
+
+# Death tests, so each case forks a fresh CreateSystem singleton. Same linking
+# story as unitTests_gravity_init.
+add_executable(unitTests_memory_pools
+               test/unittest_memory_pools.cpp)
+target_link_libraries(unitTests_memory_pools ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME MemoryPools COMMAND unitTests_memory_pools)
+
+add_executable(unitTests_determinism
+               test/unittest_determinism.cpp)
+target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)
+add_test(NAME Determinism COMMAND unitTests_determinism)
+
+# The loader lives in xapp, so this one links the application library too.
+# jsoncpp is repeated after ${deps}: `common` sits after `jsoncpp` in that list
+# and pulls in Json symbols, which a single-pass static link cannot resolve
+# backwards.
+add_executable(unitTests_stereo_loader
+               test/unittest_stereo_loader.cpp)
+target_link_libraries(unitTests_stereo_loader ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME StereoLoader COMMAND unitTests_stereo_loader)
 
 if (BUILD_G2O)
   message(INFO ${libxivo})

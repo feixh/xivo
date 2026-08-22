@@ -26,6 +26,22 @@ struct Image : public Message {
   std::string image_path_;
 };
 
+/** A hardware-synchronized stereo pair.
+ *
+ * TUM-VI's two cameras share a trigger, so the left and right frames carry
+ * bit-identical timestamps and one `ts_` describes both. `DataLoader` refuses to
+ * emit a pair whose timestamps differ, so anything downstream may assume the two
+ * images are simultaneous.
+ */
+struct StereoImage : public Message {
+  StereoImage(const timestamp_t &ts, const std::string &image_path,
+              const std::string &image_path_r)
+      : Message{ts}, image_path_{image_path}, image_path_r_{image_path_r} {}
+
+  std::string image_path_;
+  std::string image_path_r_;
+};
+
 struct IMU : public Message {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 

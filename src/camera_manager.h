@@ -1,8 +1,10 @@
 // Singleton camera manager to create and manage different camera models.  
 // Author: Xiaohan Fei (feixh@cs.ucla.edu)
 #pragma once
+#include <memory>
 #include <ostream>
 #include <variant>
+#include <vector>
 
 #include "camera_autocalib.h"
 #include "alias.h"
@@ -23,8 +25,19 @@ public:
   using RadTan = A_RadialTangentialCamera;
   using Pinhole = A_PinholeCamera;
 
-  static CameraManager *Create(const Json::Value &cfg);
-  static CameraManager *instance() { return instance_.get(); }
+  /** Create the camera for slot `cam_id` (0 = left/primary). Calling this twice
+   * for the same slot leaves the existing camera in place, matching the
+   * original single-camera behaviour. */
+  static CameraManager *Create(const Json::Value &cfg, int cam_id = 0);
+  /** Camera for slot `cam_id`. `instance()` is the primary camera, so every
+   * existing monocular call site keeps working unchanged. */
+  static CameraManager *instance(int cam_id = 0) {
+    return cam_id >= 0 && cam_id < static_cast<int>(instances_.size())
+               ? instances_[cam_id].get()
+               : nullptr;
+  }
+  /** Number of cameras configured (1 for monocular, 2 for stereo). */
+  static int num_cameras() { return static_cast<int>(instances_.size()); }
 
   // project a point from camera coordinatex xc to pixel coordinates xp.
   // xc: a point in camera coordinates.
@@ -178,7 +191,7 @@ private:
   CameraManager(const CameraManager &) = delete;
 
   CameraManager(const Json::Value &cfg);
-  static std::unique_ptr<CameraManager> instance_;
+  static std::vector<std::unique_ptr<CameraManager>> instances_;
 
   int rows_, cols_;
   number_t fx_, fy_, cx_, cy_;

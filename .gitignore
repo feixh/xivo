@@ -1,4 +1,9 @@
 build
+# Variant builds from -DXIVO_OUTPUT_SUFFIX, which puts a differently-sized EKF
+# state beside the default build (see EKF_MAX_FEATURES in CMakeLists.txt).
+build_*
+bin_*
+lib_*
 .idea
 *.pyc
 estimator/*json
@@ -26,3 +31,6 @@ doc/latex/
 *.synctex.gz
 
 tumvi_*
+# ... but the tumvi configs are source, not output. Without this, generated
+# configs like cfg/tumvi_stereo.json are silently dropped from commits.
+!cfg/tumvi_*.json

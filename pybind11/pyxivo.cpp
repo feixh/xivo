@@ -5,6 +5,7 @@
 
 #include "estimator.h"
 #include "camera_manager.h"
+#include "stereo.h"
 #include "opencv2/core/eigen.hpp"
 #include "opencv2/highgui/highgui.hpp"
 #include "utils.h"
@@ -109,6 +110,30 @@ public:
 
     if (viewer_) {
       auto disp = Canvas::instance()->display();
+      if (!disp.empty()) {
+        LOG(INFO) << "Display image is ready";
+        viewer_->Update(disp);
+      }
+    }
+  }
+
+  void VisualMeasStereo(uint64_t ts, std::string &image_path,
+                        std::string &image_path_r) {
+
+    auto image = cv::imread(image_path);
+    auto image_r = cv::imread(image_path_r);
+    if (image.empty()) {
+      LOG(FATAL) << "failed to read left image " << image_path;
+    }
+    if (image_r.empty()) {
+      LOG(FATAL) << "failed to read right image " << image_path_r;
+    }
+
+    estimator_->VisualMeasStereo(timestamp_t{ts}, image, image_r);
+
+    if (viewer_) {
+      auto disp = Canvas::instance()->display();
+
       if (!disp.empty()) {
         LOG(INFO) << "Display image is ready";
         viewer_->Update(disp);
@@ -304,6 +329,53 @@ public:
 
   int num_tracker_new_detections() { return estimator_->num_tracker_new_detections(); }
 
+  int num_stereo_frames() { return estimator_->num_stereo_frames(); }
+
+  int num_stereo_matched() { return estimator_->num_stereo_matched(); }
+
+  int num_stereo_attempted() { return estimator_->num_stereo_attempted(); }
+
+  int num_stereo_rejected_klt() {
+    return estimator_->num_stereo_rejected_klt();
+  }
+
+  int num_stereo_rejected_epipolar() {
+    return estimator_->num_stereo_rejected_epipolar();
+  }
+
+  int num_stereo_rejected_circular() {
+    return estimator_->num_stereo_rejected_circular();
+  }
+
+  int num_stereo_rejected_disparity() {
+    return estimator_->num_stereo_rejected_disparity();
+  }
+
+  int num_stereo_init_ok() { return estimator_->num_stereo_init_ok(); }
+
+  int num_stereo_init_no_match() {
+    return estimator_->num_stereo_init_no_match();
+  }
+
+  int num_stereo_init_rejected() {
+    return estimator_->num_stereo_init_rejected();
+  }
+  int num_stereo_init_rej_degenerate() {
+    return estimator_->num_stereo_init_rej_degenerate();
+  }
+  int num_stereo_init_rej_gap() { return estimator_->num_stereo_init_rej_gap(); }
+  int num_stereo_init_rej_range() {
+    return estimator_->num_stereo_init_rej_range();
+  }
+  int num_stereo_init_rej_std() { return estimator_->num_stereo_init_rej_std(); }
+  int num_stereo_upd_used() { return estimator_->num_stereo_upd_used(); }
+  int num_stereo_upd_rej_geom() {
+    return estimator_->num_stereo_upd_rej_geom();
+  }
+  int num_stereo_upd_rej_mh() { return estimator_->num_stereo_upd_rej_mh(); }
+
+  bool StereoEnabled() { return StereoRig::enabled(); }
+
   bool UsingLoopClosure() {
     return estimator_->UsingLoopClosure();
   }
@@ -337,6 +409,7 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("InertialMeas", &EstimatorWrapper::InertialMeas)
       .def("VisualMeas", py::overload_cast<uint64_t, std::string &>(&EstimatorWrapper::VisualMeas))
       .def("VisualMeas", py::overload_cast<uint64_t, py::array_t<unsigned char, py::array::c_style | py::array::forcecast>>(&EstimatorWrapper::VisualMeas))
+      .def("VisualMeasStereo", &EstimatorWrapper::VisualMeasStereo)
       .def("VisualMeasTrackerOnly", py::overload_cast<uint64_t, std::string &>(&EstimatorWrapper::VisualMeasTrackerOnly))
       .def("VisualMeasTrackerOnly", py::overload_cast<uint64_t, py::array_t<unsigned char, py::array::c_style | py::array::forcecast>>(&EstimatorWrapper::VisualMeasTrackerOnly))
       .def("VisualMeasPointCloud", &EstimatorWrapper::VisualMeasPointCloud)
@@ -385,6 +458,24 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("num_tracker_outlier_rejected", &EstimatorWrapper::num_tracker_outlier_rejected)
       .def("num_tracker_failed_to_track", &EstimatorWrapper::num_tracker_failed_to_track)
       .def("num_tracker_new_detections", &EstimatorWrapper::num_tracker_new_detections)
+      .def("num_stereo_frames", &EstimatorWrapper::num_stereo_frames)
+      .def("num_stereo_matched", &EstimatorWrapper::num_stereo_matched)
+      .def("num_stereo_attempted", &EstimatorWrapper::num_stereo_attempted)
+      .def("num_stereo_rejected_klt", &EstimatorWrapper::num_stereo_rejected_klt)
+      .def("num_stereo_rejected_epipolar", &EstimatorWrapper::num_stereo_rejected_epipolar)
+      .def("num_stereo_rejected_circular", &EstimatorWrapper::num_stereo_rejected_circular)
+      .def("num_stereo_rejected_disparity", &EstimatorWrapper::num_stereo_rejected_disparity)
+      .def("num_stereo_init_ok", &EstimatorWrapper::num_stereo_init_ok)
+      .def("num_stereo_init_no_match", &EstimatorWrapper::num_stereo_init_no_match)
+      .def("num_stereo_init_rejected", &EstimatorWrapper::num_stereo_init_rejected)
+      .def("num_stereo_init_rej_degenerate", &EstimatorWrapper::num_stereo_init_rej_degenerate)
+      .def("num_stereo_init_rej_gap", &EstimatorWrapper::num_stereo_init_rej_gap)
+      .def("num_stereo_init_rej_range", &EstimatorWrapper::num_stereo_init_rej_range)
+      .def("num_stereo_init_rej_std", &EstimatorWrapper::num_stereo_init_rej_std)
+      .def("num_stereo_upd_used", &EstimatorWrapper::num_stereo_upd_used)
+      .def("num_stereo_upd_rej_geom", &EstimatorWrapper::num_stereo_upd_rej_geom)
+      .def("num_stereo_upd_rej_mh", &EstimatorWrapper::num_stereo_upd_rej_mh)
+      .def("StereoEnabled", &EstimatorWrapper::StereoEnabled)
       .def("UsingLoopClosure", &EstimatorWrapper::UsingLoopClosure)
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)
       .def("now", &EstimatorWrapper::now)

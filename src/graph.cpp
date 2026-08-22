@@ -298,8 +298,16 @@ std::vector<FeaturePtr> Graph::FindNewGaugeFeatures(GroupPtr g) {
   // Lambda function that checks whether or not features are collinear
   auto collinear_check = [](std::unordered_set<FeaturePtr> U,
                             number_t collinear_thresh) {
+    // `U` is keyed by pointer, so iterating it directly hands
+    // PointsAreCollinear its points in an order that depends on heap addresses
+    // -- and the collinearity verdict is a thresholded cross product, which is
+    // not invariant to which point plays the role of the base. Ordering by id
+    // makes the test reproducible. See notes-stereo/m3a-determinism.md.
+    std::vector<FeaturePtr> ordered(U.begin(), U.end());
+    std::sort(ordered.begin(), ordered.end(),
+              [](FeaturePtr a, FeaturePtr b) { return a->id() < b->id(); });
     std::vector<Vec3> gauge_xy_features_Xc;
-    for (auto f: U) {
+    for (auto f: ordered) {
       gauge_xy_features_Xc.push_back(f->Xc());
     }
     return PointsAreCollinear(gauge_xy_features_Xc, collinear_thresh);
