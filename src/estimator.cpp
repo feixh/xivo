@@ -397,6 +397,8 @@ Estimator::Estimator(const Json::Value &cfg)
   F_.setIdentity();
   G_.resize(kMotionSize, 12);
   G_.setZero();
+  Fcross_.setIdentity();
+  Fcross_pending_ = false;
 
   // Five of the eight keys every shipped config carries -- Tsb, Vsb, wb, ab and
   // Tbc -- were never read. `cfg/pcw.json` sets Vsb to 0.01 and got zero, with no
@@ -745,6 +747,11 @@ void Estimator::Propagate(bool visual_meas) {
     if (!simulation_) {
       LOG(WARNING) << "measurement timestamps coincide?";
     }
+    // Nothing to integrate, but a transition accumulated by earlier IMU samples
+    // may still be pending, and the caller is about to read the covariance.
+    if (visual_meas) {
+      FlushMotionStructureCorrelation();
+    }
     return;
   }
 
@@ -788,7 +795,39 @@ void Estimator::Propagate(bool visual_meas) {
   // Qmodel at zero, which is why this never showed up there; `cfg/pcw.json` sets
   // it nonzero.
   P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += Qmodel_ * dt;
+
+  // Everything downstream of a visual measurement -- the gates, the update, the
+  // slot bookkeeping -- reads the correlation blocks, so this is the point at
+  // which the deferred transition has to land. `Propagate(true)` is called first
+  // in each of the three visual entry points, so one flush here covers them all.
+  if (visual_meas) {
+    FlushMotionStructureCorrelation();
+  }
   timer_.Tock("propagation");
+}
+
+void Estimator::AccumulateMotionStructureCorrelation() {
+  Fcross_scratch_ = F_ * Fcross_;
+  Fcross_ = Fcross_scratch_;
+  Fcross_pending_ = true;
+}
+
+void Estimator::ApplyMotionStructureCorrelation(MatX &P) const {
+  if (!Fcross_pending_) {
+    return;
+  }
+  // Mirroring the upper block into the lower one, instead of recomputing it as
+  // `P * Fcross^T` the way the integrators used to, is valid only because the two
+  // blocks *are* transposes on entry. `MeasurementUpdate` guarantees that (it
+  // mirrors the whole matrix) and nothing between two updates breaks it: the
+  // propagation writes only the motion block and these two.
+  ApplyMotionTransition(P, Fcross_);
+}
+
+void Estimator::FlushMotionStructureCorrelation() {
+  ApplyMotionStructureCorrelation(P_);
+  Fcross_.setIdentity();
+  Fcross_pending_ = false;
 }
 
 void Estimator::Fehlberg(const Vec3 &gyro0, const Vec3 &accel0, number_t dt) {

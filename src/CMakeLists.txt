@@ -273,6 +273,14 @@ target_link_libraries(unitTests_ekf_update xest ${deps} gtest gtest_main)
 add_test(NAME EkfUpdate COMMAND unitTests_ekf_update
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The deferred motion-to-structure correlation update against the per-substep
+# application it replaced.
+add_executable(unitTests_propagate_cov
+               test/unittest_propagate_cov.cpp)
+target_link_libraries(unitTests_propagate_cov xest ${deps} gtest gtest_main)
+add_test(NAME PropagateCov COMMAND unitTests_propagate_cov
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(unitTests_determinism
                test/unittest_determinism.cpp)
 target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)

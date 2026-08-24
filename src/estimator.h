@@ -179,7 +179,15 @@ public:
   SE3 gsc() const { return gsb() * gbc(); }
   const State& X() const { return X_; }
   const timestamp_t &ts() const { return curr_time_; }
-  MatX P() const { return P_; }
+  MatX P() const {
+    MatX out = P_;
+    // The motion-to-structure correlation is brought up to date lazily, once
+    // per image, so between images the member is stale by a known transition.
+    // Apply it to the copy rather than materializing it in `P_`, which would
+    // make this accessor a mutation.
+    ApplyMotionStructureCorrelation(out);
+    return out;
+  }
   MatX Pstate() const { return P_.block<9,9>(0,0); }
   MatX CameraCov() const {
 #ifdef USE_ONLINE_CAMERA_CALIB
@@ -357,6 +365,25 @@ private:
   void RK4(const Vec3 &gyro0, const Vec3 &accel0, number_t dt);
   /** perform one-step in RK4 integration (4 inner steps) */
   void RK4Step(const Vec3 &gyro0, const Vec3 &accel0, number_t dt);
+
+  /** Records one integration step's transition `F_` against the motion-to-
+   *  structure correlation blocks of `P_` *without touching them*.
+   *
+   *  Those blocks are `P[0:24, 24:]` and its transpose -- 24x540, 100 kB each --
+   *  and each integration step used to rewrite both. There are ~3 Prince-Dormand
+   *  steps per IMU sample and ~10 IMU samples per image, so that is ~30 rewrites
+   *  of 200 kB per image, while nothing reads the blocks until the visual update.
+   *  Since the effect of n steps is the product `F_n ... F_1` applied once, the
+   *  transition is accumulated here and applied by
+   *  `FlushMotionStructureCorrelation` before anything can observe it. */
+  void AccumulateMotionStructureCorrelation();
+  /** Applies what `AccumulateMotionStructureCorrelation` has recorded to `P_`
+   *  and resets the accumulator. Called at the end of the propagation that
+   *  precedes an image; a no-op if nothing is pending. */
+  void FlushMotionStructureCorrelation();
+  /** The pending transition applied to an arbitrary covariance, for the const
+   *  accessors. No-op if nothing is pending. */
+  void ApplyMotionStructureCorrelation(MatX &P) const;
 
   /** Top-level function for EKF update phase. Calls ProcessTracks, outlier
    *  rejection, EKF measurement update, and bookkeeps features and groups. */
@@ -656,6 +683,13 @@ private:
   /** Error state noise input-matrix Jacobian; Used for covariance update in EKF's
    *  prediction step. */
   Eigen::SparseMatrix<number_t> G_;
+  /** The product of every `F_` since the motion-to-structure correlation blocks
+   *  of `P_` were last brought up to date, and whether that product is anything
+   *  other than the identity. See
+   *  `AccumulateMotionStructureCorrelation`. `Fcross_scratch_` exists only so
+   *  the accumulating product does not alias its own destination. */
+  MatMotion Fcross_, Fcross_scratch_;
+  bool Fcross_pending_;
   /** Filter covariance. Size grows and shrinks with the number of tracked
    *  features. */
   MatX P_;

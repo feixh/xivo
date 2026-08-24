@@ -258,6 +258,37 @@ inline Mat2 InnovationCov(const Eigen::MatrixBase<JDerived> &J,
   return S;
 }
 
+constexpr int kStructureSize = kFullSize - kMotionSize;
+using MatMotion = Eigen::Matrix<number_t, kMotionSize, kMotionSize>;
+
+/** Propagates the motion-to-structure correlation of `P` through one motion
+ *  transition `F`: `P[0:24, 24:] <- F P[0:24, 24:]`, and the lower block to the
+ *  transpose of the result.
+ *
+ *  The integrators used to do this inline, once per substep, rewriting both
+ *  blocks -- 24x540, ~100 kB each -- ~30 times per image even though nothing
+ *  reads them until the visual update. They now accumulate `F` across substeps
+ *  and call this once per image instead; because the transition is linear,
+ *  `F_n (... (F_1 P)) == (F_n ... F_1) P` exactly in algebra, and the 24x24
+ *  products that replace them are free by comparison.
+ *
+ *  Mirroring the upper block into the lower one, rather than forming
+ *  `P[24:, 0:24] F^T` on its own as the old code did, halves the work. It does
+ *  not change the numbers: the two products sum the same terms in the same order
+ *  inside Eigen's gemm, so the old form came out bit-for-bit symmetric as well
+ *  (`unitTests_propagate_cov` pins that). The difference is that the mirror is
+ *  symmetric by construction rather than by a property of the gemm kernel.
+ *
+ *  A free function rather than an `Estimator` member so the test can drive it
+ *  with an arbitrary `P` and compare against the per-step reference. */
+template <typename FDerived>
+inline void ApplyMotionTransition(MatX &P, const Eigen::MatrixBase<FDerived> &F) {
+  P.block<kMotionSize, kStructureSize>(0, kMotionSize) =
+      F * P.block<kMotionSize, kStructureSize>(0, kMotionSize);
+  P.block<kStructureSize, kMotionSize>(kMotionSize, 0) =
+      P.block<kMotionSize, kStructureSize>(0, kMotionSize).transpose();
+}
+
 // frequency to project rotation matrices to SO3 to get rid of the accumulated numeric error
 #ifdef ENFORCE_SO3_FREQ
 constexpr int kEnforceSO3Freq = ENFORCE_SO3_FREQ;

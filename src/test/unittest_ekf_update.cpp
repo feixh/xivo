@@ -22,13 +22,6 @@ using namespace xivo;
 
 namespace {
 
-/** A covariance shaped like the filter's: symmetric positive definite on the
- *  occupied slots, exactly zero on the vacant ones.
- *
- *  The zero slots matter -- `P_` is always the full `kFullSize` square with
- *  unoccupied feature and group slots zeroed, so a real `S` is built from a
- *  matrix that is singular, and `EkfUpdateDowndate` must still find a Cholesky
- *  factor of `S = H P H^T + R` (it does: `R > 0`). */
 /** The rows/columns of `P` an update with `n_groups` groups and `n_feats`
  *  features touches; everything else is a vacant slot, held at exactly zero. */
 std::vector<int> LiveIndices(int n_groups, int n_feats) {
@@ -44,6 +37,13 @@ std::vector<int> LiveIndices(int n_groups, int n_feats) {
   return live;
 }
 
+/** A covariance shaped like the filter's: symmetric positive definite on the
+ *  occupied slots, exactly zero on the vacant ones.
+ *
+ *  The zero slots matter -- `P_` is always the full `kFullSize` square with
+ *  unoccupied feature and group slots zeroed, so a real `S` is built from a
+ *  matrix that is singular, and `EkfUpdateDowndate` must still find a Cholesky
+ *  factor of `S = H P H^T + R` (it does: `R > 0`). */
 MatX MakeP(int n_groups, int n_feats, unsigned seed) {
   std::default_random_engine gen(seed);
   std::normal_distribution<number_t> nrm(0.0, 1.0);

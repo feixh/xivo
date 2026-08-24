@@ -94,12 +94,9 @@ void Estimator::RK4Step(const Vec3 &gyro0, const Vec3 &accel0, number_t dt) {
 
   P_.block<kMotionSize, kMotionSize>(0, 0) =
       P_.block<kMotionSize, kMotionSize>(0, 0) + PK * dt;
-  // update the correlation between motion and structure state
-  P_.block<kMotionSize, kFullSize - kMotionSize>(0, kMotionSize) =
-      F_ * P_.block<kMotionSize, kFullSize - kMotionSize>(0, kMotionSize);
-  P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) =
-      P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) *
-      F_.transpose();
+  // Deferred to one application per image; see
+  // `AccumulateMotionStructureCorrelation`.
+  AccumulateMotionStructureCorrelation();
 }
 
 } // namespace xivo

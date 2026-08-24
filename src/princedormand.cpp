@@ -223,12 +223,10 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   F_ = F_ + FK * dt;
 
   P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += PK * dt;
-  // update the correlation between motion and structure state
-  P_.block<kMotionSize, kFullSize - kMotionSize>(0, kMotionSize) =
-      F_ * P_.block<kMotionSize, kFullSize - kMotionSize>(0, kMotionSize);
-  P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) =
-      P_.block<kFullSize - kMotionSize, kMotionSize>(kMotionSize, 0) *
-      F_.transpose();
+  // Record this step's contribution to the motion-to-structure correlation
+  // instead of rewriting the two 24x540 blocks, which nothing reads until the
+  // next image.
+  AccumulateMotionStructureCorrelation();
   // The embedded 4th-order solution differs from the 5th-order one by this
   // combination of the stage slopes (Prince-Dormand v3(4,5); see reference 1),
   // which is the local truncation error estimate the step controller in
