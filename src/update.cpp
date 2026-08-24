@@ -348,18 +348,28 @@ void Estimator::FilterUpdate(int oos_rows) {
   H_.setZero(total_size, err_.size());
   inn_.setZero(total_size);
   diagR_.resize(total_size);
+  // The sparsity of each row block, recorded as it is written: a feature's rows
+  // (both cameras') are nonzero only in the motion columns, its reference
+  // group's slot and its own, which is what the update exploits. Nothing here
+  // depends on it being right except the speed of `H P` -- but `MeasBlock` is
+  // also what says the block *is* dense when it is (the out-of-state rows
+  // below), so it has to be filled for every row of `H_`.
+  meas_blocks_.clear();
 
   int row = 0;
   for (int i = 0; i < in_current_ekf_update_.size(); ++i) {
     auto f = in_current_ekf_update_[i];
+    const int gsind = f->ref()->sind();
     f->FillJacobianBlock(H_, row);
     inn_.segment<2>(row) = f->inn();
     diagR_.segment<2>(row) << R_, R_;
+    meas_blocks_.push_back({row, 2, gsind, f->sind()});
     row += 2;
     if (f->right_jac_valid()) {
       f->FillRightJacobianBlock(H_, row);
       inn_.segment<2>(row) = f->inn_r();
       diagR_.segment<2>(row) << Rr, Rr;
+      meas_blocks_.push_back({row, 2, gsind, f->sind()});
       row += 2;
     }
   }
@@ -378,12 +388,16 @@ void Estimator::FilterUpdate(int oos_rows) {
     H_.block(offset, 0, n, err_.size()) = f->Ho();
     inn_.segment(offset, n) = f->ro();
     diagR_.segment(offset, n).setConstant(Roos_);
+    // Dense: the marginalized rows span every group the track was observed
+    // from, up to `oos_options_.max_observations` of them, and the left-nullspace
+    // projection mixes them.
+    meas_blocks_.push_back({offset, n, -1, -1});
     offset += n;
   }
   CHECK_EQ(offset, total_size);
 
   timer_.Tick("actual-update");
-  UpdateJosephForm();
+  MeasurementUpdate();
   timer_.Tock("actual-update");
 
   // absorb error
@@ -424,6 +438,11 @@ void Estimator::CloseLoopInternal(GroupPtr g, std::vector<LCMatch>& matched_feat
   H_.setZero(total_size, err_.size());
   diagR_.resize(total_size);
   inn_.setZero(total_size);
+  // `ComputeLCJacobian` writes the loop-closed group's columns as well as the
+  // matched feature's, i.e. two groups per row block, so these rows do not have
+  // the shape `MeasBlock` describes; treated as dense.
+  meas_blocks_.clear();
+  meas_blocks_.push_back({0, total_size, -1, -1});
 
   // Compute feature Jacobians (fill in H)
   for (int i=0; i<num_matches; i++) {
@@ -449,7 +468,7 @@ void Estimator::CloseLoopInternal(GroupPtr g, std::vector<LCMatch>& matched_feat
   instate_groups_ = Graph::instance()->GetInstateGroups();
 
   // Measurement Update
-  UpdateJosephForm();
+  MeasurementUpdate();
   AbsorbError();
 #endif
 }
@@ -565,16 +584,19 @@ Estimator::OnePointRANSAC(const std::vector<FeaturePtr> &mh_inliers) {
     H_.setZero(2 * max_inliers.size(), size);
     inn_.setZero(2 * max_inliers.size());
     diagR_.resize(2 * max_inliers.size());
+    meas_blocks_.clear();
     int f_cnt = 0;
     for (int i = 0; i < mh_inliers.size(); ++i) {
       if (is_low_innovation_inlier[i]) {
-        H_.block(2 * f_cnt, 0, 2, size) = mh_inliers[i]->J();
-        inn_.segment<2>(2 * f_cnt) = mh_inliers[i]->inn();
+        auto f = mh_inliers[i];
+        H_.block(2 * f_cnt, 0, 2, size) = f->J();
+        inn_.segment<2>(2 * f_cnt) = f->inn();
         diagR_.segment<2>(2 * f_cnt) << R_, R_;
+        meas_blocks_.push_back({2 * f_cnt, 2, f->ref()->sind(), f->sind()});
         f_cnt++;
       }
     }
-    UpdateJosephForm();
+    MeasurementUpdate();
     AbsorbError();
   }
 

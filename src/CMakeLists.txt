@@ -109,6 +109,7 @@ add_library(xest STATIC
         tracker.cpp
         manager.cpp
         update.cpp
+        ekf_update.cpp
         graphbase.cpp
         graph.cpp
         feature.cpp
@@ -262,6 +263,14 @@ add_executable(unitTests_memory_pools
                test/unittest_memory_pools.cpp)
 target_link_libraries(unitTests_memory_pools ${libxivo} ${deps} jsoncpp gtest gtest_main)
 add_test(NAME MemoryPools COMMAND unitTests_memory_pools
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# The fast covariance update against the dense Joseph form it replaced. No
+# camera or system state involved, so it needs nothing but xest.
+add_executable(unitTests_ekf_update
+               test/unittest_ekf_update.cpp)
+target_link_libraries(unitTests_ekf_update xest ${deps} gtest gtest_main)
+add_test(NAME EkfUpdate COMMAND unitTests_ekf_update
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_determinism

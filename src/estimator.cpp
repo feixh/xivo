@@ -1537,37 +1537,18 @@ void Estimator::Predict(std::list<FeaturePtr> &features) {
   }
 }
 
-void Estimator::UpdateJosephForm() {
-
-  S_ = H_ * P_ * H_.transpose();
-
-  for (int i = 0; i < diagR_.size(); ++i) {
-    S_(i, i) += diagR_(i);
+void Estimator::MeasurementUpdate() {
+  // The cheap form, which needs the Cholesky factor of the innovation
+  // covariance; if that does not exist the covariance has already gone
+  // indefinite (or `S` is beyond double precision), and the Joseph form is both
+  // the more robust update and the one this code shipped with. That fallback has
+  // never triggered on TUM-VI, so it is logged rather than silently taken.
+  if (EkfUpdateDowndate(P_, H_, inn_, diagR_, meas_blocks_, err_)) {
+    return;
   }
-
-  K_.setZero(err_.size(), H_.rows());
-  K_.transpose() = S_.ldlt().solve(H_ * P_);
-  err_ = K_ * inn_;
-
-  // I_KH_.noalias() = -K_ * H_;
-  // for (int i = 0; i < err_.size(); ++i) {
-  //   I_KH_(i, i) += 1;
-  // }
-
-  // Here, I_KH is actually KH - I, but since
-  // update of P is quadratic in I_KH, so it does not matter.
-  I_KH_ = K_ * H_;
-  for (int i = 0; i < err_.size(); ++i) {
-    I_KH_(i, i) -= 1;
-  }
-  P_ = I_KH_ * P_ * I_KH_.transpose();
-
-  int kr = K_.rows();
-  int kc = K_.cols();
-  for (int i = 0; i < kc; ++i) {
-    K_.block(0, i, kr, 1) *= sqrt(diagR_(i));
-  }
-  P_.noalias() +=  K_ * K_.transpose();
+  LOG(WARNING) << "innovation covariance is not positive definite; falling back "
+                  "to the Joseph form of the update";
+  EkfUpdateJoseph(P_, H_, inn_, diagR_, err_);
 }
 
 std::tuple<number_t, bool> Estimator::HuberOnInnovation(const Vec2 &inn,

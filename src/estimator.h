@@ -24,6 +24,7 @@
 
 #include "component.h"
 #include "core.h"
+#include "ekf_update.h"
 #include "graph.h"
 #include "imu.h"
 #include "tracker.h"
@@ -331,8 +332,11 @@ private:
    *  update `slope_accel_` and `slope_gyro_`. If `visual_meas` is set to `true`, we
    *  use `slope_accel_` and `slope_gyro` to adjust the last IMU measurement. */
   void Propagate(bool visual_meas);
-  /** kalman filter update step -- uses Joseph form */
-  void UpdateJosephForm();
+  /** The EKF measurement update on `P_`, `err_` from `H_`, `inn_`, `diagR_` and
+   *  `meas_blocks_`. Takes the cheap symmetric-downdate form, and falls back to
+   *  the Joseph form if the innovation covariance has no Cholesky factor; both
+   *  live in ekf_update.h. */
+  void MeasurementUpdate();
   /** Predicts measurement (pixels) of features in input. */
   void Predict(std::list<FeaturePtr> &features);
   /** compute the motion jacobian F and G (private members `F_` and `G_`) at the
@@ -676,14 +680,13 @@ private:
 
   /** Set to true once update has been initialized */
   bool MeasurementUpdateInitialized_;
-  /** Filter predicted covariance */
-  MatX S_;
-  /** Filter Kalman gain */
-  MatX K_;
   /** Filter measurement Jacobian */
   MatX H_;
-  /** The matrix `I-K*H` used in the Kalman Filter measurement update */
-  MatX I_KH_;
+  /** The row blocks of `H_` and their sparsity, filled alongside it. See
+   *  `MeasBlock` in ekf_update.h: recording which slots each block belongs to is
+   *  what lets `H P` be formed from the 25 columns per measurement that can be
+   *  nonzero. */
+  std::vector<MeasBlock> meas_blocks_;
   /** Filter innovation */
   VecX inn_;
   /** Diagonal of visual feature measurement covariance used in the filter.
