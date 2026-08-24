@@ -5,6 +5,7 @@
 // 4) status of components, etc.
 // Author: Xiaohan Fei (feixh@cs.ucla.edu)
 #pragma once
+#include <array>
 #include <chrono>
 #include <exception>
 #include <iostream>
@@ -103,6 +104,159 @@ constexpr int kMaxGroup = 15;
 constexpr int kGroupBegin = kCameraBegin + kMaxCameraIntrinsics;
 constexpr int kFeatureBegin = kGroupBegin + kGroupSize * kMaxGroup;
 constexpr int kFullSize = kFeatureBegin + kFeatureSize * kMaxFeature;
+
+////////////////////////////////////////
+// SPARSITY OF A VISUAL MEASUREMENT
+////////////////////////////////////////
+/** A contiguous run of error-state columns. */
+struct ColRun {
+  int start;
+  int len;
+};
+
+/** The column runs of a visual-measurement Jacobian that
+ *  `Feature::ComputeJacobian` actually writes, other than the two that depend on
+ *  which slots the feature and its reference group occupy.
+ *
+ *  A Jacobian row block is stored full width (`Eigen::Matrix<number_t, 2,
+ *  kFullSize>`), but only a handful of its column blocks can ever be nonzero:
+ *  a measurement of one feature says nothing about `Vsb`, `ba` or `Wsg`, nothing
+ *  about any group but its own reference group, and nothing about any other
+ *  feature. At the shipped capacity that is 25 columns of 564, so a dense
+ *  `J * P * J^T` spends 96% of its arithmetic multiplying by structural zero.
+ *
+ *  Kept here beside `Index` and written with the same `#ifdef`s as
+ *  `ComputeJacobian` so the two cannot drift apart; `unitTests_jacobians_stereo`
+ *  pins the correspondence in both directions: everything outside these runs is
+ *  exactly zero, and every column the finite-difference tests find live is
+ *  inside one of them. Runs are merged where the layout makes them adjacent,
+ *  which the `static_assert`s below enforce -- fewer, longer runs make the
+ *  gather cheaper.
+ *
+ *  A run that is present but zero is deliberately *kept* rather than trimmed:
+ *  including a zero column changes no result, whereas omitting a nonzero one
+ *  silently corrupts the filter. That is why the camera-intrinsics run covers
+ *  all `kMaxCameraIntrinsics` columns and not the `Camera::dim()` of them that
+ *  are live.
+ */
+static_assert(Index::Tsb == Index::Wsb + 3, "Wsb and Tsb must be adjacent");
+static_assert(Index::Tbc == Index::Wbc + 3, "Wbc and Tbc must be adjacent");
+
+constexpr std::array<ColRun, 4
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+                            + 1
+#ifdef USE_ONLINE_IMU_CALIB
+                            + 1
+#endif
+#endif
+#ifdef USE_ONLINE_CAMERA_CALIB
+                            + 1
+#endif
+                     >
+    kJacSharedRuns{{
+        {Index::Wsb, 6}, // Wsb and Tsb
+        {Index::bg, 3},
+        {Index::Wbc, 6}, // Wbc and Tbc
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+        {Index::td, 1},
+#ifdef USE_ONLINE_IMU_CALIB
+        {Index::Cg, 9},
+#endif
+#endif
+#ifdef USE_ONLINE_CAMERA_CALIB
+        {kCameraBegin, kMaxCameraIntrinsics},
+#endif
+        // Sentinel, replaced per feature by its reference group's run.
+        {kGroupBegin, kGroupSize},
+    }};
+
+/** Number of column runs in one measurement: the shared ones (the last of which
+ *  is the group sentinel) plus the feature's own. */
+constexpr int kJacRuns = static_cast<int>(kJacSharedRuns.size()) + 1;
+
+constexpr int SumRunLengths() {
+  int n = 0;
+  for (const auto &r : kJacSharedRuns)
+    n += r.len;
+  return n + kFeatureSize;
+}
+/** Width of one measurement's compacted Jacobian: 25 at the shipped capacity. */
+constexpr int kJacCols = SumRunLengths();
+
+static_assert(kJacCols <= kFullSize, "compacted Jacobian cannot exceed the state");
+
+/** A measurement's column runs, given the state slots its feature and reference
+ *  group occupy (`Feature::sind()` and `Group::sind()`). */
+inline void MeasurementRuns(int gsind, int fsind, ColRun (&runs)[kJacRuns]) {
+  int n = 0;
+  for (const auto &r : kJacSharedRuns)
+    runs[n++] = r;
+  runs[n - 1] = {kGroupBegin + kGroupSize * gsind, kGroupSize}; // the sentinel
+  runs[n++] = {kFeatureBegin + kFeatureSize * fsind, kFeatureSize};
+}
+
+using JacCompact = Eigen::Matrix<number_t, 2, kJacCols>;
+using CovCompact = Eigen::Matrix<number_t, kJacCols, kJacCols>;
+
+/** Gathers the `kJacCols` columns named by `runs` out of a full-width row block.
+ *  `dst` has as many rows as `src`. */
+template <typename Derived, typename Dst>
+inline void GatherCols(const Eigen::MatrixBase<Derived> &src,
+                       const ColRun (&runs)[kJacRuns], Dst &dst) {
+  int c = 0;
+  for (const auto &r : runs) {
+    dst.middleCols(c, r.len) = src.middleCols(r.start, r.len);
+    c += r.len;
+  }
+}
+
+/** Gathers the symmetric `kJacCols x kJacCols` submatrix of `P` on the rows and
+ *  columns named by `runs`. */
+template <typename Derived>
+inline void GatherCov(const Eigen::MatrixBase<Derived> &P,
+                      const ColRun (&runs)[kJacRuns], CovCompact &dst) {
+  int ci = 0;
+  for (const auto &ri : runs) {
+    int cj = 0;
+    for (const auto &rj : runs) {
+      dst.block(ci, cj, ri.len, rj.len) =
+          P.block(ri.start, rj.start, ri.len, rj.len);
+      cj += rj.len;
+    }
+    ci += ri.len;
+  }
+}
+
+/** Innovation covariance `J P J^T + R I` of one 2-row visual measurement,
+ *  formed from the `kJacCols x kJacCols` slice of `P` that `J` can actually
+ *  reach rather than from all of it. `gsind` and `fsind` are the state slots of
+ *  the measurement's reference group and feature (`Group::sind()`,
+ *  `Feature::sind()`).
+ *
+ *  Not bit-identical to the dense `J * P * J.transpose()`: compacting changes
+ *  which nonzero products land in the same accumulation block inside Eigen's
+ *  gemm, so the sums are reassociated. `unitTests_jacobians_stereo` checks the
+ *  two agree to 1e-12 relative, and that a real `ComputeJacobian` output is exactly
+ *  zero outside these runs -- which is what makes the two equal in the first
+ *  place.
+ *
+ *  A free function rather than an `Estimator` member so that the test can hand
+ *  it an arbitrary `P` and compare against the dense product. */
+template <typename JDerived, typename PDerived>
+inline Mat2 InnovationCov(const Eigen::MatrixBase<JDerived> &J,
+                          const Eigen::MatrixBase<PDerived> &P, int gsind,
+                          int fsind, number_t R) {
+  ColRun runs[kJacRuns];
+  MeasurementRuns(gsind, fsind, runs);
+  JacCompact Jc;
+  GatherCols(J, runs, Jc);
+  CovCompact Pc;
+  GatherCov(P, runs, Pc);
+  Mat2 S = Jc * Pc * Jc.transpose();
+  S(0, 0) += R;
+  S(1, 1) += R;
+  return S;
+}
 
 // frequency to project rotation matrices to SO3 to get rid of the accumulated numeric error
 #ifdef ENFORCE_SO3_FREQ

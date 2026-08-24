@@ -59,13 +59,13 @@ std::vector<FeaturePtr> Estimator::MHGating() {
 
   // Compute Mahalanobis distance
   for (auto f: instate_features_) {
-    const auto &J = f->J();
     const auto &res = f->inn();
 
-    // Mahalanobis gating
-    Mat2 S = J * P_ * J.transpose();
-    S(0, 0) += R_;
-    S(1, 1) += R_;
+    // Mahalanobis gating. The 25 columns of `J` that can be nonzero reach only a
+    // 25x25 slice of `P_`; the dense product read all 2.5 MB of it once per
+    // in-state feature, ~90 times a frame, which made this bandwidth-bound and
+    // the third-largest cost in the system.
+    Mat2 S = InnovationCov(f->J(), P_, f->ref()->sind(), f->sind(), R_);
     number_t mh_dist = res.dot(S.llt().solve(res));
     dist.push_back(mh_dist);
   }
@@ -165,11 +165,11 @@ void Estimator::GateStereoMeasurements() {
     // threshold family as `MHGating`. Separate from the left gate on purpose:
     // the left track and the left->right match fail independently, and a wrong
     // right match should cost only its two rows.
-    const auto &Jr = f->Jr();
     const Vec2 &res = f->inn_r();
-    Mat2 S = Jr * P_ * Jr.transpose();
-    S(0, 0) += Rr;
-    S(1, 1) += Rr;
+    // The right rows have the same column structure as the left: the same motion
+    // states, the same reference group, the same feature. `Rc1c0` is a constant,
+    // not a state.
+    Mat2 S = InnovationCov(f->Jr(), P_, f->ref()->sind(), f->sind(), Rr);
     number_t mh_dist = res.dot(S.llt().solve(res));
     // A non-finite distance never compares less than the threshold, so this
     // also catches a singular S.
@@ -592,12 +592,9 @@ Estimator::OnePointRANSAC(const std::vector<FeaturePtr> &mh_inliers) {
 
         f->ComputeJacobian(X_.Rsb.matrix(), X_.Tsb, X_.Rbc.matrix(), X_.Tbc, last_gyro_,
                            imu_.Cg(), X_.bg, X_.Vsb, X_.td);
-        auto J = f->J();
         auto res = f->inn();
 
-        Mat2 S = J * P_ * J.transpose();
-        S(0, 0) += R_;
-        S(1, 1) += R_;
+        Mat2 S = InnovationCov(f->J(), P_, f->ref()->sind(), f->sind(), R_);
         if (res.dot(S.llt().solve(res)) < ransac_Chi2_) {
           hi_inliers.push_back(f);
         } else {

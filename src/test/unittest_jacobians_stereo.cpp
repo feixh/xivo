@@ -390,3 +390,135 @@ TEST_F(StereoJacobiansTest, PointBehindTheRightCameraContributesNoRows) {
   ASSERT_LT(Xc1(2), 0.0) << "the fixture failed to put the point behind cam1";
   EXPECT_FALSE(f->right_jac_valid());
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// The compacted innovation covariance (M1).
+//
+// `InnovationCov` (core.h) evaluates `J P J^T + R I` from the `kJacCols` columns
+// of `P` that `J` can reach instead of all `kFullSize` of them. That is only
+// equal to the dense product if `J` really is zero everywhere else, so the two
+// claims are tested together and against *both* cameras' rows.
+////////////////////////////////////////////////////////////////////////////////
+namespace {
+
+/** A symmetric positive-definite matrix the size of `P_`, deterministic and
+ *  built once: 564x564 is large enough that rebuilding it per test is the
+ *  slowest thing in this binary. Off-diagonal correlations are strong (a random
+ *  Gram matrix), which is what makes the skipped-column claim load-bearing --
+ *  with a diagonal `P` the compaction would be trivially correct. */
+const MatX &RandomP() {
+  static const MatX P = [] {
+    std::default_random_engine gen(11);
+    std::normal_distribution<number_t> n(0.0, 1.0);
+    MatX A(kFullSize, kFullSize);
+    for (int i = 0; i < kFullSize; ++i)
+      for (int j = 0; j < kFullSize; ++j)
+        A(i, j) = n(gen);
+    return (A * A.transpose() / kFullSize +
+            0.1 * MatX::Identity(kFullSize, kFullSize))
+        .eval();
+  }();
+  return P;
+}
+
+/** `J` with every column `MeasurementRuns` claims for this measurement blanked,
+ *  i.e. the part the compacted product silently drops. */
+Eigen::Matrix<number_t, 2, kFullSize>
+OutsideTheRuns(const Eigen::Matrix<number_t, 2, kFullSize> &J, int gsind,
+               int fsind) {
+  ColRun runs[kJacRuns];
+  MeasurementRuns(gsind, fsind, runs);
+  Eigen::Matrix<number_t, 2, kFullSize> rest = J;
+  for (const auto &r : runs) {
+    rest.middleCols(r.start, r.len).setZero();
+  }
+  return rest;
+}
+
+} // namespace
+
+TEST_F(StereoJacobiansTest, MeasurementRunsCoverEveryLiveBlock) {
+  // The complement of this is `NothingOutsideTheMeasurementRunsIsNonzero` below,
+  // which would also pass if the runs covered the whole state. Together they pin
+  // `kJacSharedRuns` to exactly what `ComputeJacobian` writes, so the two cannot
+  // drift apart as columns are added.
+  ColRun runs[kJacRuns];
+  MeasurementRuns(group->sind(), f->sind(), runs);
+
+  int total = 0;
+  for (const auto &r : runs) {
+    total += r.len;
+  }
+  EXPECT_EQ(total, kJacCols) << "MeasurementRuns and kJacCols disagree";
+
+  for (auto [col, width] : LiveBlocks()) {
+    bool covered = false;
+    for (const auto &r : runs) {
+      if (col >= r.start && col + width <= r.start + r.len) {
+        covered = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(covered) << "live block at column " << col << " (width " << width
+                         << ") is not in any column run; the compacted update "
+                            "would drop it";
+  }
+}
+
+TEST_F(StereoJacobiansTest, NothingOutsideTheMeasurementRunsIsNonzero) {
+  // At slots other than 0/0, so that a run computed with the wrong stride would
+  // leave the real group/feature columns outside and fail here. The left rows are
+  // covered as well as the right: `MHGating` compacts both.
+  group->SetSind(7);
+  f->SetSind(33);
+  f->ComputeJacobian(gsb_nom.so3().matrix(), gsb_nom.translation(),
+                     gbc_nom.so3().matrix(), gbc_nom.translation(), gyro,
+                     Cg_nom, bg_nom, Vsb_nom, td_nom);
+  ASSERT_TRUE(f->right_jac_valid());
+
+  EXPECT_EQ(OutsideTheRuns(f->J_, 7, 33).norm(), 0.0);
+  EXPECT_EQ(OutsideTheRuns(f->J_r_, 7, 33).norm(), 0.0);
+}
+
+TEST_F(StereoJacobiansTest, CompactInnovationCovMatchesTheDenseProduct) {
+  const number_t R = 1.5;
+
+  for (auto [gsind, fsind] : {std::pair<int, int>{0, 0},
+                              std::pair<int, int>{7, 33},
+                              std::pair<int, int>{kMaxGroup - 1,
+                                                  kMaxFeature - 1}}) {
+    group->SetSind(gsind);
+    f->SetSind(fsind);
+    f->ComputeJacobian(gsb_nom.so3().matrix(), gsb_nom.translation(),
+                       gbc_nom.so3().matrix(), gbc_nom.translation(), gyro,
+                       Cg_nom, bg_nom, Vsb_nom, td_nom);
+    ASSERT_TRUE(f->right_jac_valid());
+
+    const MatX &P = RandomP();
+    for (const auto *J : {&f->J_, &f->J_r_}) {
+      Mat2 dense = (*J) * P * J->transpose();
+      dense(0, 0) += R;
+      dense(1, 1) += R;
+      Mat2 compact = InnovationCov(*J, P, gsind, fsind, R);
+      // Relative, not absolute: `S` here is O(1e5) (a 190 px focal length
+      // squared times an O(1) covariance). Reassociating the sums is the only
+      // difference allowed, so the tolerance is a few ulps of the magnitude.
+      EXPECT_LT((compact - dense).norm() / dense.norm(), 1e-12)
+          << "slots " << gsind << "/" << fsind << "\ndense =\n"
+          << dense << "\ncompact =\n"
+          << compact;
+    }
+  }
+}
+
+TEST_F(StereoJacobiansTest, CompactInnovationCovDependsOnTheRightSlots) {
+  // Guards the test above from passing vacuously: if the group and feature
+  // columns of `J` were zero (or the runs pointed at the wrong slots and got
+  // zeros), reading the *wrong* slots would give the same answer.
+  const MatX &P = RandomP();
+  Mat2 right = InnovationCov(f->J_, P, group->sind(), f->sind(), 1.5);
+  Mat2 wrong_group = InnovationCov(f->J_, P, group->sind() + 1, f->sind(), 1.5);
+  Mat2 wrong_feat = InnovationCov(f->J_, P, group->sind(), f->sind() + 1, 1.5);
+  EXPECT_GT((wrong_group - right).norm() / right.norm(), 1e-6);
+  EXPECT_GT((wrong_feat - right).norm() / right.norm(), 1e-6);
+}
