@@ -778,6 +778,30 @@ private:
    *  processing, tracker, update tracker, jacobian, MH gating. (Those quantities
    *  overlap). */
   Timer timer_;
+
+  /** Occupancy and measurement-size census, accumulated over the run and printed
+   *  next to the timing block under `print_timing`.
+   *
+   *  The cost of the update is cubic in the *dimension* of the error state and
+   *  linear in the number of measurement rows, and both are decided at run time
+   *  by how many slots are actually occupied -- not by the compile-time capacity.
+   *  `P_` is nonetheless always the full `kFullSize` square, with vacated slots
+   *  zeroed rather than excluded, so knowing the gap between occupancy and
+   *  capacity is what decides whether compacting the active set is worth
+   *  anything. Counted rather than assumed, because the answer differs between
+   *  the monocular and stereo settings. */
+  struct Census {
+    long frames{0};      ///< frames that reached the census point
+    long updates{0};     ///< frames that ran an EKF update
+    long feat_slots{0};  ///< occupied feature slots, summed over frames
+    long group_slots{0}; ///< occupied group slots, summed over frames
+    long update_feats{0};///< features in the update, summed over updates
+    long rows{0};        ///< measurement rows, summed over updates
+    long right_rows{0};  ///< of which right-camera rows
+    long oos_rows{0};    ///< of which out-of-state rows
+  } census_;
+  void PrintCensus(std::ostream &os) const;
+
   std::unique_ptr<std::default_random_engine> rng_;
 
 

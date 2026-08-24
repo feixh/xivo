@@ -204,10 +204,15 @@ void Estimator::UpdateStep(const timestamp_t &ts,
     );
   }
 
+  ++census_.frames;
+  census_.feat_slots += std::count(fsel_.begin(), fsel_.end(), true);
+  census_.group_slots += std::count(gsel_.begin(), gsel_.end(), true);
+
   static int print_counter{0};
   if (print_timing_ && ++print_counter % 50 == 0) {
     std::cout << print_counter << std::endl;
     std::cout << timer_;
+    PrintCensus(std::cout);
   }
 
   // Save the frame (only if set to true in json file)

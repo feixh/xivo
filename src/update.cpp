@@ -294,6 +294,25 @@ void Estimator::CleanupOOSFeatures() {
   oos_used_.clear();
 }
 
+void Estimator::PrintCensus(std::ostream &os) const {
+  const auto &c = census_;
+  const auto per = [](long n, long d) { return d ? n / double(d) : 0.0; };
+  // The error-state dimension implied by the *occupied* slots, against the
+  // compile-time capacity that `P_` is actually sized to. The gap is what an
+  // active-set compaction would recover.
+  const double dim = kMotionSize + kMaxCameraIntrinsics +
+                     kGroupSize * per(c.group_slots, c.frames) +
+                     kFeatureSize * per(c.feat_slots, c.frames);
+  os << "[census]frames:" << c.frames << " updates:" << c.updates
+     << " feature-slots:" << per(c.feat_slots, c.frames) << "/" << kMaxFeature
+     << " group-slots:" << per(c.group_slots, c.frames) << "/" << kMaxGroup
+     << " occupied-dim:" << dim << "/" << kFullSize
+     << " update-features:" << per(c.update_feats, c.updates)
+     << " rows:" << per(c.rows, c.updates)
+     << " (right:" << per(c.right_rows, c.updates)
+     << " oos:" << per(c.oos_rows, c.updates) << ")\n";
+}
+
 void Estimator::FilterUpdate(int oos_rows) {
 
 #ifdef USE_GPERFTOOLS
@@ -319,6 +338,13 @@ void Estimator::FilterUpdate(int oos_rows) {
     }
   }
   int total_size = instate_size + oos_rows;
+
+  ++census_.updates;
+  census_.update_feats += in_current_ekf_update_.size();
+  census_.rows += total_size;
+  census_.right_rows += instate_size - 2 * in_current_ekf_update_.size();
+  census_.oos_rows += oos_rows;
+
   H_.setZero(total_size, err_.size());
   inn_.setZero(total_size);
   diagR_.resize(total_size);
