@@ -105,15 +105,19 @@ That accuracy costs speed, and the default trades in favour of accuracy:
 
 | config | EKF / tracker | FPS, one core | mean ATE@0.02 |
 | --- | --- | --- | --- |
-| monocular, upstream capacity | 30 / 60 | 89 | 0.140 |
-| **stereo, shipped default** | 90 / 180 | **11.5** | **0.058** |
-| stereo, real-time-friendly | 60 / 120 | 24 | 0.063 |
+| monocular, upstream capacity | 30 / 60 | 89 † | 0.140 |
+| **stereo, shipped default** | 90 / 180 | **44** | **0.058** |
+| stereo, real-time-friendly | 60 / 120 | 24 † | 0.063 |
 
-So the shipped config is ~7.5× slower than upstream and runs at about 0.6× real time
-against TUM-VI's 20 Hz cameras; almost all of that is the EKF covariance update
-growing with the feature count, not the stereo front end. Lower `EKF_MAX_FEATURES`
-and `tracker_cfg.num_features_max` together (60 / 120) to get back above real time
-for 0.005 m of accuracy. Full breakdown, including where each millisecond goes, in
+† not re-measured since [the efficiency work](#efficiency) below, which sped the
+shipped stereo config up 3.6× (11.5 → 44 FPS) at unchanged capacity and accuracy;
+the two dagger rows would also be faster now.
+
+So the shipped config runs at about 2.2× real time against TUM-VI's 20 Hz cameras,
+and most of what it spends goes to the EKF covariance update growing with the
+feature count, not to the stereo front end. Lower `EKF_MAX_FEATURES` and
+`tracker_cfg.num_features_max` together (60 / 120) to buy more headroom for 0.005 m
+of accuracy. Full breakdown, including where each millisecond goes, in
 [`RESULTS_STEREO.md`](RESULTS_STEREO.md#speed-and-memory).
 
 #### EKF capacity is a build option
@@ -182,6 +186,65 @@ contain. Derivation of the deltas, their Welch statistics, and the byte-identity
 checks that bound what the change touched are in
 [`RESULTS_MERGE.md`](RESULTS_MERGE.md).
 
+### Efficiency
+
+The filter above was then made **4.8× faster monocular and 3.6× faster stereo** at
+unchanged EKF capacity, unchanged configs, and unchanged accuracy. Nothing was
+traded away: no capacity reduction, no looser gates, no dropped features. All
+figures are one core (`OMP_NUM_THREADS=1`, `setarch -R`), TUM-VI room1 and room6,
+whole-process wall clock including PNG decode, measured in a single interleaved
+batch:
+
+| setting | FPS before | FPS after | speedup | peak RSS |
+| --- | --- | --- | --- | --- |
+| monocular + IMU | 21.1 | **100.4** | **4.8×** | 450 → 132 MB |
+| stereo + IMU | 12.3 | **44.0** | **3.6×** | 459 → 138 MB |
+
+Stereo therefore moves from 0.6× to 2.2× real time against TUM-VI's 20 Hz cameras.
+
+Accuracy is held, verified by 8-member ensembles over room1–room6 (members perturb
+the initial velocity by ~1e-6 m/s, so the spread is the scale below which a
+difference is not attributable):
+
+| setting | ATE@0.02 | ATE@0.001 | RPE_rot | RPE_tra |
+| --- | --- | --- | --- | --- |
+| monocular, before → after | 0.0958 → 0.0945 | 0.0796 → 0.0786 | 0.5126 → 0.5126 | 0.0222 → 0.0222 |
+| stereo, before → after | 0.0632 → 0.0630 | 0.0551 → 0.0549 | 0.5128 → 0.5128 | 0.0132 → 0.0132 |
+
+RPE is `evaluate_rpe_interp.py`, per the caveat in the section below. Both ATE
+columns move well inside the ensemble spread (±0.005), in the improving direction,
+and every RPE statistic is unchanged to four decimals — including the two stock ones
+not shown, except mono stock RPE_tra at 0.0227 → 0.0226. The stronger check is that
+most of this work is algebraically exact rather than approximate, so it admits a
+test far tighter than ATE: **91 of the 96 ensemble runs are byte-for-byte identical
+to the pre-optimization code**, and all five that differ are on room3, the one
+sequence whose accept/reject gating is chaotic.
+
+Where the speedup comes from — each row is a commit, validated before the next
+began, with FPS as the two-sequence mean:
+
+| | change | mono | stereo |
+| --- | --- | --- | --- |
+| baseline | | 21.1 | 12.3 |
+| M1 | gate on the structurally nonzero columns of `J` — of 564, only ~33 can be nonzero, and `MHGating` was reading all 2.5 MB of `P` ~90× per frame | 26.0 | 15.7 |
+| M2 | restructure the covariance update: compute `H P` once instead of twice, block-sparsely, and replace two N³ Joseph products with an O(mN²) form | 54.2 | 27.3 |
+| M3 | apply the 24×540 motion-to-structure correlation once per frame instead of on all ~30 Prince-Dormand substeps | 77.0 | 32.1 |
+| M4 | stop building the left image pyramid twice per stereo frame and stop cloning the input image | 77.2 | 36.9 |
+| M5 | run the update over the occupied extent of `P` (339 of 564 dims) rather than the full state | 85.9 | 41.0 |
+| M6 | propagation internals: dense fixed-size containers instead of `SparseMatrix`, `F`'s nine nonzero rows, `G Qimu Gᵀ` as four 3×3 blocks — 0.170 → 0.032 ms/call | 99.5 | 43.8 |
+| M7 | drop `EIGEN_INITIALIZE_MATRICES_BY_ZERO`, which was zero-filling 310 MB of pooled Jacobians one double at a time at startup | 100.4 | 43.9 |
+
+M7 is the memory result rather than a speed one, and it was not free: the define
+turned out to be load-bearing in five places, masking five read-before-write bugs
+that are fixed here. Valgrind memcheck reported 0 errors and `MALLOC_PERTURB_` gave
+a bit-identical trajectory while all five were live; `-DXIVO_EIGEN_INIT=nan` plus an
+`FE_INVALID` trap is what found them, and ships as a build knob for the next time a
+trajectory goes strange.
+
+Method, a note per milestone, the rejected ideas (`-flto` and `-fvisibility=hidden`
+both measured as noise), and the timing harness are in the workspace's
+`notes-n-prompts/plan-efficiency.md` and `notes-n-prompts/notes-efficiency/`.
+
 ### Where this lands against other open-source VIO
 
 Our [wiki](https://github.com/ucla-vision/xivo/wiki/Performance-Evaluation) carries
@@ -217,11 +280,11 @@ last row:
 
 The cost claim elsewhere in the wiki — comparable accuracy at a fraction of the
 compute, 140 FPS against OKVIS's ~20 Hz — is about the *upstream monocular*
-configuration, and does not carry over to this one. Stereo at the raised capacity
-runs at about 12 FPS on one core, i.e. below both real time and OKVIS's quoted
-rate; the accuracy parity was bought with that compute. The 60 / 120 capacity
-point is the configuration that reproduces the original claim: 0.063 m, which is
-OKVIS's number, at 24 FPS.
+configuration, and the parity above was originally bought back with compute: stereo
+at the raised capacity ran at about 12 FPS on one core, below both real time and
+OKVIS's quoted rate. After [the efficiency work](#efficiency) it runs at **44 FPS**,
+so the parity now comes at 2.2× real time on a single core, and the qualitative
+form of the original claim holds again at the shipped capacity.
 
 
 ---
