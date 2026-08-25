@@ -345,9 +345,146 @@ inline StateRuns WholeState() {
 constexpr int kStructureSize = kFullSize - kMotionSize;
 using MatMotion = Eigen::Matrix<number_t, kMotionSize, kMotionSize>;
 
+////////////////////////////////////////
+// SPARSITY OF THE MOTION MODEL
+////////////////////////////////////////
+/** The number of error states that have dynamics.
+ *
+ *  `ComputeMotionJacobianAt` writes rows `Wsb`, `Tsb` and `Vsb` of the
+ *  error-state Jacobian `F` and no others, because every remaining state is
+ *  modelled as a random walk: the gyro and accelerometer biases, the two
+ *  camera-to-body alignment blocks, the gravity alignment, the temporal offset
+ *  and the IMU calibration all have `xdot = 0` plus noise, so their rows of
+ *  `d(xdot)/dx` are identically zero. Fifteen of the twenty-four rows of `F` are
+ *  therefore structural zeros at every step of every sequence -- zero by
+ *  construction, not numerically small.
+ *
+ *  Those three blocks are indices 0..8 and they are contiguous (`Wsb = 0`,
+ *  `Tsb = 3`, `Vsb = 6`, `bg = 9`), which is what lets the integrators carry the
+ *  Jacobian as a 9x24 block rather than a 24x24 matrix, and write
+ *  `topRows<kMotionDynSize>()` rather than a gather.
+ *
+ *  Adding dynamics to any state below index 9 means moving it above `bg` or
+ *  raising this constant. The type of `Estimator::Fdyn_` is what enforces this
+ *  going forward -- there is no row 24 for a stray nonzero to land in -- and the
+ *  static assertions below catch the one silent way to break it, which is
+ *  reordering `Index`. */
+constexpr int kMotionDynSize = Index::bg;
+
+static_assert(Index::Wsb < kMotionDynSize && Index::Tsb < kMotionDynSize &&
+                  Index::Vsb < kMotionDynSize,
+              "the three states with dynamics must be the leading rows of F");
+static_assert(Index::bg >= kMotionDynSize && Index::ba >= kMotionDynSize &&
+                  Index::Wbc >= kMotionDynSize &&
+                  Index::Tbc >= kMotionDynSize &&
+                  Index::Wsg >= kMotionDynSize,
+              "a state with no dynamics sits inside the dynamic rows of F");
+
+/** The rows of the error-state Jacobian that can be nonzero; see
+ *  `kMotionDynSize`. */
+using MatMotionDyn = Eigen::Matrix<number_t, kMotionDynSize, kMotionSize>;
+
+/** The IMU noise Jacobian `G`, 24x12. Its twelve columns are the gyro,
+ *  accelerometer, gyro-bias and accel-bias noises, in that order -- the same
+ *  order as the four diagonal blocks of `Qimu`. */
+using MatMotionNoise = Eigen::Matrix<number_t, kMotionSize, 12>;
+
+/** The IMU noise Jacobian in full.
+ *
+ *  *Nothing on the propagation path builds this.* It exists so that
+ *  `AddMotionNoiseCov` -- which produces `G Qimu G'` without forming either `G`
+ *  or the product -- can be checked against the expression it replaces. Keeping
+ *  the Jacobian written out somewhere also keeps the model readable: the four
+ *  blocks below are the whole of it. */
+inline void MotionNoiseJacobian(const Mat3 &Rsb, MatMotionNoise &G) {
+  G.setZero();
+  G.block<3, 3>(Index::Wsb, 0) = -Mat3::Identity(); // dWsb_dng
+  G.block<3, 3>(Index::Vsb, 3) = -Rsb;              // dVsb_dna
+  G.block<3, 3>(Index::bg, 6) = Mat3::Identity();   // dbg_dnbg
+  G.block<3, 3>(Index::ba, 9) = Mat3::Identity();   // dba_dnba
+}
+
+/** Adds the propagated IMU noise `G Qimu G'` to `out`, in the four 3x3 blocks
+ *  that are the whole of it.
+ *
+ *  Both integrators evaluated `G_ * Qimu_ * G_.transpose()` once per stage --
+ *  seven times per Prince-Dormand step, ~30 times per image -- as a
+ *  24x12 * 12x12 * 12x24 chain through `Eigen::SparseMatrix`, materializing a
+ *  24x24 temporary each time. The result has at most 18 distinct nonzero
+ *  entries.
+ *
+ *  Why: `G` has one nonzero block per row group (`Wsb` in the gyro columns,
+ *  `Vsb` in the accelerometer columns, `bg` and `ba` in their own), and `Qimu`
+ *  is block diagonal, so `(G Qimu G')[a, b] = G_a Qimu[a, b] G_b'` vanishes for
+ *  every pair of distinct row groups. What survives is
+ *
+ *      [Wsb, Wsb] = (-I) Qg (-I)'   = Qg
+ *      [Vsb, Vsb] = (-Rsb) Qa (-Rsb)' = Rsb Qa Rsb'
+ *      [bg,  bg]  = Qbg
+ *      [ba,  ba]  = Qba
+ *
+ *  -- three of which are constant across every stage of every step, since only
+ *  the accelerometer noise is rotated into the spatial frame. The block-diagonal
+ *  premise is the one thing here that is a property of the *configuration*
+ *  rather than of the model, so `Estimator` checks it once when `Qimu_` is built.
+ *
+ *  Adds rather than assigns so that the caller can lay down `F P + P F'` first
+ *  and never touch the 96% of the 24x24 that this term leaves alone. */
+inline void AddMotionNoiseCov(const Mat3 &Rsb, const MatX &Qimu,
+                              MatMotion &out) {
+  out.block<3, 3>(Index::Wsb, Index::Wsb) += Qimu.block<3, 3>(0, 0);
+  out.block<3, 3>(Index::Vsb, Index::Vsb) +=
+      Rsb * Qimu.block<3, 3>(3, 3) * Rsb.transpose();
+  out.block<3, 3>(Index::bg, Index::bg) += Qimu.block<3, 3>(6, 6);
+  out.block<3, 3>(Index::ba, Index::ba) += Qimu.block<3, 3>(9, 9);
+}
+
+/** One integration stage's covariance slope, `Pdot = F P + P F' + G Qimu G'`.
+ *
+ *  Two structural facts make this a third of the arithmetic the integrators used
+ *  to spend on it:
+ *
+ *  1. `F` is zero below row `kMotionDynSize`, so `A = F P` is a 9x24 block and
+ *     the 15 remaining rows of `F P` need not be computed at all. The columns
+ *     they would have contributed to `P F'` come from `A'`.
+ *  2. `P` is symmetric, so `P F' = (F P)' = A'`. One product, not two.
+ *
+ *  `P` symmetric is a genuine precondition and not merely an observation. It
+ *  holds for the stage arguments by induction -- `P_.block(0, 0)` is symmetric
+ *  on entry (`MeasurementUpdate` mirrors it, and propagation only ever adds a
+ *  slope built here) and every slope this function produces is symmetric by
+ *  construction -- but if it were ever violated the old form would have
+ *  propagated the asymmetry and this one silently symmetrizes it. Hence the
+ *  check below, and `MotionCovSlopeMatchesTheUnstructuredForm` in
+ *  `unitTests_propagate_cov`, which drives it with a `P` that is symmetric to
+ *  the last bit and compares against `F P + P F' + G Qimu G'` spelled out. */
+inline void MotionCovSlope(const MatMotionDyn &F, const MatMotion &P,
+                           const Mat3 &Rsb, const MatX &Qimu, MatMotion &out) {
+#ifndef NDEBUG
+  CHECK_LE((P - P.transpose()).cwiseAbs().maxCoeff(),
+           1e-12 * std::max<number_t>(P.cwiseAbs().maxCoeff(), 1.0))
+      << "MotionCovSlope needs a symmetric P; it uses P F' = (F P)'";
+#endif
+  Eigen::Matrix<number_t, kMotionDynSize, kMotionSize> A;
+  A.noalias() = F * P;
+  out.setZero();
+  out.topRows<kMotionDynSize>() = A;
+  out.leftCols<kMotionDynSize>() += A.transpose();
+  AddMotionNoiseCov(Rsb, Qimu, out);
+}
+
 /** Propagates the motion-to-structure correlation of `P` through one motion
  *  transition `F`: `P[0:24, 24:] <- F P[0:24, 24:]`, and the lower block to the
  *  transpose of the result.
+ *
+ *  `F` here is the *dynamic rows* of the transition, 9x24. The transition is
+ *  `I` below row `kMotionDynSize` -- it is a product of factors `I + F_i dt`,
+ *  each of which is zero below that row, and `(I + A)(I + B) = I + A + B + AB`
+ *  keeps the property -- so rows 9..23 of the upper block, and correspondingly
+ *  columns 9..23 of the lower one, come out of this unchanged and are not
+ *  written. That is 2.7x less work than the 24x540 product, and it is exact
+ *  rather than an approximation: the skipped rows are multiplications by rows of
+ *  the identity.
  *
  *  The integrators used to do this inline, once per substep, rewriting both
  *  blocks -- 24x540, ~100 kB each -- ~30 times per image even though nothing
@@ -367,10 +504,18 @@ using MatMotion = Eigen::Matrix<number_t, kMotionSize, kMotionSize>;
  *  with an arbitrary `P` and compare against the per-step reference. */
 template <typename FDerived>
 inline void ApplyMotionTransition(MatX &P, const Eigen::MatrixBase<FDerived> &F) {
-  P.block<kMotionSize, kStructureSize>(0, kMotionSize) =
+  static_assert(FDerived::RowsAtCompileTime == kMotionDynSize,
+                "ApplyMotionTransition takes the dynamic rows of the "
+                "transition; the rest of it is the identity");
+  // The product still reads all 24 rows of the upper block -- only the *output*
+  // rows are restricted. `P.block = F * P.block` aliases, and Eigen evaluates
+  // matrix products into a temporary unless told otherwise, which is why there
+  // is no explicit one here.
+  P.block<kMotionDynSize, kStructureSize>(0, kMotionSize) =
       F * P.block<kMotionSize, kStructureSize>(0, kMotionSize);
-  P.block<kStructureSize, kMotionSize>(kMotionSize, 0) =
-      P.block<kMotionSize, kStructureSize>(0, kMotionSize).transpose();
+  // Only the columns that changed need mirroring.
+  P.block<kStructureSize, kMotionDynSize>(kMotionSize, 0) =
+      P.block<kMotionDynSize, kStructureSize>(0, kMotionSize).transpose();
 }
 
 // frequency to project rotation matrices to SO3 to get rid of the accumulated numeric error

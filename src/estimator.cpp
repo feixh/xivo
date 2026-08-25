@@ -392,11 +392,8 @@ Estimator::Estimator(const Json::Value &cfg)
 
   LOG(INFO) << "Initial covariance loaded";
 
-  // allocate spaces for Jacobians
-  F_.resize(kMotionSize, kMotionSize);
-  F_.setIdentity();
-  G_.resize(kMotionSize, 12);
-  G_.setZero();
+  // Jacobians are fixed-size; nothing to allocate.
+  Fdyn_.setZero();
   Fcross_.setIdentity();
   Fcross_pending_ = false;
 
@@ -432,6 +429,25 @@ Estimator::Estimator(const Json::Value &cfg)
   Qimu_.block<3, 3>(6, 6) *= GetVectorFromJson<number_t, 3>(Qimu, "gyro_bias").asDiagonal();
   Qimu_.block<3, 3>(9, 9) *= GetVectorFromJson<number_t, 3>(Qimu, "accel_bias").asDiagonal();
   Qimu_ *= Qimu_;
+  // `AddMotionNoiseCov` produces `G Qimu G'` from four 3x3 blocks, which is only
+  // the whole of it if `Qimu` has no correlation *between* the four noises: the
+  // cross terms it drops are `G_a Qimu[a, b] G_b'` for a != b. That is true by
+  // construction two lines above, and it is a property of the configuration
+  // rather than of the model, so it is checked rather than assumed.
+  for (int a = 0; a < 4; ++a) {
+    for (int b = 0; b < 4; ++b) {
+      if (a == b) {
+        continue;
+      }
+      // A local, because the comma in `block<3, 3>` would be read as a macro
+      // argument separator.
+      const number_t cross =
+          Qimu_.block<3, 3>(3 * a, 3 * b).cwiseAbs().maxCoeff();
+      CHECK_EQ(cross, 0)
+          << "Qimu couples IMU noise blocks " << a << " and " << b
+          << "; AddMotionNoiseCov assumes it is block diagonal";
+    }
+  }
   LOG(INFO) << "Covariance of IMU measurement noise loaded";
 
 
@@ -806,9 +822,14 @@ void Estimator::Propagate(bool visual_meas) {
   timer_.Tock("propagation");
 }
 
-void Estimator::AccumulateMotionStructureCorrelation() {
-  Fcross_scratch_ = F_ * Fcross_;
-  Fcross_ = Fcross_scratch_;
+void Estimator::AccumulateMotionStructureCorrelation(const MatMotionDyn &Fdt) {
+  // The step transition is `I + [Fdt; 0]`, so
+  //   (I + [Fdt; 0]) Fcross = Fcross + [Fdt Fcross; 0],
+  // which is 9x24x24 rather than 24x24x24 and leaves rows 9..23 of `Fcross_`
+  // untouched -- they are rows of the identity and stay that way, which is the
+  // invariant `ApplyMotionTransition` relies on.
+  Fcross_scratch_.noalias() = Fdt * Fcross_;
+  Fcross_.topRows<kMotionDynSize>() += Fcross_scratch_;
   Fcross_pending_ = true;
 }
 
@@ -821,7 +842,7 @@ void Estimator::ApplyMotionStructureCorrelation(MatX &P) const {
   // blocks *are* transposes on entry. `MeasurementUpdate` guarantees that (it
   // mirrors the whole matrix) and nothing between two updates breaks it: the
   // propagation writes only the motion block and these two.
-  ApplyMotionTransition(P, Fcross_);
+  ApplyMotionTransition(P, Fcross_.topRows<kMotionDynSize>());
 }
 
 void Estimator::FlushMotionStructureCorrelation() {
@@ -893,60 +914,30 @@ void Estimator::ComputeMotionJacobianAt(
   Mat3 dV_dWsg = -X.Rsg.matrix() * SO3::hat(g_); // effective dim 3x2, Wg is 2-dim
   // Mat2 dWg_dWg = Mat2::Identity();
 
-  F_.setZero(); // wipe out the delta added to F in the previous step
+  // Only the nine rows with dynamics exist in `Fdyn_` at all; see
+  // `kMotionDynSize`. Assignments by block rather than element by element --
+  // there is no sparse structure to insert into any more.
+  Fdyn_.setZero();
 
-  for (int j = 0; j < 3; ++j) {
-    F_.coeffRef(Index::Wsb + j, Index::bg + j) = -1;  // dW_dbg
-    F_.coeffRef(Index::Tsb + j, Index::Vsb + j) = 1;  // dT_dV
-
-    for (int i = 0; i < 3; ++i) {
-      // W
-      F_.coeffRef(Index::Wsb + i, Index::Wsb + j) = dWsb_dWsb(i, j);
-      // F_.coeffRef(Index::W + i, Index::bg + j) = dW_dbg(i, j);
-      // T
-      // F_.coeffRef(Index::T + i, Index::V + j) = dT_dV(i, j);
-
-      // V
-      F_.coeffRef(Index::Vsb + i, Index::Wsb + j) = dV_dWsb(i, j);
-      F_.coeffRef(Index::Vsb + i, Index::ba + j) = dV_dba(i, j);
-
-      if (j < 2) {
-        // NOTE: Wg is 2-dim, i.e., NO z-component
-        F_.coeffRef(Index::Vsb + i, Index::Wsg + j) = dV_dWsg(i, j);
-      }
-    }
-  }
+  Fdyn_.block<3, 3>(Index::Wsb, Index::Wsb) = dWsb_dWsb;
+  Fdyn_.block<3, 3>(Index::Wsb, Index::bg) = -I3;              // dW_dbg
+  Fdyn_.block<3, 3>(Index::Tsb, Index::Vsb) = I3;              // dT_dV
+  Fdyn_.block<3, 3>(Index::Vsb, Index::Wsb) = dV_dWsb;
+  Fdyn_.block<3, 3>(Index::Vsb, Index::ba) = dV_dba;
+  // NOTE: Wg is 2-dim, i.e., NO z-component
+  Fdyn_.block<3, 2>(Index::Vsb, Index::Wsg) = dV_dWsg.leftCols<2>();
 
 #ifdef USE_ONLINE_IMU_CALIB
-  for (int j = 0; j < 9; ++j) {
-    for (int i = 0 ; i < 3; ++i) {
-      F_.coeffRef(Index::Wsb + i, Index::Cg + j) = dWsb_dCg(i, j);
-    }
-  }
-  for (int j = 0; j < 6; ++j) {
-    for (int i = 0; i < 3; ++i) {
-      F_.coeffRef(Index::Vsb + i, Index::Ca + j) = dV_dCa(i, j);
-    }
-  }
+  Fdyn_.block<3, 9>(Index::Wsb, Index::Cg) = dWsb_dCg;
+  Fdyn_.block<3, 6>(Index::Vsb, Index::Ca) = dV_dCa;
 #endif
 
-  // Mat3 dW_dng = -I3;
-  // Mat3 dV_dna = -R;
-  // Mat3 dbg_dnbg = I3;
-  // Mat3 dba_dnba = I3;
-
-  // jacobian w.r.t. noise
-  G_.setZero();
-  for (int j = 0; j < 3; ++j) {
-
-    G_.coeffRef(Index::Wsb + j, j) = -1;  // dWsb_dng
-    G_.coeffRef(Index::bg + j, 6 + j) = 1;  // dbg_dnbg
-    G_.coeffRef(Index::ba + j, 9 + j) = 1;  // dba_dnba
-
-    for (int i = 0; i < 3; ++i) {
-      G_.coeffRef(Index::Vsb + i, 3 + j) = -Rsb(i, j);  // dV_dna
-    }
-  }
+  // The noise Jacobian `G` used to be built here, as a second sparse matrix, so
+  // that each of the seven stages of an integration step could evaluate
+  // `G Qimu G'`. It is not built at all any more: that product has 18 distinct
+  // nonzero entries and `AddMotionNoiseCov` writes them straight into the slope.
+  // `MotionNoiseJacobian` in core.h is what `G` was, kept for the test that
+  // checks the two agree.
 }
 
 bool Estimator::GoodTimestamp(const timestamp_t &now) {

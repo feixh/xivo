@@ -358,8 +358,11 @@ private:
   StateRuns OccupiedState() const;
   /** Predicts measurement (pixels) of features in input. */
   void Predict(std::list<FeaturePtr> &features);
-  /** compute the motion jacobian F and G (private members `F_` and `G_`) at the
-   *  given state and measurement. */
+  /** Compute the error-state dynamics Jacobian (the private member `Fdyn_`) at
+   *  the given state and measurement. Only the nine rows that have dynamics are
+   *  written, because the rest are structurally zero; see `kMotionDynSize`. The
+   *  noise Jacobian `G` used to be built here as well and is not built at all
+   *  any more -- `AddMotionNoiseCov` produces `G Qimu G'` directly. */
   void ComputeMotionJacobianAt(const State &X,
                                const Eigen::Matrix<number_t, 6, 1> &gyro_accel);
   // only need velocity as the slope for integration
@@ -377,8 +380,12 @@ private:
   /** perform one-step in RK4 integration (4 inner steps) */
   void RK4Step(const Vec3 &gyro0, const Vec3 &accel0, number_t dt);
 
-  /** Records one integration step's transition `F_` against the motion-to-
-   *  structure correlation blocks of `P_` *without touching them*.
+  /** Records one integration step's transition against the motion-to-structure
+   *  correlation blocks of `P_` *without touching them*.
+   *
+   *  `Fdt` is the dynamic rows of the step's transition *minus the identity*:
+   *  the step transition is `I + [Fdt; 0]`, which is what the integrators have in
+   *  hand (`FK * dt`) before they add the identity to it.
    *
    *  Those blocks are `P[0:24, 24:]` and its transpose -- 24x540, 100 kB each --
    *  and each integration step used to rewrite both. There are ~3 Prince-Dormand
@@ -387,7 +394,7 @@ private:
    *  Since the effect of n steps is the product `F_n ... F_1` applied once, the
    *  transition is accumulated here and applied by
    *  `FlushMotionStructureCorrelation` before anything can observe it. */
-  void AccumulateMotionStructureCorrelation();
+  void AccumulateMotionStructureCorrelation(const MatMotionDyn &Fdt);
   /** Applies what `AccumulateMotionStructureCorrelation` has recorded to `P_`
    *  and resets the accumulator. Called at the end of the propagation that
    *  precedes an image; a no-op if nothing is pending. */
@@ -688,18 +695,31 @@ private:
    *  created. (i.e. maximum value of `init_z_`) */
   number_t max_z_;
 
-  /** Error state dynamics Jacobian; Used for covariance update in EKF's
-   *  prediction step. */
-  Eigen::SparseMatrix<number_t> F_;
-  /** Error state noise input-matrix Jacobian; Used for covariance update in EKF's
-   *  prediction step. */
-  Eigen::SparseMatrix<number_t> G_;
-  /** The product of every `F_` since the motion-to-structure correlation blocks
-   *  of `P_` were last brought up to date, and whether that product is anything
-   *  other than the identity. See
-   *  `AccumulateMotionStructureCorrelation`. `Fcross_scratch_` exists only so
-   *  the accumulating product does not alias its own destination. */
-  MatMotion Fcross_, Fcross_scratch_;
+  /** Error state dynamics Jacobian; used for the covariance update in the EKF's
+   *  prediction step.
+   *
+   *  Nine rows, not twenty-four (`kMotionDynSize`), and dense rather than an
+   *  `Eigen::SparseMatrix`. It used to hold ~57 nonzeros in a 24x24 sparse matrix
+   *  that `ComputeMotionJacobianAt` rebuilt from `setZero()` plus ~57
+   *  `coeffRef` calls -- i.e. ~57 insertions into a compressed structure -- seven
+   *  times per integration step, ~30 steps per image; and every use of it was a
+   *  product against a dense 24x24 anyway. At 9x24 the whole Jacobian is 1.7 kB
+   *  and every product is fixed-size.
+   *
+   *  The *transition* `I + Fdyn_ dt` is no longer stored at all: it was written
+   *  back over `F_` at the end of each step, and its only consumer
+   *  (`AccumulateMotionStructureCorrelation`) now takes `Fdyn_ dt` and adds the
+   *  identity implicitly. */
+  MatMotionDyn Fdyn_;
+  /** The product of every step transition since the motion-to-structure
+   *  correlation blocks of `P_` were last brought up to date, and whether that
+   *  product is anything other than the identity. See
+   *  `AccumulateMotionStructureCorrelation`. Rows at and below `kMotionDynSize`
+   *  are exactly rows of the identity, forever, which is what
+   *  `ApplyMotionTransition` relies on. `Fcross_scratch_` exists only so the
+   *  accumulating product does not alias its own destination. */
+  MatMotion Fcross_;
+  MatMotionDyn Fcross_scratch_;
   bool Fcross_pending_;
   /** Filter covariance. Size grows and shrinks with the number of tracked
    *  features. */

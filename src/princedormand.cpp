@@ -110,8 +110,13 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
 
   static State X0;
   static Vec3 K1, K2, K3, K4, K5, K6, K7;
-  static MatX FK1, FK2, FK3, FK4, FK5, FK6, FK7;
-  static MatX PK1, PK2, PK3, PK4, PK5, PK6, PK7;
+  // Fixed-size, and 9x24 rather than 24x24: a stage's transition slope is
+  // `F + F (...) dt`, and `F` is zero below row `kMotionDynSize`, so every `FK`
+  // is too. The covariance slopes stay 24x24 -- `A + A'` fills nine rows *and*
+  // nine columns, and the noise term adds two more diagonal blocks.
+  static MatMotionDyn FK1, FK2, FK3, FK4, FK5, FK6, FK7;
+  static MatMotion PK1, PK2, PK3, PK4, PK5, PK6, PK7;
+  static MatMotion P0;
 
   number_t step;
   Eigen::Matrix<number_t, 6, 1> slope;
@@ -119,12 +124,23 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   Eigen::Matrix<number_t, 6, 1> gyro_accel0, gyro_accel;
   gyro_accel0 << gyro0, accel0;
 
+  // The stage transition slopes are `F + F (combination) dt`. `F` is zero below
+  // row `kMotionDynSize` and so is every `FK`, so the product only ever needs
+  // `F`'s leading 9 columns against the 9 rows the combination actually has:
+  // 9x9x24 instead of 24x24x24.
+  //
+  // `Fleft` is a *view* of `Fdyn_`, not a snapshot of it: each stage below
+  // re-fills `Fdyn_` via `ComputeMotionJacobianAt` and then reads it through this
+  // name, which is the intent -- a stage's slope uses the Jacobian at that
+  // stage's state.
+  const auto Fleft = Fdyn_.leftCols<kMotionDynSize>();
+
   X0 = X_;
   K1 = X0.Vsb;
   ComputeMotionJacobianAt(X0, gyro_accel0);
-  FK1 = F_;
-  MatX P0 = P_.block<kMotionSize, kMotionSize>(0, 0);
-  PK1 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+  FK1 = Fdyn_;
+  P0 = P_.block<kMotionSize, kMotionSize>(0, 0);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK1);
 
   X0 = X_;
   step = r_2_9 * dt;
@@ -132,9 +148,9 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   ComposeMotion(X0, r_2_9 * (K1), gyro_accel, step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K2 = X0.Vsb;
-  FK2 = F_ + F_ * r_2_9 * (FK1)*dt;
-  P0 = P_.block<kMotionSize, kMotionSize>(0, 0) + r_2_9 * (PK1)*dt;
-  PK2 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+  FK2 = Fdyn_ + (Fleft * FK1) * (r_2_9 * dt);
+  P0 = P_.block<kMotionSize, kMotionSize>(0, 0) + (r_2_9 * dt) * PK1;
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK2);
 
   X0 = X_;
   step = 3.0 * r_9 * dt;
@@ -142,9 +158,10 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   ComposeMotion(X0, r_12 * (K1 + 3.0 * K2), gyro_accel, step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K3 = X0.Vsb;
-  FK3 = F_ + F_ * r_12 * (FK1 + 3.0 * FK2) * dt;
-  P0 = P_.block<kMotionSize, kMotionSize>(0, 0) + r_12 * (PK1 + 3.0 * PK2) * dt;
-  PK3 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+  FK3 = Fdyn_ + (Fleft * (FK1 + 3.0 * FK2)) * (r_12 * dt);
+  P0 = P_.block<kMotionSize, kMotionSize>(0, 0) +
+       (r_12 * dt) * (PK1 + 3.0 * PK2);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK3);
 
   X0 = X_;
   step = 5.0 * r_9 * dt;
@@ -153,10 +170,11 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
                 step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K4 = X0.Vsb;
-  FK4 = F_ + F_ * r_324 * (55.0 * FK1 - 75.0 * FK2 + 200.0 * FK3) * dt;
+  FK4 = Fdyn_ +
+        (Fleft * (55.0 * FK1 - 75.0 * FK2 + 200.0 * FK3)) * (r_324 * dt);
   P0 = P_.block<kMotionSize, kMotionSize>(0, 0) +
-       r_324 * (55.0 * PK1 - 75.0 * PK2 + 200.0 * PK3) * dt;
-  PK4 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+       (r_324 * dt) * (55.0 * PK1 - 75.0 * PK2 + 200.0 * PK3);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK4);
 
   X0 = X_;
   step = 6.0 * r_9 * dt;
@@ -165,11 +183,12 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
                 gyro_accel, step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K5 = X0.Vsb;
-  FK5 = F_ +
-        F_ * r_330 * (83.0 * FK1 - 195.0 * FK2 + 305.0 * FK3 + 27.0 * FK4) * dt;
+  FK5 = Fdyn_ + (Fleft * (83.0 * FK1 - 195.0 * FK2 + 305.0 * FK3 +
+                          27.0 * FK4)) *
+                    (r_330 * dt);
   P0 = P_.block<kMotionSize, kMotionSize>(0, 0) +
-       r_330 * (83.0 * PK1 - 195.0 * PK2 + 305.0 * PK3 + 27.0 * PK4) * dt;
-  PK5 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+       (r_330 * dt) * (83.0 * PK1 - 195.0 * PK2 + 305.0 * PK3 + 27.0 * PK4);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK5);
 
   X0 = X_;
   step = dt;
@@ -179,15 +198,13 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
       gyro_accel, step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K6 = X0.Vsb;
-  FK6 = F_ +
-        F_ * r_28 *
-            (-19.0 * FK1 + 63.0 * FK2 + 4.0 * FK3 - 108.0 * FK4 + 88.0 * FK5) *
-            dt;
+  FK6 = Fdyn_ + (Fleft * (-19.0 * FK1 + 63.0 * FK2 + 4.0 * FK3 - 108.0 * FK4 +
+                          88.0 * FK5)) *
+                    (r_28 * dt);
   P0 = P_.block<kMotionSize, kMotionSize>(0, 0) +
-       r_28 *
-           (-19.0 * PK1 + 63.0 * PK2 + 4.0 * PK3 - 108.0 * PK4 + 88.0 * PK5) *
-           dt;
-  PK6 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+       (r_28 * dt) *
+           (-19.0 * PK1 + 63.0 * PK2 + 4.0 * PK3 - 108.0 * PK4 + 88.0 * PK5);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK6);
 
   X0 = X_;
   step = dt;
@@ -197,17 +214,17 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
                 gyro_accel, step);
   ComputeMotionJacobianAt(X0, gyro_accel);
   K7 = X0.Vsb;
-  FK7 = F_ +
-        F_ * r_400 * (38.0 * FK1 + 240.0 * FK3 - 243.0 * FK4 + 330.0 * FK5 +
-                      35.0 * FK6) *
-            dt;
+  FK7 = Fdyn_ + (Fleft * (38.0 * FK1 + 240.0 * FK3 - 243.0 * FK4 +
+                          330.0 * FK5 + 35.0 * FK6)) *
+                    (r_400 * dt);
   P0 = P_.block<kMotionSize, kMotionSize>(0, 0) +
-       r_400 *
-           (38.0 * PK1 + 240.0 * PK3 - 243.0 * PK4 + 330.0 * PK5 + 35.0 * PK6) *
-           dt;
-  PK7 = F_ * P0 + P0 * F_.transpose() + G_ * Qimu_ * G_.transpose();
+       (r_400 * dt) *
+           (38.0 * PK1 + 240.0 * PK3 - 243.0 * PK4 + 330.0 * PK5 + 35.0 * PK6);
+  MotionCovSlope(Fdyn_, P0, X0.Rsb.matrix(), Qimu_, PK7);
 
-  static MatX K, FK, PK;
+  static Vec3 K;
+  static MatMotionDyn FK, Fdt;
+  static MatMotion PK;
   K = 0.0862 * K1 + 0.6660 * K3 - 0.7857 * K4 + 0.9570 * K5 + 0.0965 * K6 -
       0.0200 * K7;
   FK = 0.0862 * FK1 + 0.6660 * FK3 - 0.7857 * FK4 + 0.9570 * FK5 +
@@ -219,14 +236,12 @@ number_t Estimator::PrinceDormandStep(const Vec3 &gyro0, const Vec3 &accel0,
   gyro_accel = gyro_accel0 + slope * dt;
   ComposeMotion(X_, K, gyro_accel, dt);
 
-  F_.setIdentity();
-  F_ = F_ + FK * dt;
-
   P_.block<kMotionSize, kMotionSize>(0, 0).noalias() += PK * dt;
   // Record this step's contribution to the motion-to-structure correlation
   // instead of rewriting the two 24x540 blocks, which nothing reads until the
-  // next image.
-  AccumulateMotionStructureCorrelation();
+  // next image. The step transition is `I + [Fdt; 0]`; the identity is implicit.
+  Fdt = FK * dt;
+  AccumulateMotionStructureCorrelation(Fdt);
   // The embedded 4th-order solution differs from the 5th-order one by this
   // combination of the stage slopes (Prince-Dormand v3(4,5); see reference 1),
   // which is the local truncation error estimate the step controller in
