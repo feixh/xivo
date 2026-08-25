@@ -784,9 +784,15 @@ private:
   timestamp_t curr_time_; // current system time
   timestamp_t last_time_; // last measurement time, either imu or visual
 
-  Vec3 curr_accel_, curr_gyro_; // current gyro and accel measurement
-  Vec3 last_accel_, last_gyro_; // accel & gyro measurement at last_time
-  Vec3 slope_accel_, slope_gyro_;
+  // Zero-initialized, because `Propagate` reads all six before any of them is
+  // necessarily written: the visual-measurement branch extrapolates
+  // `last_{accel,gyro}_` along `slope_{accel,gyro}_`, and the slopes are only
+  // ever assigned on the IMU branch. If the first measurement to reach the
+  // filter is an image, that read used to be of whatever
+  // -DEIGEN_INITIALIZE_MATRICES_BY_ZERO had left behind.
+  Vec3 curr_accel_{Vec3::Zero()}, curr_gyro_{Vec3::Zero()}; // current gyro and accel measurement
+  Vec3 last_accel_{Vec3::Zero()}, last_gyro_{Vec3::Zero()}; // accel & gyro measurement at last_time
+  Vec3 slope_accel_{Vec3::Zero()}, slope_gyro_{Vec3::Zero()};
 
   bool gravity_initialized_, vision_initialized_;
   int imu_counter_, vision_counter_;

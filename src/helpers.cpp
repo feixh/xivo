@@ -157,7 +157,10 @@ int QR(VecX &x, MatX &Hx, int effective_rows) {
 bool DirectLinearTransformSVD(const SE3 &g12, const Vec2 &xc1, const Vec2 &xc2, Vec3 &X) {
   Vec3 t12{g12.translation()};
   Mat3 R12{g12.so3().matrix()};
-  Mat34 P1;
+  // [I | 0]: the fourth column is never assigned, so it has to be zeroed here
+  // rather than left to -DEIGEN_INITIALIZE_MATRICES_BY_ZERO. `A.row(0)` and
+  // `A.row(1)` read `P1.row(2)` in full, fourth column included.
+  Mat34 P1{Mat34::Zero()};
   P1.block<3, 3>(0, 0).setIdentity();
   Mat34 P2;
   P2.block<3, 3>(0, 0) = R12.transpose();

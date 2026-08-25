@@ -63,7 +63,11 @@ if (BUILD_G2O)
   add_definitions(-DUSE_G2O)
 endif (BUILD_G2O)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -std=c++17 -Wno-narrowing -Wno-register -fPIC -g")
+# This line used to begin with `-O0`. It had no effect: CMAKE_BUILD_TYPE is
+# hardcoded to Release below, and CMake appends CMAKE_CXX_FLAGS_RELEASE
+# (`-O3 -DNDEBUG`) *after* CMAKE_CXX_FLAGS, so the last -O won and the build was
+# always -O3. Removing it changes nothing but the confusion.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -Wno-narrowing -Wno-register -fPIC -g")
 
 # Overridable because valgrind cannot execute the AVX-512 that -march=native
 # emits on this machine; a heap-profiling build sets e.g. -march=x86-64-v3.
@@ -72,6 +76,24 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${XIVO_ARCH_FLAGS}")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -funroll-loops")
 
+# Link-time optimization. Off by default because it was measured and does
+# nothing: +0.4% at best and negative in one of eight cells, i.e. noise. The hot
+# code is templated Eigen in headers, so it is already visible at every call site
+# and there is no cross-TU inlining left to win. Kept as a knob because it costs
+# nothing to keep and it did come out bit-identical here -- but note that in
+# general it changes inlining and therefore FMA contraction, so re-validate the
+# trajectory rather than assuming it.
+# See notes-n-prompts/notes-efficiency/m7-build-and-flags.md for the measurement.
+option(XIVO_LTO "compile and link with -flto" OFF)
+if (XIVO_LTO)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=auto -ffat-lto-objects")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=auto")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto=auto")
+endif (XIVO_LTO)
+
+# NOTE: this is a `set`, not a cache entry, so it overrides -DCMAKE_BUILD_TYPE on
+# the command line. Every build recipe in this repo passes that flag and every
+# one of them is a no-op.
 # set(CMAKE_BUILD_TYPE "Debug")
 # set(CMAKE_BUILD_TYPE "RelWithDebInfo")
 set(CMAKE_BUILD_TYPE "Release")
@@ -102,7 +124,35 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/lib${XIVO_OUTPUT_SUFFIX})
 add_definitions(-DGOOGLE_STRIP_LOG=1)
 
 # add_definitions(-DEIGEN_DEFAULT_TO_ROW_MAJOR)
-add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_ZERO)
+
+# How Eigen fills a dense object that the program has not written yet.
+#   none  Eigen's own default: no fill at all. This is the delivered setting.
+#   zero  every Matrix/temporary is zero-filled on construction -- the historical
+#         setting, and what five separate read-before-write bugs silently relied
+#         on until they were found and fixed;
+#   nan   filled with signalling NaN instead. Not for production: it is a *probe*.
+#         On a healthy tree it produces bit-identical trajectories, so any
+#         difference at all means something is read before it is written. Reach
+#         for this first when a trajectory goes strange.
+#
+# `zero` was not free. Defining it also turns on Eigen's refill inside `resize()`,
+# and `OOSJacobian` resizes a 90x564 matrix per pooled Feature; at
+# max_features=800 that is 310 MB of buffer faulted in and zeroed one double at a
+# time, for a buffer of which a feature writes a handful of rows. Dropping it
+# takes RSS from 443 MB to 133 MB and start-up from 0.25 s to nothing. Output is
+# bit-identical on 11 of the 12 sequence/setting pairs checked; the twelfth
+# (stereo room3) flips a gate at frame 548, because omitting the fill loop shifts
+# inlining and hence FMA contraction. Validated by ensemble, not by identity.
+# See notes-n-prompts/notes-efficiency/m7-build-and-flags.md.
+set(XIVO_EIGEN_INIT "none" CACHE STRING "how Eigen fills uninitialized dense objects: zero, nan, none")
+set_property(CACHE XIVO_EIGEN_INIT PROPERTY STRINGS zero nan none)
+if (XIVO_EIGEN_INIT STREQUAL "zero")
+  add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_ZERO)
+elseif (XIVO_EIGEN_INIT STREQUAL "nan")
+  add_definitions(-DEIGEN_INITIALIZE_MATRICES_BY_NAN)
+elseif (NOT XIVO_EIGEN_INIT STREQUAL "none")
+  message(FATAL_ERROR "XIVO_EIGEN_INIT must be zero, nan or none, not '${XIVO_EIGEN_INIT}'")
+endif ()
 
 # Sophus formats Eigen expressions through libfmt in its assertion messages.
 # fmt >= 9 dropped the implicit ostream fallback, so those messages no longer

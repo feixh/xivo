@@ -269,13 +269,16 @@ Estimator::Estimator(const Json::Value &cfg)
   // load accel axis misalignment first as a 3x3 matrix
   Mat3 Ta =
       GetMatrixFromJson<number_t, 3, 3>(imu_calib, "Car", JsonMatLayout::RowMajor);
-  Mat3 Ka;  // accel scaling
+  // Zero-initialized because only the diagonal is assigned below. This used to
+  // rely on -DEIGEN_INITIALIZE_MATRICES_BY_ZERO; without it the off-diagonal
+  // entries were garbage and `IMU`'s upper-triangular CHECK on `Ta * Ka` failed.
+  Mat3 Ka{Mat3::Zero()};  // accel scaling
   Ka.diagonal() = GetVectorFromJson<number_t, 3>(imu_calib, "Cas");
   Mat3 Ca{Ta * Ka};
   // load gyro axis misalignment first as 3x3 matrix
   Mat3 Tg =
       GetMatrixFromJson<number_t, 3, 3>(imu_calib, "Cgr", JsonMatLayout::RowMajor);
-  Mat3 Kg;  // gyro scaling
+  Mat3 Kg{Mat3::Zero()};  // gyro scaling, ditto
   Kg.diagonal() = GetVectorFromJson<number_t, 3>(imu_calib, "Cgs");
   Mat3 Cg{Tg * Kg};
   // now update the IMU component
@@ -326,7 +329,10 @@ Estimator::Estimator(const Json::Value &cfg)
     }
   }
   X_.Tbc = GetVectorFromJson<number_t, 3>(X, "Tbc");
-  Vec3 Wsg;
+  // The gravity rotation has two degrees of freedom, so only the first two
+  // components are configured; the third is structurally zero and has to be
+  // written as such rather than left to -DEIGEN_INITIALIZE_MATRICES_BY_ZERO.
+  Vec3 Wsg{Vec3::Zero()};
   Wsg.head<2>() = GetVectorFromJson<number_t, 2>(X, "Wsg");
   X_.Rsg = SO3::exp(Wsg);
 // temporal offset
