@@ -241,9 +241,9 @@ a bit-identical trajectory while all five were live; `-DXIVO_EIGEN_INIT=nan` plu
 `FE_INVALID` trap is what found them, and ships as a build knob for the next time a
 trajectory goes strange.
 
-Method, a note per milestone, the rejected ideas (`-flto` and `-fvisibility=hidden`
-both measured as noise), and the timing harness are in the workspace's
-`notes-n-prompts/plan-efficiency.md` and `notes-n-prompts/notes-efficiency/`.
+Two ideas were measured and rejected: `-flto` and `-fvisibility=hidden` are both
+noise here (+0.4% at best), because the hot code is templated Eigen in headers and
+there is no cross-TU inlining left to win.
 
 ### Where this lands against other open-source VIO
 
