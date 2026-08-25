@@ -281,6 +281,14 @@ target_link_libraries(unitTests_propagate_cov xest ${deps} gtest gtest_main)
 add_test(NAME PropagateCov COMMAND unitTests_propagate_cov
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Pyramid ownership: the front end keeps `pyramid_` across frames while no longer
+# owning the image it was built from.
+add_executable(unitTests_pyramid
+               test/unittest_pyramid.cpp)
+target_link_libraries(unitTests_pyramid xest ${deps} gtest gtest_main)
+add_test(NAME Pyramid COMMAND unitTests_pyramid
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 add_executable(unitTests_determinism
                test/unittest_determinism.cpp)
 target_link_libraries(unitTests_determinism xest ${deps} gtest gtest_main)

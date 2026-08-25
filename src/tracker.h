@@ -28,6 +28,19 @@ public:
   static TrackerPtr Create(const Json::Value &cfg);
   static TrackerPtr instance() { return instance_.get(); }
 
+  /** `cv::buildOpticalFlowPyramid` with `tryReuseInputImage` forced off, so the
+   *  result never aliases `image`. That argument defaults to *true*, and for an
+   *  input that is a submatrix with enough margin OpenCV then sets
+   *  `pyramid[0] = image` -- a view. `pyramid_` has to stay valid into the next
+   *  frame while `img_` no longer owns its pixels (see `UpdateLK`), so the
+   *  pyramid must own level 0 whatever the caller hands us.
+   *
+   *  Static and public so `unitTests_pyramid` can call it, and because it is a
+   *  pure function of its arguments. */
+  static void BuildOwnedPyramid(const cv::Mat &image,
+                                std::vector<cv::Mat> &pyramid, int win_size,
+                                int max_level);
+
   /** Matches features found on incoming image `img` to features in `features_`
    *  using LK-pyramid and detects a new set of features to be tracked.
    *  \todo Rescue features that would otherwise be dropped from tracker with newly
@@ -96,6 +109,8 @@ private:
   // variables
   bool differential_;
   bool initialized_;
+  /** Rescale each image to [0, 255] before tracking. Read once at construction. */
+  bool normalize_;
   Json::Value cfg_;
   int descriptor_distance_thresh_; // use this to verify feature tracking
   int max_pixel_displacement_;     // pixels shifted larger than this amount are
@@ -125,6 +140,7 @@ private:
    * current-frame pixel locations. */
   void MatchStereo();
 
+
   // stereo matching params; see the config documentation in cfg/tumvi_stereo.json
   /** Reject a right match whose angular epipolar residual exceeds this, in
    * radians. `StereoRig::EpipolarResidual` returns the sine of the angular
@@ -150,6 +166,11 @@ private:
 
   /** Last computed LK pyramid */
   std::vector<cv::Mat> pyramid_;
+  /** Whether `pyramid_` was built from the current `img_`. True after
+   *  `UpdateLK` has swapped in the new pyramid, false on the paths that return
+   *  before the swap (no features left to track). `MatchStereo` reuses
+   *  `pyramid_` as its left pyramid only when this holds. */
+  bool pyramid_is_current_ = false;
 
   /** Number of rows in the input image. */
   int rows_;

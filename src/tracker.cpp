@@ -158,6 +158,10 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
   }
 
 
+  // Read once, not once per frame: this used to be a string lookup into a
+  // Json::Value on every image.
+  normalize_ = cfg_.get("normalize", false).asBool();
+
   auto klt_cfg = cfg_["KLT"];
   win_size_ = klt_cfg.get("win_size", 15).asInt();
   max_level_ = klt_cfg.get("max_level", 4).asInt();
@@ -428,10 +432,21 @@ void Tracker::MatchStereo() {
     return;
   }
 
-  std::vector<cv::Mat> pyr_l, pyr_r;
-  cv::buildOpticalFlowPyramid(img_, pyr_l,
-                              cv::Size(stereo_win_size_, stereo_win_size_),
-                              stereo_max_level_);
+  // The left pyramid is the one temporal tracking just built, provided the
+  // window and level count match -- which they do unless `stereo_matching`
+  // overrides them, since they default to the KLT values. `pyramid_` holds the
+  // *current* frame's pyramid after `UpdateLK`'s swap, but not on the paths that
+  // return before it, hence the flag rather than an assumption.
+  const bool reuse_left = pyramid_is_current_ &&
+                          stereo_win_size_ == win_size_ &&
+                          stereo_max_level_ == max_level_;
+  std::vector<cv::Mat> pyr_l_own, pyr_r;
+  if (!reuse_left) {
+    cv::buildOpticalFlowPyramid(img_, pyr_l_own,
+                                cv::Size(stereo_win_size_, stereo_win_size_),
+                                stereo_max_level_);
+  }
+  const std::vector<cv::Mat> &pyr_l = reuse_left ? pyramid_ : pyr_l_own;
   cv::buildOpticalFlowPyramid(img_r_, pyr_r,
                               cv::Size(stereo_win_size_, stereo_win_size_),
                               stereo_max_level_);
@@ -511,9 +526,12 @@ void Tracker::MatchStereo() {
 
 void Tracker::UpdateMatch(const cv::Mat &image) {
   img_ = image.clone();
-  if (cfg_.get("normalize", false).asBool()) {
+  if (normalize_) {
     cv::normalize(image, img_, 0, 255, cv::NORM_MINMAX);
   }
+  // This path builds no pyramid, so anything still in `pyramid_` belongs to an
+  // older frame and `MatchStereo` must not reuse it.
+  pyramid_is_current_ = false;
 
   // detect features in the new image
   std::vector<cv::KeyPoint> new_kps;
@@ -634,11 +652,34 @@ void Tracker::UpdateMatch(const cv::Mat &image) {
 }
 
 
+void Tracker::BuildOwnedPyramid(const cv::Mat &image,
+                                std::vector<cv::Mat> &pyramid, int win_size,
+                                int max_level) {
+  // The middle three arguments are OpenCV's own defaults, spelled out only
+  // because the last one cannot be reached without them. See the declaration for
+  // why it is forced off.
+  cv::buildOpticalFlowPyramid(image, pyramid, cv::Size(win_size, win_size),
+                              max_level, /*withDerivatives=*/true,
+                              cv::BORDER_REFLECT_101, cv::BORDER_CONSTANT,
+                              /*tryReuseInputImage=*/false);
+}
+
+
 void Tracker::UpdateLK(const cv::Mat &image) {
-  img_ = image.clone();
-  if (cfg_.get("normalize", false).asBool()) {
+  // `img_` is read only within this call and the `MatchStereo` that follows it,
+  // and the caller owns `image` for the duration of the measurement, so the
+  // frame does not need its own copy. The old code cloned unconditionally --
+  // an allocation plus a 256 kB copy per image on TUM-VI -- and then overwrote
+  // the clone when normalizing, so the copy was dead either way.
+  //
+  // The cost of not copying is that `img_` no longer owns its pixels, which is
+  // why `pyramid_` has to (see `BuildOwnedPyramid`).
+  if (normalize_) {
     cv::normalize(image, img_, 0, 255, cv::NORM_MINMAX);
+  } else {
+    img_ = image;
   }
+  pyramid_is_current_ = false;
 
   if (!initialized_) {
     rows_ = img_.rows;
@@ -647,8 +688,8 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     mask_.setTo(0);
 
     // build image pyramid
-    cv::buildOpticalFlowPyramid(img_, pyramid_, cv::Size(win_size_, win_size_),
-                                max_level_);
+    BuildOwnedPyramid(img_, pyramid_, win_size_, max_level_);
+    pyramid_is_current_ = true;
     // setup the mask
     ResetMask(mask_(
         cv::Rect(margin_, margin_, cols_ - 2 * margin_, rows_ - 2 * margin_)));
@@ -664,8 +705,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
 
   // build new pyramid
   std::vector<cv::Mat> pyramid;
-  cv::buildOpticalFlowPyramid(img_, pyramid, cv::Size(win_size_, win_size_),
-                              max_level_);
+  BuildOwnedPyramid(img_, pyramid, win_size_, max_level_);
 
   // prepare for optical flow
   cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
@@ -811,6 +851,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
 
   // swap buffers ...
   std::swap(pyramid, pyramid_);
+  pyramid_is_current_ = true;
 
 }
 
