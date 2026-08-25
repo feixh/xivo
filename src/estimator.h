@@ -345,6 +345,17 @@ private:
    *  the Joseph form if the innovation covariance has no Cholesky factor; both
    *  live in ekf_update.h. */
   void MeasurementUpdate();
+  /** The occupied extent of the error state: the rows and columns of `P_` that an
+   *  update has to touch, as at most two contiguous runs (`StateRuns` in core.h).
+   *  Everything outside them is exactly uncorrelated with everything else, so the
+   *  update leaves it alone whether it visits it or not.
+   *
+   *  Both allocators take the lowest free slot, so this is a pair of high-water
+   *  marks over `gsel_` and `fsel_` -- 135 bool tests, against the ~9 MFLOP of the
+   *  update it shrinks. The premise is verified against `P_` and `H_` themselves
+   *  inside `EkfUpdateDowndate`, in debug builds and under
+   *  `-DXIVO_CHECK_OCCUPIED_STATE`. */
+  StateRuns OccupiedState() const;
   /** Predicts measurement (pixels) of features in input. */
   void Predict(std::list<FeaturePtr> &features);
   /** compute the motion jacobian F and G (private members `F_` and `G_`) at the
@@ -836,6 +847,15 @@ private:
     long rows{0};        ///< measurement rows, summed over updates
     long right_rows{0};  ///< of which right-camera rows
     long oos_rows{0};    ///< of which out-of-state rows
+    /** Calls to `MeasurementUpdate` -- more than one per frame, since the
+     *  1-pt RANSAC and loop-closure paths each run their own. */
+    long live_updates{0};
+    /** `OccupiedState().dim` summed over those calls: the dimension the update
+     *  *actually* ran on, which is what the occupancy above buys once it is
+     *  rounded up to whole runs. Strictly between `occupied-dim` and
+     *  `kFullSize`. */
+    long live_dim{0};
+    long live_runs{0};   ///< `OccupiedState().nruns` summed over those calls
   } census_;
   void PrintCensus(std::ostream &os) const;
 

@@ -307,6 +307,8 @@ void Estimator::PrintCensus(std::ostream &os) const {
      << " feature-slots:" << per(c.feat_slots, c.frames) << "/" << kMaxFeature
      << " group-slots:" << per(c.group_slots, c.frames) << "/" << kMaxGroup
      << " occupied-dim:" << dim << "/" << kFullSize
+     << " live-dim:" << per(c.live_dim, c.live_updates) << "/" << kFullSize
+     << " live-runs:" << per(c.live_runs, c.live_updates)
      << " update-features:" << per(c.update_feats, c.updates)
      << " rows:" << per(c.rows, c.updates)
      << " (right:" << per(c.right_rows, c.updates)

@@ -1576,13 +1576,33 @@ void Estimator::Predict(std::list<FeaturePtr> &features) {
   }
 }
 
+StateRuns Estimator::OccupiedState() const {
+  int groups_used = 0, features_used = 0;
+  for (int i = 0; i < kMaxGroup; ++i) {
+    if (gsel_[i]) {
+      groups_used = i + 1;
+    }
+  }
+  for (int i = 0; i < kMaxFeature; ++i) {
+    if (fsel_[i]) {
+      features_used = i + 1;
+    }
+  }
+  return OccupiedStateRuns(groups_used, features_used);
+}
+
 void Estimator::MeasurementUpdate() {
   // The cheap form, which needs the Cholesky factor of the innovation
   // covariance; if that does not exist the covariance has already gone
   // indefinite (or `S` is beyond double precision), and the Joseph form is both
   // the more robust update and the one this code shipped with. That fallback has
   // never triggered on TUM-VI, so it is logged rather than silently taken.
-  if (EkfUpdateDowndate(P_, H_, inn_, diagR_, meas_blocks_, err_)) {
+  const StateRuns live = OccupiedState();
+  ++census_.live_updates;
+  census_.live_dim += live.dim;
+  census_.live_runs += live.nruns;
+
+  if (EkfUpdateDowndate(P_, H_, inn_, diagR_, meas_blocks_, live, err_)) {
     return;
   }
   LOG(WARNING) << "innovation covariance is not positive definite; falling back "

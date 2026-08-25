@@ -42,9 +42,9 @@ struct MeasBlock {
 void EkfUpdateJoseph(MatX &P, const MatX &H, const VecX &inn, const VecX &diagR,
                      VecX &err);
 
-/** The same update, in the form that exploits (a) the block sparsity of `H` and
+/** The same update, in the form that exploits (a) the block sparsity of `H`,
  *  (b) the identity that makes Joseph's extra terms redundant at the optimal
- *  gain.
+ *  gain, and (c) the fact that most of the state is unoccupied.
  *
  *  With `M = H P` and `S = M H^T + R`, the optimal gain is `K = P H^T S^-1 =
  *  M^T S^-1` (using the symmetry of `P`), so
@@ -58,21 +58,38 @@ void EkfUpdateJoseph(MatX &P, const MatX &H, const VecX &inn, const VecX &diagR,
  *  Cholesky factor keeps the subtracted term symmetric positive semidefinite by
  *  construction. This is the update OpenVINS uses (`StateHelper::EKFUpdate`).
  *
- *  Costs, at the shipped capacity with 76 in-state features (N = 564, m = 153):
- *  `H P` block-sparsely 2 MFLOP instead of 49, `S` 0.6, the triangular solve 7,
- *  the downdate 24 -- against ~600 MFLOP for `EkfUpdateJoseph`, which also
- *  computed `H P` twice.
+ *  `live` names the rows and columns of `P` the update has to touch (see
+ *  `StateRuns` in core.h). Everything -- the columns of `M = H P`, the triangular
+ *  solve, the downdate, the mirror and `err` -- is restricted to them. That is
+ *  exact rather than approximate because a state outside `live` is *uncorrelated*
+ *  with every other (it may still carry a variance), and `H` is zero there, so its
+ *  column of `H P` is zero and the update neither moves it nor is moved by it.
+ *  Debug builds, and `-DXIVO_CHECK_OCCUPIED_STATE`, verify both premises against
+ *  the actual `P` and `H`.
  *
- *  `blocks` must cover every row of `H` exactly once, in order. Returns false
- *  and leaves `P` and `err` untouched if `S` is not numerically positive
- *  definite; the caller is expected to fall back to `EkfUpdateJoseph`. */
+ *  Pass `WholeState()` to restrict nothing. The runs are permitted to be larger
+ *  than the true occupied set; a slot that is inside a run but vacant costs
+ *  arithmetic and changes no result.
+ *
+ *  Costs, at the shipped capacity with 76 in-state features (N = 564, m = 153,
+ *  live dim ~350): `H P` block-sparsely 1.3 MFLOP instead of 49, `S` 0.6, the
+ *  triangular solve 4, the downdate 9 -- against ~600 MFLOP for
+ *  `EkfUpdateJoseph`, which also computed `H P` twice.
+ *
+ *  `blocks` must cover every row of `H` exactly once, in order, and every slot
+ *  they name must lie inside `live`. Returns false and leaves `P` and `err`
+ *  untouched if `S` is not numerically positive definite; the caller is expected
+ *  to fall back to `EkfUpdateJoseph`. */
 bool EkfUpdateDowndate(MatX &P, const MatX &H, const VecX &inn,
                        const VecX &diagR, const std::vector<MeasBlock> &blocks,
-                       VecX &err);
+                       const StateRuns &live, VecX &err);
 
-/** `M = H P`, using the block sparsity. Exposed for the test, which checks it
- *  against the dense product. */
+/** `M = H P`, using the block sparsity of `H` on its rows and the occupied
+ *  extent `live` on its columns. Equal to the dense `H * P` in full: the columns
+ *  outside `live` are set to zero rather than left alone, which is what they are
+ *  in the product anyway. Exposed for the test. */
 void MeasurementTimesCov(const MatX &H, const MatX &P,
-                         const std::vector<MeasBlock> &blocks, MatX &M);
+                         const std::vector<MeasBlock> &blocks,
+                         const StateRuns &live, MatX &M);
 
 } // namespace xivo

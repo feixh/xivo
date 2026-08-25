@@ -258,6 +258,90 @@ inline Mat2 InnovationCov(const Eigen::MatrixBase<JDerived> &J,
   return S;
 }
 
+////////////////////////////////////////
+// THE OCCUPIED EXTENT OF THE STATE
+////////////////////////////////////////
+/** The error-state indices an update has to touch, as a list of contiguous runs.
+ *
+ *  The covariance is always the full `kFullSize` square, but a group or feature
+ *  slot that is not occupied is *exactly uncorrelated* with everything else:
+ *  `RemoveGroupFromState` and `RemoveFeatureFromState` zero the slot's whole row
+ *  and column, `Feature::FillCovarianceBlock` does the same before writing its own
+ *  block, and the propagation writes only the motion block and the two
+ *  motion-to-structure correlation blocks. A vacant slot does keep a *variance* --
+ *  `P_` is initialized to a scaled identity, so an untouched slot sits at 1 -- but
+ *  it has no cross terms, and nothing about it is approximate.
+ *
+ *  Uncorrelated is all the update needs. With `L` the live set, `H` zero outside
+ *  it (a measurement cannot reference an unoccupied slot) and `P(i, ·)` supported
+ *  on `{i}` for `i` outside it, column `i` of `M = H P` is `H P e_i = P(i,i)
+ *  H(:,i) = 0`; so `S = M H^T` is unchanged, `err_i = M(:,i)^T u` is zero, and the
+ *  downdate `-W^T W` contributes nothing to any entry in row or column `i`. The
+ *  vacant part of `P` comes out of the update exactly as it went in, which is what
+ *  the dense form does too. Skipping it is a rearrangement, not an approximation.
+ *
+ *  It is worth skipping because the census (M0) found 7.3 of 45 group slots and 76
+ *  of 90 feature slots occupied on TUM-VI: 47% of the 564 dimensions are inert,
+ *  and the update's cost is quadratic in the dimension.
+ *
+ *  Both allocators take the *lowest* free slot (`AddGroupToState` and
+ *  `AddFeatureToState` scan from 0), so the occupied slots are packed toward
+ *  index 0 and the occupied region is described by two high-water marks rather
+ *  than by a set of 135 bits. That is what keeps this to two runs -- the motion
+ *  block and the group region are adjacent (`kGroupBegin == kCameraBegin +
+ *  kMaxCameraIntrinsics`), so they open a single run, and the features follow
+ *  after the unused group slots.
+ *
+ *  Runs are a covering, not a characterization: a run may contain vacant slots
+ *  (a feature slot freed below the high-water mark) and including them costs
+ *  arithmetic but changes no result. Excluding a live one would corrupt the
+ *  filter, so this errs in the safe direction by construction.
+ *
+ *  Runs are ascending and disjoint; `MirrorLowerTriangle` relies on the order to
+ *  know which block of a pair is below the diagonal. */
+constexpr int kMaxStateRuns = 2;
+
+struct StateRuns {
+  ColRun runs[kMaxStateRuns];
+  int nruns; ///< 1 or 2
+  int dim;   ///< total length of the runs
+};
+
+/** The occupied extent, given one past the highest occupied group slot and one
+ *  past the highest occupied feature slot (`Estimator::OccupiedState`). */
+inline StateRuns OccupiedStateRuns(int groups_used, int features_used) {
+  StateRuns s{};
+  // Motion, plus the camera-intrinsics block if this build has one, is always
+  // live and abuts the group region.
+  s.runs[0] = {0, kGroupBegin + kGroupSize * groups_used};
+  s.nruns = 1;
+  const int fend = kFeatureBegin + kFeatureSize * features_used;
+  if (features_used > 0) {
+    if (s.runs[0].len == kFeatureBegin) {
+      s.runs[0].len = fend; // every group slot is occupied: one run, not two
+    } else {
+      s.runs[1] = {kFeatureBegin, kFeatureSize * features_used};
+      s.nruns = 2;
+    }
+  }
+  s.dim = 0;
+  for (int i = 0; i < s.nruns; ++i) {
+    s.dim += s.runs[i].len;
+  }
+  return s;
+}
+
+/** The whole state as one run -- the extent that skips nothing. For callers with
+ *  no slot bookkeeping, and for the tests, where it is the reference the
+ *  occupied extent has to agree with. */
+inline StateRuns WholeState() {
+  StateRuns s{};
+  s.runs[0] = {0, kFullSize};
+  s.nruns = 1;
+  s.dim = kFullSize;
+  return s;
+}
+
 constexpr int kStructureSize = kFullSize - kMotionSize;
 using MatMotion = Eigen::Matrix<number_t, kMotionSize, kMotionSize>;
 
