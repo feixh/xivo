@@ -378,10 +378,24 @@ public:
   }
 
   /** Initial value of static variable `Feature::counter_`/smallest possible number
-   *  used for feature IDs. Its purpose is so that feature IDs and group IDs never
-   *  overlap.
-   *  \todo Completely separate feature and group IDs so that we don't have
-   *        problems if this SLAM code is ever run for a long, long time.  */
+   *  used for feature IDs.
+   *
+   *  This used to be load-bearing: group IDs were required to stay below it so
+   *  that the two kinds could share one ID space, and `Group::Reset` aborted the
+   *  process with "Group index overflow!!!" when they met. One group is created
+   *  per image, so that made counter0 a hard cap on run length -- 10000 images,
+   *  8.3 minutes at 20 Hz. 12 of TUM-VI's 28 sequences are longer than that
+   *  (every magistrale but 3 and 5, and all eight outdoors) and died partway
+   *  through.
+   *
+   *  The one place the two kinds genuinely shared an ID space was g2o's vertex
+   *  index inside `Optimizer`; that now interleaves them (see
+   *  `Optimizer::VertexId`), and group IDs are unbounded. counter0 is kept at its
+   *  original value because feature IDs starting at 10000 makes logs readable --
+   *  and because leaving it alone leaves every existing feature ID unchanged.
+   *  The adjacency maps are `unordered_map<int, ...>`, so renumbering features
+   *  would reshuffle hash iteration order and perturb results at the
+   *  floating-point level for no benefit. */
   static constexpr int counter0 = 10000;
 
 private:

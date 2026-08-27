@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "estimator.h"
 #include "feature.h"
@@ -95,6 +96,11 @@ void Feature::Destroy(FeaturePtr f) {
 
 void Feature::Reset(number_t x, number_t y) {
   id_ = counter_++;
+  // Not a partition check (groups are no longer confined below counter0) but a
+  // wrap check: Optimizer::VertexId encodes an ID as 2*id+1, so IDs must stay
+  // under INT_MAX/2. See Group::Reset for the same bound.
+  CHECK_GE(id_, counter0) << "Feature ID overflow";
+  CHECK_LT(id_, std::numeric_limits<int>::max() / 2) << "Feature ID overflow";
   sind_ = -1;
   init_counter_ = 0;
   lifetime_ = 0;

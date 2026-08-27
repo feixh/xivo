@@ -1,3 +1,5 @@
+#include <limits>
+
 #include "group.h"
 #include "feature.h"
 #include "mm.h"
@@ -33,9 +35,13 @@ void Group::Destroy(GroupPtr g) {
 
 void Group::Reset(const SO3 &Rsb, const Vec3 &Tsb) {
   id_ = counter_++;
-  if (id_ >= Feature::counter0) {
-    LOG(FATAL) << "Group index overflow!!!";
-  }
+  // Group IDs used to be capped at Feature::counter0 (10000) so that group and
+  // feature IDs could share one space. One group is created per image, so that
+  // aborted any run longer than 10000 frames -- 8.3 minutes at 20 Hz, which
+  // killed 12 of TUM-VI's 28 sequences. The sharing is now confined to
+  // Optimizer::VertexId, which interleaves the two, so the only bound left is
+  // that encoding's: IDs must stay under INT_MAX/2.
+  CHECK_LT(id_, std::numeric_limits<int>::max() / 2) << "Group ID overflow";
   lifetime_ = 0;
   sind_ = -1;
   status_ = GroupStatus::CREATED;

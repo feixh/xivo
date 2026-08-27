@@ -64,7 +64,7 @@ Optimizer::Optimizer(const Json::Value &cfg)
 
 FeatureVertex* Optimizer::CreateFeatureVertex(const FeatureAdapter &f) {
   auto fv = new FeatureVertex();
-  fv->setId(f.id);
+  fv->setId(VertexId(f.id, true));
   fv->setMarginalized(true);
   fv->setEstimate(f.Xs);
   fvertices_[f.id] = fv;
@@ -74,7 +74,7 @@ FeatureVertex* Optimizer::CreateFeatureVertex(const FeatureAdapter &f) {
 
 GroupVertex* Optimizer::CreateGroupVertex(const GroupAdapter &g) {
   auto gv = new GroupVertex();
-  gv->setId(g.id);
+  gv->setId(VertexId(g.id, false));
   gv->setEstimate(g.gsb);
   // FIXME (xfei): to fix gauge freedom
   // gv->setFixed(true);  
