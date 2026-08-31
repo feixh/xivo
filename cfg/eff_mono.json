@@ -13,7 +13,11 @@
   "print_bias_info": true,
   "draw_OOS": true,
   "integration_method": "PrinceDormand",
-  "use_OOS": false,
+  // Out-of-state (MSCKF) update, using the observations of tracks the EKF
+  // never promoted. Needs OOS.pose_window > 0 to do anything (see below):
+  // with the default 0 no window of past poses is kept, so a dropped track
+  // has nothing to constrain and this flag alone is inert.
+  "use_OOS": true,
   "use_depth_opt": false,
   "use_MH_gating": true,
   "use_1pt_RANSAC": false,
@@ -23,6 +27,17 @@
   "max_group_lifetime": 60,
   "remove_outlier_counter": 10,
   "OOS_update_min_observations": 5,
+  // Only the three keys that differ from the defaults in Estimator::Estimator.
+  // pose_window is the load-bearing one: its default is 0, which makes use_OOS
+  // inert. 20 frames = 1 s at 20 Hz; 30 measured no better. min_observations 2
+  // (vs the top-level 5) because a 2-view track still contributes one row after
+  // the nullspace projection. max_observations caps the rows one track can
+  // contribute; 30 measured worse. Together with use_OOS: -0.005 m mono ATE.
+  "OOS": {
+    "pose_window": 20,
+    "min_observations": 2,
+    "max_observations": 15
+  },
   "feature_owner_change_cov_factor": 1.5,
   "group_degrees_fixed": 4,
   "PrinceDormand": {
@@ -180,7 +195,10 @@
   // otherwise-fixed settings.
   "visual_meas_std": 0.75,
   "outlier_thresh": 1.1,
-  "oos_meas_std": 3.5,
+  // 1.0 px, down from 3.5. The 3.5 was inherited from the depth sub-filter; an
+  // out-of-state row is an ordinary undistorted-pixel measurement, so it belongs
+  // near the in-state visual_meas_std of 0.75, not near the sub-filter's value.
+  "oos_meas_std": 1.0,
   "max_depth": 5.0,
   "min_depth": 0.05,
   "adaptive_initial_depth": {
@@ -192,6 +210,17 @@
     "visual_meas_std": 3.5,
     "ready_steps": 2,
     "MH_thresh": 8.991
+  },
+  // Give a feature entering the state a covariance -- and a cross-covariance
+  // with the rest of the state -- consistent with the poses it was triangulated
+  // from, instead of the depth sub-filter's conditional 3x3 with every cross
+  // term zeroed (see Estimator::InitializeFeatureCovariance). -0.004 m mono ATE
+  // and -0.006 m RPE-8m here, but *only* with the OOS window above: enabled
+  // without it, it is +0.006 m -- an honest initial covariance only pays when
+  // there is enough measurement supply to spend the extra freedom on.
+  // min_views, meas_std and max_var stay at the defaults (2, visual_meas_std, 1e4).
+  "consistent_init": {
+    "enable": true
   },
   "triangulation": {
     "method": "direct_linear_transform_svd",
@@ -299,6 +328,20 @@
     "num_features_max": 180,
     "max_pixel_displacement": 64,
     "normalize": false,
+    // pyxivo reads frames with cv::imread (IMREAD_COLOR), so the front end ran
+    // on 3-channel BGR. Both cornerSubPix and CLAHE require a single channel.
+    // Inert on its own (+0.0002 m), i.e. a prerequisite, not a tuning knob.
+    "grayscale": true,
+    // TUM-VI's fisheye frames measure mean intensity 62.9 inside r < 80 px of
+    // the principal point and 33.2 outside r > 270 px (ratio 0.53), while FAST
+    // uses one global threshold of 20 -- so detection was starved in the
+    // periphery, which is where the parallax is. -0.016 m mono ATE, the largest
+    // single config effect in this work. clahe_clip_limit 10.0 and
+    // clahe_grid_size 8 are the defaults, taken from OpenVINS TrackKLT.cpp;
+    // clip 4 measured worse, and plain HISTOGRAM is 0.008 m worse than CLAHE.
+    "histogram_method": "CLAHE",
+    // cv::cornerSubPix on new detections. -0.006 m mono ATE.
+    "subpix_refine": true,
     "match_dropped_tracks": false,
     "do_outlier_rejection": false,
     "KLT": {
