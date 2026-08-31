@@ -331,7 +331,12 @@ void Estimator::PrintCensus(std::ostream &os) const {
      << " update-features:" << per(c.update_feats, c.updates)
      << " rows:" << per(c.rows, c.updates)
      << " (right:" << per(c.right_rows, c.updates)
-     << " oos:" << per(c.oos_rows, c.updates) << ")\n";
+     << " oos:" << per(c.oos_rows, c.updates) << ")";
+  if (consistent_init_) {
+    os << " consistent-init:" << num_consistent_init_ << "/"
+       << (num_consistent_init_ + num_consistent_init_failed_);
+  }
+  os << "\n";
 }
 
 void Estimator::FilterUpdate(int oos_rows) {

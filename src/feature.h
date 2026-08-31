@@ -272,6 +272,27 @@ public:
    *  of rows left, `rows - 3`. */
   int MarginalizeOOSPoint(int rows);
 
+  /** The three rows of this feature's stacked measurement that are invertible in
+   *  its own three parameters, used to give a feature entering the state a
+   *  covariance that knows about the pose uncertainty it was triangulated from.
+   *
+   *  Builds `[Hl | Hx] dx = res` over `views` exactly as the out-of-state update
+   *  does -- except that the anchor group's and the extrinsics' contribution
+   *  *through* the 3D point is added back, since here the point is not a free
+   *  variable but a function of them -- then QR-factorizes `Hl = Q [R; 0]` and
+   *  returns `R * perm'` (3x3, invertible), `Q1' Hx` and `Q1' res`. The
+   *  information in the remaining `2n - 3` rows is dropped; keeping it would mean
+   *  also applying an out-of-state update at promotion time.
+   *
+   *  Returns false when the geometry is degenerate (rank-deficient `Hl`, i.e. no
+   *  parallax) or anything is non-finite; nothing is modified in that case.
+   *  See `Estimator::InitializeFeatureCovariance` for what the caller does with
+   *  it, and OpenVINS `StateHelper::initialize_invertible` for the same recipe. */
+  bool ComputeInitJacobian(const std::vector<Obs> &views, const Mat3 &Rbc,
+                           const Vec3 &Tbc, const OOSOptions &options,
+                           Mat3 *Hl, Eigen::Matrix<number_t, 3, kFullSize> *Hx,
+                           Vec3 *res);
+
   /** Compute Jacobians for Loop Closure measurement update. */
   void ComputeLCJacobian(const Obs &obs, const Mat3 &Rbc, const Vec3 &Tbc,
                          int match_counter, MatX &H, VecX &inn);

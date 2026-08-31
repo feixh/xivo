@@ -232,6 +232,24 @@ Estimator::Estimator(const Json::Value &cfg)
     }
   }
 
+  {
+    // Consistent feature initialization; see `InitializeFeatureCovariance`.
+    auto ci = cfg_["consistent_init"];
+    consistent_init_ = ci.get("enable", false).asBool();
+    consistent_init_min_views_ = std::max(2, ci.get("min_views", 2).asInt());
+    // Pixel noise of one row of the stacked measurement. Defaults to the in-state
+    // visual noise, which is what these rows are.
+    const number_t ci_std =
+        ci.get("meas_std", cfg_["visual_meas_std"].asDouble()).asDouble();
+    consistent_init_R_ = ci_std * ci_std;
+    consistent_init_max_var_ = ci.get("max_var", 1e4).asDouble();
+    if (consistent_init_) {
+      LOG(INFO) << "consistent_init: min_views=" << consistent_init_min_views_
+                << "; meas_std=" << ci_std
+                << "; max_var=" << consistent_init_max_var_;
+    }
+  }
+
   // IMU clamping
   Vec3 _vec_;
   clamp_signals_ = cfg_.get("clamp_signals", false).asBool();
@@ -1109,13 +1127,101 @@ void Estimator::AddFeatureToState(FeaturePtr f) {
     fsel_[index] = true;
     f->SetStatus(FeatureStatus::INSTATE);
     f->SetSind(index);
-    f->FillCovarianceBlock(P_);
+    if (!InitializeFeatureCovariance(f)) {
+      f->FillCovarianceBlock(P_);
+    }
+    // After the covariance, so that mode 2 freezes the mean the covariance was
+    // built around (`InitializeFeatureCovariance` corrects `x_`).
     f->FreezeFEJ();
     VLOG(0) << StrFormat("feature #%d inserted @ %d/%d", f->id(), index,
                                kMaxFeature);
   } else {
     throw std::runtime_error("Failed to find slot in state for feature.");
   }
+}
+
+bool Estimator::InitializeFeatureCovariance(FeaturePtr f) {
+  if (!consistent_init_) {
+    return false;
+  }
+  auto ref = f->ref();
+  if (ref == nullptr || !ref->instate() || ref->sind() < 0) {
+    // The anchor is added to the state right *after* the feature in
+    // `ZeroGaugeXYAddFeatures`, so this is a normal outcome, not an error.
+    ++num_consistent_init_failed_;
+    return false;
+  }
+  Graph &graph{*Graph::instance()};
+  if (!graph.HasFeature(f)) {
+    ++num_consistent_init_failed_;
+    return false;
+  }
+  auto views = f->SelectOOSObservations(graph.GetObservationsOf(f),
+                                        oos_options_);
+  if (static_cast<int>(views.size()) < consistent_init_min_views_) {
+    ++num_consistent_init_failed_;
+    return false;
+  }
+
+  const int size = err_.size();
+  const int offset = kFeatureBegin + kFeatureSize * f->sind();
+  // The slot may still hold the previous occupant's row and column, and the
+  // products below read the whole of `P_`. Clear it first; this is the same
+  // clearing `FillCovarianceBlock` does, so the fallback path is unaffected.
+  P_.block(offset, 0, kFeatureSize, size).setZero();
+  P_.block(0, offset, size, kFeatureSize).setZero();
+
+  Mat3 Hl;
+  Eigen::Matrix<number_t, 3, kFullSize> Hx_full;
+  Vec3 res;
+  if (!f->ComputeInitJacobian(views, X_.Rbc.matrix(), X_.Tbc, oos_options_, &Hl,
+                              &Hx_full, &res)) {
+    ++num_consistent_init_failed_;
+    return false;
+  }
+  const Eigen::Matrix<number_t, 3, -1> Hx = Hx_full.leftCols(size);
+  const Mat3 Hl_inv = Hl.inverse();
+  if (!Hl_inv.allFinite()) {
+    ++num_consistent_init_failed_;
+    return false;
+  }
+
+  // sigma^2 I and not `R_`-scaled per row: `Q1` is orthonormal, so the projected
+  // noise covariance of the three retained rows is exactly sigma^2 I.
+  Mat3 M = Hx * P_ * Hx.transpose();
+  M.diagonal().array() += consistent_init_R_;
+  Mat3 Pff = Hl_inv * M * Hl_inv.transpose();
+  Pff = 0.5 * (Pff + Pff.transpose());
+  const MatX Pxf = -P_ * (Hx.transpose() * Hl_inv.transpose()); // size x 3
+  if (!Pff.allFinite() || !Pxf.allFinite() ||
+      !(Pff.diagonal().minCoeff() > 0) ||
+      Pff.diagonal().maxCoeff() > consistent_init_max_var_) {
+    // Weak parallax can make the depth variance astronomically large. Such a
+    // feature would be better left out of the state altogether, but the caller
+    // has already committed the slot, so fall back to the sub-filter's block.
+    ++num_consistent_init_failed_;
+    return false;
+  }
+
+  // One Gauss-Newton step on the retained rows, which is what makes the mean the
+  // one this covariance describes (OpenVINS does the same in
+  // `initialize_invertible`: "invertible systems can only update the new
+  // variable"). Rejected if it walks the depth out of bounds -- the sub-filter's
+  // estimate at least satisfied them.
+  const Vec3 dx = Hl_inv * res;
+  const number_t z_new = std::exp(f->x()(2) + dx(2));
+  if (!dx.allFinite() || !(z_new > min_z_) || !(z_new < max_z_)) {
+    ++num_consistent_init_failed_;
+    return false;
+  }
+
+  P_.block(0, offset, size, kFeatureSize) = Pxf;
+  P_.block(offset, 0, kFeatureSize, size) = Pxf.transpose();
+  P_.block<kFeatureSize, kFeatureSize>(offset, offset) = Pff;
+  f->UpdateState(dx);
+  f->P() = Pff;
+  ++num_consistent_init_;
+  return true;
 }
 
 void Estimator::PrintErrorStateNorm() {

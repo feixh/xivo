@@ -273,6 +273,81 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
   return oos_jac_counter_;
 }
 
+bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
+                                  const Mat3 &Rbc, const Vec3 &Tbc,
+                                  const OOSOptions &options, Mat3 *Hl_out,
+                                  Eigen::Matrix<number_t, 3, kFullSize> *Hx_out,
+                                  Vec3 *res_out) {
+  if (ref_ == nullptr || ref_->sind() < 0 || sind_ < 0) {
+    return false;
+  }
+  // Two monocular views give four rows for three unknowns, which is the floor.
+  if (views.size() < 2) {
+    return false;
+  }
+
+  Mat3 dXc_dx;
+  const Vec3 Xc = this->Xc(&dXc_dx);
+  const Mat3 Rsbr = ref_->Rsb().matrix();
+  const Vec3 Xbr = Rbc * Xc + Tbc;
+  cache_.Xs = Rsbr * Xbr + ref_->Tsb();
+
+  oos_num_obs_ = 0;
+  oos_num_right_obs_ = 0;
+  const int row_budget = static_cast<int>(oos_.Hf.rows());
+  int rows = 0;
+  for (const auto &obs : views) {
+    const int need = (OOSUsesStereo(options) && obs.has_right) ? 4 : 2;
+    if (rows + need > row_budget) {
+      break;
+    }
+    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options);
+    ++oos_num_obs_;
+  }
+  if (rows < 3) {
+    return false;
+  }
+
+  // `oos_.Hf` is d(pixel)/d(Xs) with `Xs` treated as a free 3D point, and
+  // `oos_.Hx` carries only the *observing* group's columns. In the state the
+  // point is not free: it is `Xs(x_, anchor pose, extrinsics)`, so that same
+  // `Hf` also lands on the anchor group's and the extrinsics' columns, and on
+  // the feature's own three. (When the anchor is itself one of the views, both
+  // paths contribute and they add -- exactly as `dXcn_dTbc` in
+  // `Feature::ComputeJacobian` is a sum of two terms.)
+  const Mat3 dXs_dx = Rsbr * Rbc * dXc_dx;
+  const Mat3 dXs_dWsbr = -Rsbr * SO3::hat(Xbr);
+  const Mat3 dXs_dWbc = -Rsbr * Rbc * SO3::hat(Xc);
+  const Mat3 dXs_dTbc = Rsbr;
+
+  const auto HfX = oos_.Hf.topRows(rows);
+  MatX Hx = oos_.Hx.topRows(rows);
+  const int roff = kGroupBegin + kGroupSize * ref_->sind();
+  Hx.block(0, roff, rows, 3) += HfX * dXs_dWsbr;
+  Hx.block(0, roff + 3, rows, 3) += HfX; // dXs_dTsbr = I
+  Hx.block(0, Index::Wbc, rows, 3) += HfX * dXs_dWbc;
+  Hx.block(0, Index::Tbc, rows, 3) += HfX * dXs_dTbc;
+  const MatX Hl = HfX * dXs_dx;
+
+  // Column pivoting, because the degenerate direction here is a specific one --
+  // depth, when the views carry no parallax -- and its rank test is what decides
+  // whether this feature can be initialized at all.
+  Eigen::ColPivHouseholderQR<MatX> qr(Hl);
+  qr.setThreshold(1e-6);
+  if (qr.rank() < 3) {
+    return false;
+  }
+  const Mat3 R = qr.matrixR().topLeftCorner<3, 3>().template triangularView<Eigen::Upper>();
+  const Mat3 perm = qr.colsPermutation();
+  const MatX Q = qr.householderQ();
+  const auto Q1 = Q.leftCols(3);
+
+  *Hl_out = R * perm.transpose();
+  *Hx_out = Q1.transpose() * Hx;
+  *res_out = Q1.transpose() * oos_.inn.head(rows);
+  return Hl_out->allFinite() && Hx_out->allFinite() && res_out->allFinite();
+}
+
 int Feature::MarginalizeOOSPoint(int rows) {
   if (rows < 4) {
     return 0;
