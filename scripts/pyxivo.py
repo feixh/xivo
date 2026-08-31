@@ -1,4 +1,5 @@
 import argparse
+import array
 import json
 import os, glob
 import re
@@ -10,7 +11,11 @@ import sys
 # which is why it is an environment variable rather than an argparse flag.
 sys.path.insert(0, os.environ.get('XIVO_LIB', 'lib'))
 import pyxivo
-import savers
+# `savers` is imported lazily, inside the mode branches that use one. It pulls in
+# numpy and transforms3d, which together cost ~25 MB of RSS -- 20% of the peak of
+# a whole run -- and `-mode runOnly`, which is what a throughput measurement and a
+# deployment both use, never constructs a saver at all. Nothing else in this file
+# touches numpy. See notes-speed/m4-memory.md.
 
 
 def is_stereo_cfg(cfg_path):
@@ -55,6 +60,9 @@ def main(args):
     ########################################
     # CHOOSE SAVERS
     ########################################
+    if args.mode != 'runOnly':
+        import savers
+
     if args.mode == 'eval':
         if args.dataset == 'tumvi':
             saver = savers.TUMVIEvalModeSaver(args)
@@ -125,7 +133,22 @@ def main(args):
             'config {} requests stereo, but dataset {} has no stereo pair '
             'configured'.format(args.cfg, args.dataset))
 
-    data = []
+    # Images and IMU samples are kept in two separate containers and merged in
+    # the run loop, rather than concatenated into one list of Python objects.
+    # The reason is memory: a TUM-VI room sequence has ~2.8k images but ~28k IMU
+    # samples at 200 Hz, and one boxed sample -- an outer tuple, an inner tuple,
+    # two 3-element lists and six float objects -- costs ~460 B, so the combined
+    # list was ~13 MB resident (measured: +17.6 MB across the whole load step),
+    # about 14% of the peak RSS of an entire run and larger than every one of
+    # XIVO's own buffers. The flat `array.array` form below is 56 B per sample.
+    #
+    # This does not change what the estimator sees. `float()` produces the same
+    # IEEE double as before and `array('d')` stores it without conversion, and
+    # the merge in the run loop reproduces the old visit order exactly -- see the
+    # comment there. Verified bit-identical on room1+room3, mono and stereo.
+    frames = []
+    imu_ts = array.array('q')
+    imu_v = array.array('d')
 
     # Stereo: map each left timestamp to its right-image path. TUM-VI names both
     # files after the (shared, hardware-triggered) timestamp, so pairing is exact
@@ -144,27 +167,46 @@ def main(args):
                 if ts not in right_ts:
                     continue
                 right_of[ts] = right_ts[ts]
-            data.append((ts, p))
+            frames.append((ts, p))
     elif args.dataset == 'cosyvio':
         img_filelist = os.path.join(img_dir, 'data.csv')
         with open(img_filelist, 'r') as fid:
-            for l in fid.readlines():
+            for l in fid:
                 if l[0].isdigit():
                     larr = l.strip().split(',')
                     ts = int(larr[0])
                     png_file = os.path.join(img_dir, larr[1])
-                    data.append((ts,png_file))
+                    frames.append((ts,png_file))
 
+    # Iterated rather than readlines()'d: the file is ~28k lines and the list of
+    # strings was a 3 MB transient for no benefit.
     with open(imu_path, 'r') as fid:
-        for l in fid.readlines():
+        for l in fid:
             if l[0].isdigit():
                 v = l.strip().split(',')
-                ts = int(v[0])
-                w = [float(x) for x in v[1:4]]
-                t = [float(x) for x in v[4:]]
-                data.append((ts, (w, t)))
+                imu_ts.append(int(v[0]))
+                imu_v.append(float(v[1]))
+                imu_v.append(float(v[2]))
+                imu_v.append(float(v[3]))
+                imu_v.append(float(v[4]))
+                imu_v.append(float(v[5]))
+                imu_v.append(float(v[6]))
 
-    data.sort(key=lambda tup: tup[0])
+    frames.sort(key=lambda tup: tup[0])
+
+    # The IMU side used to be ordered by the same stable sort, which for equal
+    # timestamps means file order. It already is in file order, so normally there
+    # is nothing to do; the permutation below is the fallback for a data file that
+    # is not monotonic, and it is applied to the arrays so the run loop stays
+    # branch-free.
+    if any(imu_ts[k] < imu_ts[k - 1] for k in range(1, len(imu_ts))):
+        order = sorted(range(len(imu_ts)), key=imu_ts.__getitem__)
+        imu_ts = array.array('q', (imu_ts[k] for k in order))
+        permuted = array.array('d')
+        for k in order:
+            permuted.extend(imu_v[6 * k:6 * k + 6])
+        imu_v = permuted
+        del order, permuted
 
     if stereo:
         n_left = len(glob.glob(os.path.join(img_dir, '*.png')))
@@ -207,14 +249,25 @@ def main(args):
     estimator = None
     try:
         estimator = pyxivo.Estimator(args.cfg, viewer_cfg, args.seq, False)
-        for i, (ts, content) in enumerate(data):
+        # Merge of the two timestamp-ordered streams. This is exactly the order a
+        # single stable sort of [images..., imu...] produced before: `<=` on the
+        # image side visits the image first when a frame and a sample share a
+        # timestamp, which is what the old code did because every image was
+        # appended to the list before any IMU sample.
+        n_frames = len(frames)
+        n_imu = len(imu_ts)
+        n_total = n_frames + n_imu
+        i = 0
+        i_frame = 0
+        i_imu = 0
+        while i_frame < n_frames or i_imu < n_imu:
             if i > 0 and i % 1000 == 0:
-                print('{:6}/{:6}'.format(i, len(data)))
-            if isinstance(content, tuple):
-                gyro, accel = content
-                estimator.InertialMeas(ts, gyro[0], gyro[1], gyro[2], accel[0],
-                                    accel[1], accel[2])
-            else:
+                print('{:6}/{:6}'.format(i, n_total))
+            i += 1
+            if i_imu >= n_imu or (i_frame < n_frames
+                                  and frames[i_frame][0] <= imu_ts[i_imu]):
+                ts, content = frames[i_frame]
+                i_frame += 1
                 if stereo:
                     estimator.VisualMeasStereo(ts, content, right_of[ts])
                 else:
@@ -224,6 +277,12 @@ def main(args):
                 estimator.Visualize()
                 if (args.mode != 'runOnly') and (estimator.VisionInitialized()):
                     saver.onVisionUpdate(estimator, datum=(ts, content))
+            else:
+                b = 6 * i_imu
+                estimator.InertialMeas(imu_ts[i_imu], imu_v[b], imu_v[b + 1],
+                                       imu_v[b + 2], imu_v[b + 3],
+                                       imu_v[b + 4], imu_v[b + 5])
+                i_imu += 1
 
     finally:
         if stereo and estimator is not None:
