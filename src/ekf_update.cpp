@@ -148,9 +148,21 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
   //  - only the feature run is left per feature.
   //
   // Each output element still accumulates its runs in the same order -- the
-  // fixed shared runs ascending, then the group, then the feature -- and each
-  // gemm sums over the same K in the same order, which is what keeps this
-  // bit-identical to the per-block form rather than merely equal to rounding.
+  // fixed shared runs ascending, then the group, then the feature -- and no
+  // merge changes K (a merged group gemm still has K = 6, a merged feature gemm
+  // K = 3). That makes this *mathematically* the same sum, but it is **not
+  // bit-identical**: merging changes M, and Eigen's gemm is not shape-invariant
+  // in the last bit -- a different M means a different LHS packing and a
+  // different row-peeling path through `gebp_kernel`, hence different rounding.
+  //
+  // Measured, by computing both forms and comparing element by element over a
+  // whole room3 run: they differ on every update, in ~1-50% of the elements of
+  // `M` and `S`, by at most 2e-13 of the matrix's own max magnitude (typically
+  // 2e-16, i.e. one ulp; the large *relative* differences are all on elements
+  // near zero, where the sum cancels). This is a reassociation, not an error --
+  // `unitTests_ekf_update` checks the result against the dense Joseph form.
+  // The branch carries a full 6-member ensemble as its accuracy proof; see
+  // notes-speed/m2-batched-sparse-products.md.
   const int nb = static_cast<int>(blocks.size());
   for (int b0 = 0; b0 < nb;) {
     if (!blocks[b0].sparse()) {
@@ -228,7 +240,8 @@ void CovTimesMeasurementT(const MatX &M, const MatX &H,
   // Batched exactly as `MeasurementTimesCov` above, and for the same reason: the
   // columns of `S` a block owns are its rows of `H`, so a span of consecutive
   // sparse blocks owns a contiguous span of columns and the fixed shared runs
-  // collapse into one gemm each over the whole span.
+  // collapse into one gemm each over the whole span. Same caveat as above: the
+  // sum is the same one, reassociated at the last bit, not bit-identical.
   const int nb = static_cast<int>(blocks.size());
   for (int b0 = 0; b0 < nb;) {
     if (!blocks[b0].sparse()) {
