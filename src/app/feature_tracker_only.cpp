@@ -70,7 +70,9 @@ int main(int argc, char **argv) {
       }
 
       if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
-        auto image = cv::imread(msg->image_path_);
+        // One channel is all the tracker uses; see pybind11/pyxivo.cpp's
+        // ReadImage() and notes-speed/m1-grayscale.md.
+        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
         est->VisualMeasTrackerOnly(msg->ts_, image);
 
         if (viewer) {

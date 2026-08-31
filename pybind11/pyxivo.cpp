@@ -51,6 +51,33 @@ cv::Mat CloneImageFromBuffer(const py::buffer_info &info) {
   return borrowed.clone();
 }
 
+/** Decodes one image file for the estimator, as a single-channel 8-bit image.
+ *
+ *  This used to be a bare `cv::imread(path)`, whose default flag is
+ *  `IMREAD_COLOR`: every grayscale frame was expanded to three identical
+ *  channels, and every stage downstream then paid for all three. TUM-VI's frames
+ *  are 16-bit grayscale PNGs, so the expansion is pure waste --
+ *  `buildOpticalFlowPyramid` builds three pyramids, `calcOpticalFlowPyrLK`
+ *  accumulates each window's normal equations over three copies of the same
+ *  plane, and `FastFeatureDetector` converts back to gray internally. On one core
+ *  that was 3.6 ms of the 9.8 ms XIVO spent per monocular frame and 6.9 ms of the
+ *  24.8 ms per stereo frame.
+ *
+ *  The estimator itself never wanted colour: `Tracker` only ever hands the image
+ *  to KLT and to the detector, and `Canvas::Update` already handles a
+ *  single-channel input (it converts for display). A camera that really is colour
+ *  still works -- `IMREAD_GRAYSCALE` converts -- and the numpy entry points are
+ *  untouched, so a caller who passes an HxWx3 array gets the old behaviour.
+ *
+ *  Not bit-identical to the three-channel path: KLT's per-window sums are exactly
+ *  three times larger with three channels, which is a different rounding of the
+ *  same quantity, and `minEigThreshold` (an absolute threshold on those sums)
+ *  therefore bites at a different point. See notes-speed/m1-grayscale.md for the
+ *  six-member ensemble that pins the accuracy. */
+cv::Mat ReadImage(const std::string &path) {
+  return cv::imread(path, cv::IMREAD_GRAYSCALE);
+}
+
 } // namespace
 
 class EstimatorWrapper {
@@ -117,7 +144,7 @@ public:
 
   void VisualMeas(uint64_t ts, std::string &image_path) {
 
-    auto image = cv::imread(image_path);
+    auto image = ReadImage(image_path);
 
     estimator_->VisualMeas(timestamp_t{ts}, image);
 
@@ -152,8 +179,8 @@ public:
   void VisualMeasStereo(uint64_t ts, std::string &image_path,
                         std::string &image_path_r) {
 
-    auto image = cv::imread(image_path);
-    auto image_r = cv::imread(image_path_r);
+    auto image = ReadImage(image_path);
+    auto image_r = ReadImage(image_path_r);
     if (image.empty()) {
       LOG(FATAL) << "failed to read left image " << image_path;
     }
@@ -175,7 +202,7 @@ public:
 
   void VisualMeasTrackerOnly(uint64_t ts, std::string &image_path) {
 
-    auto image = cv::imread(image_path);
+    auto image = ReadImage(image_path);
 
     estimator_->VisualMeasTrackerOnly(timestamp_t{ts}, image);
 
