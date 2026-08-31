@@ -63,6 +63,51 @@ void CheckLiveExtent(const MatX &P, const MatX &H, const StateRuns &live) {
 }
 #endif
 
+/** One past the last *fixed* shared run: `kJacSharedRuns` ends with the group
+ *  sentinel, whose start depends on the block, and the runs before it are the
+ *  same columns for every visual measurement in the update. */
+constexpr int kJacFixedRuns = static_cast<int>(kJacSharedRuns.size()) - 1;
+
+/** The reference group's column run of a sparse block. */
+inline ColRun GroupRun(const MeasBlock &b) {
+  return {kGroupBegin + kGroupSize * b.gsind, kGroupSize};
+}
+
+/** The feature's own column run of a sparse block. */
+inline ColRun FeatureRun(const MeasBlock &b) {
+  return {kFeatureBegin + kFeatureSize * b.fsind, kFeatureSize};
+}
+
+/** One past the last block of the maximal run of consecutive sparse blocks
+ *  starting at `b0`, and the number of rows of `H` it spans. Blocks cover the
+ *  rows of `H` in order and without gaps, so a run of blocks is a run of rows. */
+inline int SparseSpanEnd(const std::vector<MeasBlock> &blocks, int b0,
+                         int &rows) {
+  int b1 = b0;
+  while (b1 < static_cast<int>(blocks.size()) && blocks[b1].sparse()) {
+    ++b1;
+  }
+  rows = blocks[b1 - 1].row + blocks[b1 - 1].rows - blocks[b0].row;
+  return b1;
+}
+
+/** One past the last block in `[b0, b1)` that names the same reference group as
+ *  `b0` (`Group`) or the same group *and* feature (`Feature`), and the rows it
+ *  spans. A feature's left- and right-camera rows are two adjacent blocks with
+ *  identical slots, so the `Feature` grouping halves the block count in stereo,
+ *  and a group is usually shared by several consecutive features. */
+enum class MergeBy { Group, Feature };
+inline int MergeEnd(const std::vector<MeasBlock> &blocks, int b0, int b1,
+                    MergeBy by, int &rows) {
+  int k = b0 + 1;
+  while (k < b1 && blocks[k].gsind == blocks[b0].gsind &&
+         (by == MergeBy::Group || blocks[k].fsind == blocks[b0].fsind)) {
+    ++k;
+  }
+  rows = blocks[k - 1].row + blocks[k - 1].rows - blocks[b0].row;
+  return k;
+}
+
 /** Zeros the columns of `M` that fall in the gaps between the runs of `live`. */
 void ZeroOutsideRuns(MatX &M, const StateRuns &live) {
   int c = 0;
@@ -87,34 +132,87 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
   // are columns of zeros of the product; write them once here rather than let
   // three later loops step over them.
   ZeroOutsideRuns(M, live);
-  for (const auto &b : blocks) {
-    ColRun runs[kJacRuns];
-    const bool sparse = b.sparse();
-    if (sparse) {
-      MeasurementRuns(b.gsind, b.fsind, runs);
-    }
-    for (int j = 0; j < live.nruns; ++j) {
-      const ColRun &cj = live.runs[j];
-      auto dst = M.block(b.row, cj.start, b.rows, cj.len);
-      if (!sparse) {
-        // A dense block still only meets the occupied rows of `P`, so the sum is
-        // over `live` on both sides: `nruns^2` gemms rather than one rows x N x N.
+
+  // The flop count of this product is tiny -- 283 rows x 25 nonzero columns x 331
+  // live columns is 2.3 MFLOP -- but issuing it as one gemm per (row block,
+  // column run, live run) meant ~1700 calls per stereo update with M as small as
+  // 2 and K as small as 1, and Eigen's per-call cost then dominated. It is
+  // batched three ways below, all of them exact rather than approximate:
+  //
+  //  - the fixed shared runs (`Wsb Tsb`, `bg`, `Wbc Tbc`, `td`) are the *same*
+  //    columns for every visual measurement, so they are driven once over the
+  //    whole span of consecutive sparse blocks;
+  //  - a feature's left- and right-camera rows are two adjacent blocks with the
+  //    same group and feature slot, and consecutive features usually share a
+  //    reference group, so the group run is driven over merged spans;
+  //  - only the feature run is left per feature.
+  //
+  // Each output element still accumulates its runs in the same order -- the
+  // fixed shared runs ascending, then the group, then the feature -- and each
+  // gemm sums over the same K in the same order, which is what keeps this
+  // bit-identical to the per-block form rather than merely equal to rounding.
+  const int nb = static_cast<int>(blocks.size());
+  for (int b0 = 0; b0 < nb;) {
+    if (!blocks[b0].sparse()) {
+      // A dense block still only meets the occupied rows of `P`, so the sum is
+      // over `live` on both sides: `nruns^2` gemms rather than one rows x N x N.
+      const MeasBlock &b = blocks[b0];
+      for (int j = 0; j < live.nruns; ++j) {
+        const ColRun &cj = live.runs[j];
+        auto dst = M.block(b.row, cj.start, b.rows, cj.len);
         dst.setZero();
         for (int i = 0; i < live.nruns; ++i) {
           const ColRun &ci = live.runs[i];
           dst.noalias() += H.block(b.row, ci.start, b.rows, ci.len) *
                            P.block(ci.start, cj.start, ci.len, cj.len);
         }
-        continue;
       }
-      // Only the rows of `P` this block's nonzero columns select contribute, so
-      // the product is a sum of a handful of short-and-wide gemms.
-      dst.setZero();
-      for (const auto &r : runs) {
-        dst.noalias() += H.block(b.row, r.start, b.rows, r.len) *
-                         P.block(r.start, cj.start, r.len, cj.len);
+      ++b0;
+      continue;
+    }
+
+    int span_rows = 0;
+    const int b1 = SparseSpanEnd(blocks, b0, span_rows);
+    const int r0 = blocks[b0].row;
+
+    for (int j = 0; j < live.nruns; ++j) {
+      const ColRun &cj = live.runs[j];
+      M.block(r0, cj.start, span_rows, cj.len).setZero();
+    }
+    for (int s = 0; s < kJacFixedRuns; ++s) {
+      const ColRun &rs = kJacSharedRuns[s];
+      for (int j = 0; j < live.nruns; ++j) {
+        const ColRun &cj = live.runs[j];
+        M.block(r0, cj.start, span_rows, cj.len).noalias() +=
+            H.block(r0, rs.start, span_rows, rs.len) *
+            P.block(rs.start, cj.start, rs.len, cj.len);
       }
     }
+    for (int i = b0; i < b1;) {
+      int rows = 0;
+      const int k = MergeEnd(blocks, i, b1, MergeBy::Group, rows);
+      const ColRun rg = GroupRun(blocks[i]);
+      for (int j = 0; j < live.nruns; ++j) {
+        const ColRun &cj = live.runs[j];
+        M.block(blocks[i].row, cj.start, rows, cj.len).noalias() +=
+            H.block(blocks[i].row, rg.start, rows, rg.len) *
+            P.block(rg.start, cj.start, rg.len, cj.len);
+      }
+      i = k;
+    }
+    for (int i = b0; i < b1;) {
+      int rows = 0;
+      const int k = MergeEnd(blocks, i, b1, MergeBy::Feature, rows);
+      const ColRun rf = FeatureRun(blocks[i]);
+      for (int j = 0; j < live.nruns; ++j) {
+        const ColRun &cj = live.runs[j];
+        M.block(blocks[i].row, cj.start, rows, cj.len).noalias() +=
+            H.block(blocks[i].row, rf.start, rows, rf.len) *
+            P.block(rf.start, cj.start, rf.len, cj.len);
+      }
+      i = k;
+    }
+    b0 = b1;
   }
 }
 
@@ -127,24 +225,55 @@ void CovTimesMeasurementT(const MatX &M, const MatX &H,
                           const std::vector<MeasBlock> &blocks,
                           const StateRuns &live, MatX &S) {
   S.resize(M.rows(), H.rows());
-  for (const auto &b : blocks) {
-    auto dst = S.middleCols(b.row, b.rows);
-    if (!b.sparse()) {
+  // Batched exactly as `MeasurementTimesCov` above, and for the same reason: the
+  // columns of `S` a block owns are its rows of `H`, so a span of consecutive
+  // sparse blocks owns a contiguous span of columns and the fixed shared runs
+  // collapse into one gemm each over the whole span.
+  const int nb = static_cast<int>(blocks.size());
+  for (int b0 = 0; b0 < nb;) {
+    if (!blocks[b0].sparse()) {
+      const MeasBlock &b = blocks[b0];
+      auto dst = S.middleCols(b.row, b.rows);
       dst.setZero();
       for (int i = 0; i < live.nruns; ++i) {
         const ColRun &ci = live.runs[i];
         dst.noalias() += M.middleCols(ci.start, ci.len) *
                          H.block(b.row, ci.start, b.rows, ci.len).transpose();
       }
+      ++b0;
       continue;
     }
-    ColRun runs[kJacRuns];
-    MeasurementRuns(b.gsind, b.fsind, runs);
-    dst.setZero();
-    for (const auto &r : runs) {
-      dst.noalias() += M.middleCols(r.start, r.len) *
-                       H.block(b.row, r.start, b.rows, r.len).transpose();
+
+    int span_rows = 0;
+    const int b1 = SparseSpanEnd(blocks, b0, span_rows);
+    const int r0 = blocks[b0].row;
+
+    S.middleCols(r0, span_rows).setZero();
+    for (int s = 0; s < kJacFixedRuns; ++s) {
+      const ColRun &rs = kJacSharedRuns[s];
+      S.middleCols(r0, span_rows).noalias() +=
+          M.middleCols(rs.start, rs.len) *
+          H.block(r0, rs.start, span_rows, rs.len).transpose();
     }
+    for (int i = b0; i < b1;) {
+      int rows = 0;
+      const int k = MergeEnd(blocks, i, b1, MergeBy::Group, rows);
+      const ColRun rg = GroupRun(blocks[i]);
+      S.middleCols(blocks[i].row, rows).noalias() +=
+          M.middleCols(rg.start, rg.len) *
+          H.block(blocks[i].row, rg.start, rows, rg.len).transpose();
+      i = k;
+    }
+    for (int i = b0; i < b1;) {
+      int rows = 0;
+      const int k = MergeEnd(blocks, i, b1, MergeBy::Feature, rows);
+      const ColRun rf = FeatureRun(blocks[i]);
+      S.middleCols(blocks[i].row, rows).noalias() +=
+          M.middleCols(rf.start, rf.len) *
+          H.block(blocks[i].row, rf.start, rows, rf.len).transpose();
+      i = k;
+    }
+    b0 = b1;
   }
 }
 
