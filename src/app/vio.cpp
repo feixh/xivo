@@ -91,13 +91,18 @@ int main(int argc, char **argv) {
       // mutually exclusive and a stereo pair cannot be mistaken for a left-only
       // frame.
       bool did_visual = false;
+      // IMREAD_GRAYSCALE, not the default IMREAD_COLOR: the estimator only ever
+      // uses one channel, and decoding a grayscale PNG into 8UC3 makes the
+      // decode, the pyramid and the KLT solve carry three identical planes.
+      // Kept in step with pybind11/pyxivo.cpp's ReadImage(); see
+      // notes-speed/m1-grayscale.md.
       if (auto msg = dynamic_cast<msg::StereoImage *>(raw_msg)) {
-        auto image = cv::imread(msg->image_path_);
-        auto image_r = cv::imread(msg->image_path_r_);
+        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
+        auto image_r = cv::imread(msg->image_path_r_, cv::IMREAD_GRAYSCALE);
         est->VisualMeasStereo(msg->ts_, image, image_r);
         did_visual = true;
       } else if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
-        auto image = cv::imread(msg->image_path_);
+        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
         est->VisualMeas(msg->ts_, image);
         did_visual = true;
       }

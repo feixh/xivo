@@ -10,6 +10,12 @@
 #include "opencv2/highgui/highgui.hpp"
 #include "utils.h"
 
+// For ReadImage: one read(2) per frame instead of libpng's stdio dribble.
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
+
 // for visualization
 #include "viewer.h"
 #include "visualize.h"
@@ -49,6 +55,66 @@ cv::Mat CloneImageFromBuffer(const py::buffer_info &info) {
                    static_cast<int>(info.shape[1]), CV_8UC(channels),
                    info.ptr);
   return borrowed.clone();
+}
+
+/** Decodes one image file for the estimator, as a single-channel 8-bit image.
+ *
+ *  This used to be a bare `cv::imread(path)`, whose default flag is
+ *  `IMREAD_COLOR`: every grayscale frame was expanded to three identical
+ *  channels, and every stage downstream then paid for all three. TUM-VI's frames
+ *  are 16-bit grayscale PNGs, so the expansion is pure waste --
+ *  `buildOpticalFlowPyramid` builds three pyramids, `calcOpticalFlowPyrLK`
+ *  accumulates each window's normal equations over three copies of the same
+ *  plane, and `FastFeatureDetector` converts back to gray internally. On one core
+ *  that was 3.6 ms of the 9.8 ms XIVO spent per monocular frame and 6.9 ms of the
+ *  24.8 ms per stereo frame.
+ *
+ *  The estimator itself never wanted colour: `Tracker` only ever hands the image
+ *  to KLT and to the detector, and `Canvas::Update` already handles a
+ *  single-channel input (it converts for display). A camera that really is colour
+ *  still works -- `IMREAD_GRAYSCALE` converts -- and the numpy entry points are
+ *  untouched, so a caller who passes an HxWx3 array gets the old behaviour.
+ *
+ *  Not bit-identical to the three-channel path: KLT's per-window sums are exactly
+ *  three times larger with three channels, which is a different rounding of the
+ *  same quantity, and `minEigThreshold` (an absolute threshold on those sums)
+ *  therefore bites at a different point. See notes-speed/m1-grayscale.md for the
+ *  six-member ensemble that pins the accuracy.
+ *
+ *  The file is pulled into memory in one `read(2)` and decoded from there rather
+ *  than handed to `cv::imread`. `imread` gives libpng a `FILE*`, and libpng asks
+ *  for a few bytes at a time, so glibc's 4 kB buffer turns one 300 kB PNG into
+ *  ~75 `read` syscalls plus a separate `fopen`/`fread`/`fclose` for the format
+ *  sniff -- 1.15% of stereo CPU was in the syscall stub. `imdecode` runs the same
+ *  `PngDecoder`, differing only in that its read callback is a `memcpy`
+ *  (`grfmt_png.cpp`), so the decoded pixels are bit-identical. The buffer is
+ *  reused across frames so the read costs no allocation. */
+cv::Mat ReadImage(const std::string &path) {
+  thread_local std::vector<uchar> buf;
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    return cv::imread(path, cv::IMREAD_GRAYSCALE); // let OpenCV log the error
+  }
+  struct stat st;
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+    ::close(fd);
+    return cv::imread(path, cv::IMREAD_GRAYSCALE);
+  }
+  buf.resize(static_cast<size_t>(st.st_size));
+  size_t off = 0;
+  while (off < buf.size()) {
+    const ssize_t n = ::read(fd, buf.data() + off, buf.size() - off);
+    if (n <= 0) {
+      break;
+    }
+    off += static_cast<size_t>(n);
+  }
+  ::close(fd);
+  if (off != buf.size()) {
+    return cv::imread(path, cv::IMREAD_GRAYSCALE);
+  }
+  const cv::Mat raw(1, static_cast<int>(buf.size()), CV_8U, buf.data());
+  return cv::imdecode(raw, cv::IMREAD_GRAYSCALE);
 }
 
 } // namespace
@@ -117,7 +183,7 @@ public:
 
   void VisualMeas(uint64_t ts, std::string &image_path) {
 
-    auto image = cv::imread(image_path);
+    auto image = ReadImage(image_path);
 
     estimator_->VisualMeas(timestamp_t{ts}, image);
 
@@ -152,8 +218,8 @@ public:
   void VisualMeasStereo(uint64_t ts, std::string &image_path,
                         std::string &image_path_r) {
 
-    auto image = cv::imread(image_path);
-    auto image_r = cv::imread(image_path_r);
+    auto image = ReadImage(image_path);
+    auto image_r = ReadImage(image_path_r);
     if (image.empty()) {
       LOG(FATAL) << "failed to read left image " << image_path;
     }
@@ -175,7 +241,7 @@ public:
 
   void VisualMeasTrackerOnly(uint64_t ts, std::string &image_path) {
 
-    auto image = cv::imread(image_path);
+    auto image = ReadImage(image_path);
 
     estimator_->VisualMeasTrackerOnly(timestamp_t{ts}, image);
 
