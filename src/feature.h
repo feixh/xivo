@@ -149,6 +149,28 @@ public:
    *       which is guaranteed when using log-depth paramterization. */
   number_t z() const;
   const Vec3 &x() const { return x_; }
+
+  /** First-estimates Jacobians; see `Group::FreezeFEJ` for the rationale.
+   * `FreezeFEJ` records `x_` as it was when the feature entered the state.
+   * Re-anchoring (`ChangeOwner`) re-expresses `x_` in a different group's frame,
+   * which makes the old frozen value meaningless, so that path re-freezes. */
+  void FreezeFEJ() {
+    x_fej_ = x_;
+    fej_valid_ = true;
+  }
+  bool fej_valid() const { return fej_valid_; }
+  const Vec3 &x_fej() const { return x_fej_; }
+
+  /** 0 = off, 1 = group poses only, 2 = group poses and feature. Set once from
+   * the config; a static because `ComputeJacobian` is called from several places
+   * that have no business knowing about it. */
+  static void SetFEJMode(int mode) { fej_mode_ = mode; }
+  static int fej_mode() { return fej_mode_; }
+  /** Whether the out-of-state (MSCKF) Jacobians are relinearized at the frozen
+   * group poses as well. Separate from `fej_mode_` so the two can be attributed
+   * independently. */
+  static void SetFEJOOS(bool on) { fej_oos_ = on; }
+
   const Mat3 &P() const { return P_; }
   Vec3 &x() { return x_; }
   Mat3 &P() { return P_; }
@@ -192,6 +214,14 @@ public:
   void ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
                        const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
                        const Vec3 &bg, const Vec3 &Vsb, number_t td);
+
+  /** Overwrites the Jacobian blocks `ComputeJacobian` just filled with the same
+   * quantities evaluated at the frozen (first) estimates of the anchor group
+   * and, in mode 2, of the feature itself. Called only when `fej_mode_ > 0`;
+   * leaves the residual alone. */
+  void RelinearizeFEJ(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
+                      const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
+                      const Vec3 &bg, const Vec3 &Vsb, number_t td);
 
   void inflate_cov(number_t factor) { P_ *= factor; }
 
@@ -457,6 +487,12 @@ private:
 
   /** "Backup" of `Feature::x_` used in `Estimator::OnePointRANSAC` */
   Vec3 x0_;
+
+  /** First estimate of `x_`; see `FreezeFEJ`. */
+  Vec3 x_fej_;
+  bool fej_valid_{false};
+  static int fej_mode_;
+  static bool fej_oos_;
 
   /** Subfilter (for estimating depth) covariance */
   Mat3 P_;

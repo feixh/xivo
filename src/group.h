@@ -74,6 +74,24 @@ public:
   }
   void UpdateState(const Vec6 &dX) { X_ += dX; }
 
+  /** First-estimates Jacobians. `FreezeFEJ` records the pose this group had at
+   * the moment it entered the state; `Feature::ComputeJacobian` then evaluates
+   * the measurement Jacobian w.r.t. this group at that frozen value instead of
+   * at the current estimate, while the residual stays at the current estimate.
+   * That keeps the linearization point of a state element fixed over its whole
+   * lifetime, which is what preserves the four unobservable directions (global
+   * position and yaw) in the nullspace of the linearized system -- see Huang et
+   * al., "Observability-based rules for designing consistent EKF SLAM
+   * estimators". Frozen once and never refreshed: refreshing it is exactly the
+   * thing FEJ exists to avoid. */
+  void FreezeFEJ() {
+    Xfej_ = X_;
+    fej_valid_ = true;
+  }
+  bool fej_valid() const { return fej_valid_; }
+  const SO3 &Rsb_fej() const { return Xfej_.Rsb; }
+  const Vec3 &Tsb_fej() const { return Xfej_.Tsb; }
+
 private:
   Group(const Group &) = delete;
   // default constructor used in memory manager's pre-allocation
@@ -104,6 +122,10 @@ private:
 
   /** Backup of `X_` = (Rsb, Tsb) used in `Estimator::OnePointRANSAC` */
   SO3xR3 X0_;
+
+  /** First estimate of `X_`; see `FreezeFEJ`. */
+  SO3xR3 Xfej_;
+  bool fej_valid_;
 };
 
 } // namespace xivo

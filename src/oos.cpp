@@ -342,6 +342,44 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   oos_.inn.segment<2>(row) = obs.xp - cache_.xp;
 
+  // First-estimates Jacobians. Re-evaluate every derivative w.r.t. this group at
+  // the pose the group had when it entered the state, leaving the residual above
+  // at the current estimate -- see `Group::FreezeFEJ` and
+  // `Feature::RelinearizeFEJ`, and OpenVINS `UpdaterHelper.cpp` which does the
+  // same thing in the same order.
+  //
+  // `cache_.Xs` is deliberately *not* substituted. An out-of-state point is not
+  // a state element: it is re-triangulated from the current window on every
+  // update and then projected out of the residual by the left nullspace of
+  // `Hf`, so it has no linearization point to freeze. Only the group poses in
+  // the window carry one, and those are exactly the columns whose consistency
+  // this is about.
+  Vec3 Xcn_jac = cache_.Xcn;
+  bool fej_applied = false;
+  if (fej_oos_ && g->fej_valid()) {
+    const Mat3 Rsb_f_t = g->Rsb_fej().matrix().transpose();
+    const Vec3 Xb_f = Rsb_f_t * (cache_.Xs - g->Tsb_fej());
+    const Vec3 Xcn_f = Rbc_t * (Xb_f - Tbc);
+    if (Xcn_f(2) > 0 && Xcn_f.allFinite()) {
+      Mat23 dxcn_dXcn_f;
+      const Vec2 xcn_f = project(Xcn_f, &dxcn_dXcn_f);
+      Mat2 dxp_dxcn_f;
+      const Vec2 xp_f = Camera::instance()->Project(xcn_f, &dxp_dxcn_f);
+      if (xp_f.allFinite() && dxp_dxcn_f.allFinite()) {
+        cache_.dXb_dXs = Rsb_f_t;
+        cache_.dXb_dTsb = -Rsb_f_t;
+        cache_.dXb_dWsb = SO3::hat(Xb_f);
+        cache_.dXcn_dWbc = SO3::hat(Xcn_f);
+        cache_.dXcn_dXs = cache_.dXcn_dXb * cache_.dXb_dXs;
+        cache_.dXcn_dWsb = cache_.dXcn_dXb * cache_.dXb_dWsb;
+        cache_.dXcn_dTsb = cache_.dXcn_dXb * cache_.dXb_dTsb;
+        cache_.dxp_dXcn = dxp_dxcn_f * dxcn_dXcn_f;
+        Xcn_jac = Xcn_f;
+        fej_applied = true;
+      }
+    }
+  }
+
   oos_.Hf.block<2, 3>(row, 0) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
@@ -386,6 +424,22 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   const Vec2 xp1 = Camera::instance(1)->Project(xc1, &dxp1_dxc1);
   if (!xp1.allFinite() || !dxp1_dxc1.allFinite()) {
     return 2;
+  }
+  if (fej_applied) {
+    // Same split as above: `xp1` (the residual) stays at the current estimate,
+    // the two derivative factors move to the frozen point so that these rows'
+    // Jacobian is consistent with the left rows they share an `Hf` with.
+    const Vec3 Xc1_f = rig.Rc1c0() * Xcn_jac + rig.Tc1c0();
+    if (Xc1_f(2) > 0.0) {
+      Mat23 dxc1_dXc1_f;
+      const Vec2 xc1_f = project(Xc1_f, &dxc1_dXc1_f);
+      Mat2 dxp1_dxc1_f;
+      const Vec2 xp1_f = Camera::instance(1)->Project(xc1_f, &dxp1_dxc1_f);
+      if (xp1_f.allFinite() && dxp1_dxc1_f.allFinite()) {
+        dxc1_dXc1 = dxc1_dXc1_f;
+        dxp1_dxc1 = dxp1_dxc1_f;
+      }
+    }
   }
   // The weight is folded into the Jacobian and the innovation as they are
   // written, which whitens the two rows in place; see

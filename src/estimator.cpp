@@ -210,6 +210,28 @@ Estimator::Estimator(const Json::Value &cfg)
               << "; augment_every=" << oos_augment_every_;
   }
 
+  {
+    // First-estimates Jacobians (Huang et al.). `fej.mode`:
+    //   0  off -- not one instruction of the measurement model changes
+    //   1  group poses only: each in-state group's measurement Jacobian is
+    //      evaluated at the pose it had when it entered the state
+    //   2  also the feature's own local parametrization, frozen when the feature
+    //      was promoted into the state
+    // The residual is always evaluated at the current estimate; only the
+    // Jacobian moves. See `Feature::RelinearizeFEJ`.
+    auto fej = cfg_["fej"];
+    const int fej_mode = fej.get("mode", 0).asInt();
+    // Out-of-state (MSCKF) rows get the same treatment for the window poses.
+    // Separate flag because the two paths fail differently and it must be
+    // possible to bisect them.
+    const bool fej_oos = fej.get("oos", fej_mode > 0).asBool();
+    Feature::SetFEJMode(fej_mode);
+    Feature::SetFEJOOS(fej_oos);
+    if (fej_mode > 0 || fej_oos) {
+      LOG(INFO) << "FEJ enabled: mode=" << fej_mode << "; oos=" << fej_oos;
+    }
+  }
+
   // IMU clamping
   Vec3 _vec_;
   clamp_signals_ = cfg_.get("clamp_signals", false).asBool();
@@ -1045,6 +1067,9 @@ void Estimator::AddGroupToState(GroupPtr g) {
     gsel_[index] = true;
     g->SetSind(index);
     g->SetStatus(GroupStatus::INSTATE);
+    // Record the pose this group entered the state with, for FEJ. Harmless when
+    // FEJ is off -- nothing reads it.
+    g->FreezeFEJ();
     int offset = kGroupBegin + 6 * index;
 
     // with gsb=(Rsb, Tsb) as the augmented state
@@ -1085,6 +1110,7 @@ void Estimator::AddFeatureToState(FeaturePtr f) {
     f->SetStatus(FeatureStatus::INSTATE);
     f->SetSind(index);
     f->FillCovarianceBlock(P_);
+    f->FreezeFEJ();
     VLOG(0) << StrFormat("feature #%d inserted @ %d/%d", f->id(), index,
                                kMaxFeature);
   } else {

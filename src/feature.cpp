@@ -19,6 +19,8 @@ namespace xivo {
 // Feature
 int Feature::counter_ = Feature::counter0;
 int Feature::num_good_triangulations_ = 0;
+int Feature::fej_mode_ = 0;
+bool Feature::fej_oos_ = false;
 int Feature::num_bad_triangulations_ = 0;
 JacobianCache Feature::cache_ = {};
 
@@ -122,6 +124,7 @@ void Feature::Reset(number_t x, number_t y) {
   right_jac_valid_ = false;
   outlier_counter_ = 0;
   mh_strikes_ = 0;
+  fej_valid_ = false;
   lc_match_ = -1;
   triangulation_successful_ = false;
   oos_jac_counter_ = 0;
@@ -345,6 +348,15 @@ bool Feature::ChangeOwner(GroupPtr nref, const SE3 &gbc,
   ResetRef(nref);
   Xc();
   Xs(gbc);
+
+  // Re-anchoring is a change of *parameterization*: the frozen `x_fej_` was
+  // expressed in the outgoing group's camera frame and means nothing in the new
+  // one. FEJ says never to refresh a linearization point, but that rule is about
+  // refreshing it with new information -- here the old value is not even in the
+  // right coordinates. Re-freeze.
+  if (fej_valid_) {
+    FreezeFEJ();
+  }
 
   return true;
 }
@@ -810,11 +822,152 @@ void Feature::ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
   cache_.inn = back() - cache_.xp;
   inn_ = cache_.inn;
 
+  // First-estimates Jacobians. Deliberately a *second* pass that overwrites the
+  // Jacobian blocks rather than a parameterization of the first one: with
+  // `fej_mode_ == 0` not one instruction above changes, so the whole feature is
+  // provably free when off. The residual just computed stays at the current
+  // estimate -- FEJ moves the linearization point, not the measurement.
+  if (fej_mode_ > 0) {
+    RelinearizeFEJ(Rsb, Tsb, Rbc, Tbc, gyro, Cg, bg, Vsb, td);
+  }
+
   // The right camera's rows, while `cache_` still describes this feature.
   right_jac_valid_ = false;
   if (has_right_ && StereoRig::enabled()) {
     ComputeRightJacobian();
   }
+}
+
+void Feature::RelinearizeFEJ(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
+                             const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
+                             const Vec3 &bg, const Vec3 &Vsb, number_t td) {
+  // The evaluation point. The current body pose is *already* a first estimate:
+  // `ComputeJacobian` runs before the measurement update, so `Rsb`/`Tsb` are the
+  // propagated values and have not yet absorbed this frame's correction. That
+  // matches what OpenVINS does -- it refreshes the IMU's `fej` at every
+  // propagation (`Propagator::propagate_and_clone`) and only *clones* keep a
+  // stale one. So only the anchor group and the feature need substituting.
+  const bool use_group = ref_->fej_valid();
+  const bool use_feature = fej_mode_ >= 2 && fej_valid_;
+  if (!use_group && !use_feature) {
+    return; // nothing frozen yet; the current-point Jacobian is the first one
+  }
+
+  const Mat3 Rsbr = use_group ? ref_->Rsb_fej().matrix() : ref_->Rsb().matrix();
+  const Vec3 Tsbr = use_group ? ref_->Tsb_fej() : ref_->Tsb();
+
+  Mat3 dXc_dx;
+#ifdef USE_INVDEPTH
+  const Vec3 Xc_f = unproject_invz(use_feature ? x_fej_ : x_, &dXc_dx);
+#else
+  const Vec3 Xc_f = unproject_logz(use_feature ? x_fej_ : x_, &dXc_dx);
+#endif
+
+  const Mat3 Rsb_t = Rsb.transpose();
+  const Mat3 Rbc_t = Rbc.transpose();
+
+  const Vec3 Xbr = Rbc * Xc_f + Tbc;
+  const Vec3 Xs = Rsbr * Xbr + Tsbr;
+  const Vec3 Xb = Rsb_t * (Xs - Tsb);
+  const Vec3 Xcn = Rbc_t * (Xb - Tbc);
+
+  // A frozen anchor can put the point behind the current camera even when the
+  // current estimate does not. There is no usable linearization of the
+  // projection there, so keep the current-point Jacobian for this feature this
+  // frame -- a slightly inconsistent row beats a garbage one.
+  if (!(Xcn(2) > 0) || !Xcn.allFinite()) {
+    return;
+  }
+
+  const Mat3 dXbr_dXc = Rbc;
+  const Mat3 dXbr_dTbc = Mat3::Identity();
+  const Mat3 dXbr_dWbc = -Rbc * SO3::hat(Xc_f);
+
+  const Mat3 dXs_dXbr = Rsbr;
+  const Mat3 dXs_dTsbr = Mat3::Identity();
+  const Mat3 dXs_dWsbr = -Rsbr * SO3::hat(Xbr);
+
+  const Mat3 dXb_dXs = Rsb_t;
+  const Mat3 dXb_dTsb = -Rsb_t;
+  const Mat3 dXb_dWsb = SO3::hat(Xb);
+
+  const Mat3 dXcn_dXb = Rbc_t;
+  const Mat3 dXcn_dTbc =
+      -Rbc_t + dXcn_dXb * dXb_dXs * dXs_dXbr * dXbr_dTbc;
+  const Mat3 dXcn_dWbc =
+      SO3::hat(Xcn) + dXcn_dXb * dXb_dXs * dXs_dXbr * dXbr_dWbc;
+
+  const Mat3 dXcn_dTsb = dXcn_dXb * dXb_dTsb;
+  const Mat3 dXcn_dWsb = dXcn_dXb * dXb_dWsb;
+  const Mat3 dXcn_dXs = dXcn_dXb * dXb_dXs;
+  const Mat3 dXcn_dTsbr = dXcn_dXs * dXs_dTsbr;
+  const Mat3 dXcn_dWsbr = dXcn_dXs * dXs_dWsbr;
+  const Mat3 dXcn_dx = dXcn_dXs * dXs_dXbr * dXbr_dXc * dXc_dx;
+
+  Mat23 dxcn_dXcn;
+  const Vec2 xcn = project(Xcn, &dxcn_dXcn);
+  Mat2 dxp_dxcn;
+#ifdef USE_ONLINE_CAMERA_CALIB
+  Eigen::Matrix<number_t, 2, -1> jacc;
+  const Vec2 xp = Camera::instance()->Project(xcn, &dxp_dxcn, &jacc);
+#else
+  const Vec2 xp = Camera::instance()->Project(xcn, &dxp_dxcn);
+#endif
+  if (!xp.allFinite() || !dxp_dxcn.allFinite()) {
+    return;
+  }
+  const Mat23 dxp_dXcn = dxp_dxcn * dxcn_dXcn;
+
+  J_.block<2, 3>(0, Index::Wsb) = dxp_dXcn * dXcn_dWsb;
+  J_.block<2, 3>(0, Index::Tsb) = dxp_dXcn * dXcn_dTsb;
+  J_.block<2, 3>(0, Index::Wbc) = dxp_dXcn * dXcn_dWbc;
+  J_.block<2, 3>(0, Index::Tbc) = dxp_dXcn * dXcn_dTbc;
+
+#ifdef USE_ONLINE_TEMPORAL_CALIB
+  {
+    const Vec3 gyro_calib = Cg * gyro - bg;
+    const Vec3 dXcn_dtd =
+        -Rbc_t * (SO3::hat(gyro_calib) * Rsb_t * (Xs - Tsb) + Rsb_t * Vsb);
+    const auto dXcn_dW =
+        dAB_dB<3, 1>(Rbc_t * SO3::hat(Rsb_t * (Xs - Tsb)) * td);
+    J_.block<2, 1>(0, Index::td) = dxp_dXcn * dXcn_dtd;
+#ifdef USE_ONLINE_IMU_CALIB
+    Eigen::Matrix<number_t, 3, 9> dW_dCg;
+    dW_dCg.setZero();
+    for (int i = 0; i < 3; ++i) {
+      dW_dCg.block<1, 3>(i, 3 * i) = gyro;
+    }
+    J_.block<2, 9>(0, Index::Cg) = dxp_dXcn * (dXcn_dW * dW_dCg);
+#endif
+    J_.block<2, 3>(0, Index::bg) = dxp_dXcn * (-dXcn_dW);
+  }
+#endif
+
+  const int goff = kGroupBegin + 6 * ref_->sind();
+  const int foff = kFeatureBegin + 3 * sind();
+  J_.block<2, 3>(0, goff) = dxp_dXcn * dXcn_dWsbr;
+  J_.block<2, 3>(0, goff + 3) = dxp_dXcn * dXcn_dTsbr;
+  J_.block<2, 3>(0, foff) = dxp_dXcn * dXcn_dx;
+
+#ifdef USE_ONLINE_CAMERA_CALIB
+  {
+    const int dim{Camera::instance()->dim()};
+    J_.block(0, kCameraBegin, 2, dim) = jacc.block(0, 0, 2, dim);
+  }
+#endif
+
+  // The right camera's rows run entirely through `cache_.Xcn` and the
+  // `dXcn_d*` chain (see `ComputeRightJacobian`), so handing it the frozen
+  // chain puts the stereo rows on the same linearization point as the left
+  // ones. `cache_.Xcn` itself stays at the current estimate, because that is
+  // what the right *residual* needs.
+  cache_.dXcn_dWsb = dXcn_dWsb;
+  cache_.dXcn_dTsb = dXcn_dTsb;
+  cache_.dXcn_dWbc = dXcn_dWbc;
+  cache_.dXcn_dTbc = dXcn_dTbc;
+  cache_.dXcn_dWsbr = dXcn_dWsbr;
+  cache_.dXcn_dTsbr = dXcn_dTsbr;
+  cache_.dXcn_dx = dXcn_dx;
 }
 
 void Feature::ComputeRightJacobian() {
