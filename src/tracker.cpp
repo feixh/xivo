@@ -459,8 +459,11 @@ void Tracker::MatchStereo() {
   // OPTFLOW_USE_INITIAL_FLOW would do) is already the best guess available.
   std::vector<cv::Point2f> pts_r;
   std::vector<uint8_t> status_lr;
-  std::vector<float> err_lr;
-  cv::calcOpticalFlowPyrLK(pyr_l, pyr_r, pts_l, pts_r, status_lr, err_lr,
+  // `cv::noArray()` for the error: nothing here reads it, and asking for it makes
+  // OpenCV run an extra full-window photometric pass per point at level 0. It is
+  // not merely unused -- see the note in `UpdateLK` for why dropping it leaves
+  // `status` unchanged for every point this function can accept.
+  cv::calcOpticalFlowPyrLK(pyr_l, pyr_r, pts_l, pts_r, status_lr, cv::noArray(),
                            cv::Size(stereo_win_size_, stereo_win_size_),
                            stereo_max_level_, criteria);
 
@@ -469,8 +472,8 @@ void Tracker::MatchStereo() {
   // rejected entries are simply ignored below.
   std::vector<cv::Point2f> pts_l_back;
   std::vector<uint8_t> status_rl;
-  std::vector<float> err_rl;
-  cv::calcOpticalFlowPyrLK(pyr_r, pyr_l, pts_r, pts_l_back, status_rl, err_rl,
+  cv::calcOpticalFlowPyrLK(pyr_r, pyr_l, pts_r, pts_l_back, status_rl,
+                           cv::noArray(),
                            cv::Size(stereo_win_size_, stereo_win_size_),
                            stereo_max_level_, criteria);
 
@@ -713,7 +716,6 @@ void Tracker::UpdateLK(const cv::Mat &image) {
 
   std::vector<cv::Point2f> pts0, pts1;
   std::vector<uint8_t> status;
-  std::vector<float> err;
 
   pts0.reserve(features_.size());
   pts1.reserve(pts0.size());
@@ -740,7 +742,21 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     return;
   }
 
-  cv::calcOpticalFlowPyrLK(pyramid_, pyramid, pts0, pts1, status, err,
+  // No error output. The tracking error was never read, and requesting it is not
+  // free: OpenCV's `LKTrackerInvoker` then runs a second pass over the whole
+  // 15x15 window of every point at level 0 just to accumulate the photometric
+  // residual (`lkpyramid.cpp`, the `err && level == 0` block).
+  //
+  // That block also contains the one place where `err` feeds back into `status`:
+  // it clears `status` if the tracked point ends up outside the image *by more
+  // than half a window* (`inextPoint.x < -winSize.width || >= J.cols`, i.e.
+  // x < -8 or x >= 519 at win 15). Dropping it cannot change any outcome here,
+  // because every consumer of `status` in this file already applies a strictly
+  // tighter bound: `MaskValid` below rejects anything outside [0, cols), and
+  // `MatchStereo` rejects `pts_r` outside the right image and `pts_l_back`
+  // farther than `circular_thresh` (1 px) from where it started.
+  cv::calcOpticalFlowPyrLK(pyramid_, pyramid, pts0, pts1, status,
+                           cv::noArray(),
                            cv::Size(win_size_, win_size_), max_level_, criteria,
                            cv::OPTFLOW_USE_INITIAL_FLOW);
 

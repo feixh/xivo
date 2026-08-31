@@ -10,6 +10,12 @@
 #include "opencv2/highgui/highgui.hpp"
 #include "utils.h"
 
+// For ReadImage: one read(2) per frame instead of libpng's stdio dribble.
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
+
 // for visualization
 #include "viewer.h"
 #include "visualize.h"
@@ -73,9 +79,42 @@ cv::Mat CloneImageFromBuffer(const py::buffer_info &info) {
  *  three times larger with three channels, which is a different rounding of the
  *  same quantity, and `minEigThreshold` (an absolute threshold on those sums)
  *  therefore bites at a different point. See notes-speed/m1-grayscale.md for the
- *  six-member ensemble that pins the accuracy. */
+ *  six-member ensemble that pins the accuracy.
+ *
+ *  The file is pulled into memory in one `read(2)` and decoded from there rather
+ *  than handed to `cv::imread`. `imread` gives libpng a `FILE*`, and libpng asks
+ *  for a few bytes at a time, so glibc's 4 kB buffer turns one 300 kB PNG into
+ *  ~75 `read` syscalls plus a separate `fopen`/`fread`/`fclose` for the format
+ *  sniff -- 1.15% of stereo CPU was in the syscall stub. `imdecode` runs the same
+ *  `PngDecoder`, differing only in that its read callback is a `memcpy`
+ *  (`grfmt_png.cpp`), so the decoded pixels are bit-identical. The buffer is
+ *  reused across frames so the read costs no allocation. */
 cv::Mat ReadImage(const std::string &path) {
-  return cv::imread(path, cv::IMREAD_GRAYSCALE);
+  thread_local std::vector<uchar> buf;
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    return cv::imread(path, cv::IMREAD_GRAYSCALE); // let OpenCV log the error
+  }
+  struct stat st;
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+    ::close(fd);
+    return cv::imread(path, cv::IMREAD_GRAYSCALE);
+  }
+  buf.resize(static_cast<size_t>(st.st_size));
+  size_t off = 0;
+  while (off < buf.size()) {
+    const ssize_t n = ::read(fd, buf.data() + off, buf.size() - off);
+    if (n <= 0) {
+      break;
+    }
+    off += static_cast<size_t>(n);
+  }
+  ::close(fd);
+  if (off != buf.size()) {
+    return cv::imread(path, cv::IMREAD_GRAYSCALE);
+  }
+  const cv::Mat raw(1, static_cast<int>(buf.size()), CV_8U, buf.data());
+  return cv::imdecode(raw, cv::IMREAD_GRAYSCALE);
 }
 
 } // namespace
