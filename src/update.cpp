@@ -70,53 +70,72 @@ std::vector<FeaturePtr> Estimator::MHGating() {
     dist.push_back(mh_dist);
   }
 
-  // The actual gating
-  number_t mh_thresh = MH_thresh_;
+  // Pick the threshold first, then apply it once. The relaxation policy is
+  // unchanged -- start at `MH_thresh_` and multiply until `min_required_inliers_`
+  // features pass -- but it no longer has to rebuild the inlier/reject lists and
+  // rewrite every feature's status on each attempt.
+  //
   // A non-finite Mahalanobis distance (S singular, or NaN in J/inn) never
   // compares less than any threshold, so relaxing `mh_thresh` can never admit
   // it as an inlier. If enough features are affected that `min_required_inliers_`
-  // is unreachable, the loop below spins forever. Bound the relaxation: once
-  // the threshold can no longer grow (or has grown past every finite distance)
-  // there is nothing left to gain, so stop and let the caller proceed with
-  // whatever inliers were found.
-  while (inliers.size() < min_required_inliers_) {
-    // reset states
-    for (auto f : instate_features_) {
-      if (f->status() != FeatureStatus::GAUGE) {
-        f->SetStatus(FeatureStatus::INSTATE);
-      }
-    }
-    inliers.clear();
-    to_destroy.clear();
-    // mark inliers
-    for (int i = 0; i < instate_features_.size(); ++i) {
-      auto f = instate_features_[i];
-      if (dist[i] < mh_thresh) {
-        inliers.push_back(f);
-      } else {
-        num_mh_rejected_++;
-        to_destroy.push_back(f);
-        LOG(INFO) << "feature #" << f->id() << " rejected by MH-gating";
-      }
-    }
-    if (inliers.size() >= min_required_inliers_) {
-      break;
-    }
-    // relax the threshold
+  // is unreachable, the search below would not terminate. Bound the relaxation:
+  // once the threshold can no longer grow there is nothing left to gain, so stop
+  // and let the caller proceed with whatever inliers were found.
+  number_t mh_thresh = MH_thresh_;
+  auto count_inliers = [&dist](number_t thresh) {
+    return std::count_if(dist.begin(), dist.end(),
+                         [thresh](number_t d) { return d < thresh; });
+  };
+  while (static_cast<size_t>(count_inliers(mh_thresh)) <
+         min_required_inliers_) {
     number_t relaxed = mh_thresh * MH_thresh_multipler_;
     if (!std::isfinite(relaxed) || relaxed <= mh_thresh) {
       LOG(WARNING) << "MH-gating could not reach " << min_required_inliers_
-                   << " inliers (" << inliers.size() << " found of "
+                   << " inliers (" << count_inliers(mh_thresh) << " found of "
                    << instate_features_.size()
                    << " in-state features); giving up on relaxing the threshold";
       break;
     }
     mh_thresh = relaxed;
-    num_mh_rejected_ = 0;
+  }
+
+  // reset states
+  for (auto f : instate_features_) {
+    if (f->status() != FeatureStatus::GAUGE) {
+      f->SetStatus(FeatureStatus::INSTATE);
+    }
+  }
+
+  // Apply the threshold. A feature that fails is not necessarily an outlier:
+  // with a 95% gate and ~90 in-state features a consistent filter rejects four
+  // or five *good* features every frame, and destroying them is the dominant
+  // reason the state runs below capacity (76 of 90 slots occupied on TUM-VI
+  // room1). `MH_max_strikes` > 1 lets a feature sit out this update and stay in
+  // the state; only a run of consecutive failures destroys it. One strike
+  // reproduces the original behaviour exactly.
+  num_mh_deferred_ = 0;
+  for (int i = 0; i < instate_features_.size(); ++i) {
+    auto f = instate_features_[i];
+    if (dist[i] < mh_thresh) {
+      f->ClearMHStrikes();
+      inliers.push_back(f);
+      continue;
+    }
+    num_mh_rejected_++;
+    if (f->AddMHStrike() >= MH_max_strikes_) {
+      to_destroy.push_back(f);
+      LOG(INFO) << "feature #" << f->id() << " rejected by MH-gating";
+    } else {
+      ++num_mh_deferred_;
+      LOG(INFO) << "feature #" << f->id() << " failed MH-gating ("
+                << f->mh_strikes() << " of " << MH_max_strikes_
+                << " strikes); skipping it for this update";
+    }
   }
 
 #ifndef NDEBUG
-  CHECK(inliers.size() + to_destroy.size() == instate_features_.size());
+  CHECK(inliers.size() + to_destroy.size() + num_mh_deferred_ ==
+        instate_features_.size());
 #endif
 
   timer_.Tock("MH-gating");
@@ -312,7 +331,12 @@ void Estimator::PrintCensus(std::ostream &os) const {
      << " update-features:" << per(c.update_feats, c.updates)
      << " rows:" << per(c.rows, c.updates)
      << " (right:" << per(c.right_rows, c.updates)
-     << " oos:" << per(c.oos_rows, c.updates) << ")\n";
+     << " oos:" << per(c.oos_rows, c.updates) << ")";
+  if (consistent_init_) {
+    os << " consistent-init:" << num_consistent_init_ << "/"
+       << (num_consistent_init_ + num_consistent_init_failed_);
+  }
+  os << "\n";
 }
 
 void Estimator::FilterUpdate(int oos_rows) {

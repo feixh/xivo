@@ -8,7 +8,9 @@
 #include "opencv2/video/video.hpp"
 #include "opencv2/xfeatures2d.hpp"
 #include "opencv2/calib3d.hpp"
+#include "opencv2/imgproc.hpp"
 
+#include "camera_manager.h"
 #include "feature.h"
 #include "stereo.h"
 #include "tracker.h"
@@ -162,6 +164,59 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
   // Json::Value on every image.
   normalize_ = cfg_.get("normalize", false).asBool();
 
+  // Front-end quality knobs added by the position work. Every default here
+  // reproduces the original behaviour bit-for-bit, so a config that does not
+  // mention them is unaffected.
+  {
+    number_t max_theta_deg = cfg_.get("max_theta_deg", 180.0).asDouble();
+    max_theta_ = max_theta_deg * M_PI / 180.0;
+  }
+  subpix_refine_ = cfg_.get("subpix_refine", false).asBool();
+  auto subpix_cfg = cfg_["subpix"];
+  subpix_win_size_ = subpix_cfg.get("win_size", 5).asInt();
+  subpix_max_iter_ = subpix_cfg.get("max_iter", 20).asInt();
+  subpix_eps_ = subpix_cfg.get("eps", 0.001).asDouble();
+
+  grayscale_ = cfg_.get("grayscale", false).asBool();
+
+  std::string hist = cfg_.get("histogram_method", "NONE").asString();
+  if (hist == "NONE") {
+    histogram_method_ = HistogramMethod::NONE;
+  } else if (hist == "HISTOGRAM") {
+    histogram_method_ = HistogramMethod::HISTOGRAM;
+  } else if (hist == "CLAHE") {
+    histogram_method_ = HistogramMethod::CLAHE;
+  } else {
+    LOG(FATAL) << "Invalid tracker histogram_method " << hist;
+  }
+  clahe_clip_limit_ = cfg_.get("clahe_clip_limit", 10.0).asDouble();
+  clahe_grid_size_ = cfg_.get("clahe_grid_size", 8).asInt();
+  if (histogram_method_ == HistogramMethod::CLAHE) {
+    clahe_ = cv::createCLAHE(clahe_clip_limit_,
+                             cv::Size(clahe_grid_size_, clahe_grid_size_));
+  }
+  // Both of these abort on a multi-channel input, and the driver hands us BGR
+  // (see `ToGray`). Rather than leave a config that aborts on the first frame,
+  // turn the conversion on for them.
+  if (!grayscale_ &&
+      (subpix_refine_ || histogram_method_ != HistogramMethod::NONE)) {
+    grayscale_ = true;
+    LOG(WARNING) << "tracker: forcing grayscale=true, required by "
+                 << (subpix_refine_ ? "subpix_refine" : "histogram_method");
+  }
+
+  // Epipolar (fundamental-matrix) outlier rejection on *normalized* bearings.
+  // Distinct from `do_outlier_rejection` above, which fits a homography to raw
+  // distorted pixels -- a model that only holds for a plane or a pure rotation,
+  // and whose residual is not even a metric distance under a 190-degree
+  // fisheye. Defaults leave this off.
+  auto epi_cfg = cfg_["epipolar_rejection"];
+  epipolar_rejection_ = epi_cfg.get("enable", false).asBool();
+  epipolar_thresh_px_ = epi_cfg.get("thresh_px", 2.0).asDouble();
+  epipolar_confidence_ = epi_cfg.get("confidence", 0.999).asDouble();
+  epipolar_min_pts_ = epi_cfg.get("min_points", 10).asInt();
+  epipolar_max_norm_ = epi_cfg.get("max_bearing_norm", 10.0).asDouble();
+
   auto klt_cfg = cfg_["KLT"];
   win_size_ = klt_cfg.get("win_size", 15).asInt();
   max_level_ = klt_cfg.get("max_level", 4).asInt();
@@ -238,6 +293,113 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
     }
   } else if (tracker_type_ == TrackerType::MATCH) {
     matcher_ = cv::BFMatcher::create(extractor_->defaultNorm(), true);
+  }
+}
+
+
+const cv::Mat &Tracker::ToGray(const cv::Mat &src, cv::Mat &dst) const {
+  // Normally a no-op now: the file-path entry points decode with
+  // IMREAD_GRAYSCALE (see `ReadImage` in pybind11/pyxivo.cpp), so frames arrive
+  // single-channel and this returns `src` untouched. It still matters for the
+  // numpy-buffer entry points, which pass whatever the caller hands over and are
+  // deliberately left free to hand over HxWx3.
+  //
+  // Why the conversion has to happen somewhere: `equalizeHist` and `cornerSubPix`
+  // both require a single channel, and tracking on BGR is not the same problem as
+  // tracking on luminance. `FastFeatureDetector::detect` and
+  // `calcOpticalFlowPyrLK` merely tolerate 3 channels, which is why a colour
+  // frame used to run all the way through without complaint.
+  if (!grayscale_ || src.channels() == 1) {
+    return src;
+  }
+  cv::cvtColor(src, dst, cv::COLOR_BGR2GRAY);
+  return dst;
+}
+
+const cv::Mat &Tracker::Equalize(const cv::Mat &src, cv::Mat &dst) {
+  switch (histogram_method_) {
+  case HistogramMethod::HISTOGRAM:
+    cv::equalizeHist(src, dst);
+    return dst;
+  case HistogramMethod::CLAHE:
+    clahe_->apply(src, dst);
+    return dst;
+  case HistogramMethod::NONE:
+  default:
+    return src;
+  }
+}
+
+
+void Tracker::BuildValidMask(int cam_id) {
+  valid_mask_ = cv::Mat(rows_, cols_, CV_8UC1);
+  valid_mask_.setTo(0);
+  cv::Mat interior = valid_mask_(
+      cv::Rect(margin_, margin_, cols_ - 2 * margin_, rows_ - 2 * margin_));
+  interior.setTo(255);
+
+  if (!(max_theta_ < M_PI)) {
+    return; // whole image admissible; identical to the original mask
+  }
+
+  auto cam = Camera::instance(cam_id);
+  if (cam == nullptr) {
+    LOG(WARNING) << "max_theta_deg is set but camera " << cam_id
+                 << " does not exist; not applying a field-of-view mask";
+    return;
+  }
+  // The test is done through UnProject rather than on a precomputed pixel
+  // radius so that it holds for every camera model, including the ones whose
+  // UnProject saturates instead of reporting failure: a saturated theta comes
+  // back as a huge |xc| and is rejected here just the same.
+  const number_t tan_max =
+      max_theta_ < 0.5 * M_PI ? std::tan(max_theta_)
+                              : std::numeric_limits<number_t>::infinity();
+  int num_blocked = 0;
+  for (int r = margin_; r < rows_ - margin_; ++r) {
+    uint8_t *row = valid_mask_.ptr<uint8_t>(r);
+    for (int c = margin_; c < cols_ - margin_; ++c) {
+      Vec2 xc = cam->UnProject(
+          Vec2{static_cast<number_t>(c) + number_t(0.5),
+               static_cast<number_t>(r) + number_t(0.5)});
+      if (!(xc.norm() <= tan_max) || !xc.allFinite()) {
+        row[c] = 0;
+        ++num_blocked;
+      }
+    }
+  }
+  LOG(INFO) << "field-of-view mask for camera " << cam_id << ": blocked "
+            << num_blocked << " of " << (rows_ * cols_) << " pixels beyond "
+            << (max_theta_ * 180.0 / M_PI) << " deg";
+}
+
+
+void Tracker::RefineSubPix(const cv::Mat &img,
+                           std::vector<cv::Point2f> &pts) const {
+  if (!subpix_refine_ || pts.empty()) {
+    return;
+  }
+  std::vector<cv::Point2f> refined(pts);
+  cv::cornerSubPix(
+      img, refined, cv::Size(subpix_win_size_, subpix_win_size_),
+      cv::Size(-1, -1),
+      cv::TermCriteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
+                       subpix_max_iter_, subpix_eps_));
+  // cornerSubPix solves an unconstrained least-squares problem per point and
+  // will happily walk a point off the corner it was seeded on, or out of the
+  // image. Either means the refinement is not a better estimate of the same
+  // corner, so keep the integer detection instead of following it.
+  const float max_move = static_cast<float>(subpix_win_size_);
+  for (size_t i = 0; i < pts.size(); ++i) {
+    const float dx = refined[i].x - pts[i].x;
+    const float dy = refined[i].y - pts[i].y;
+    if (!std::isfinite(dx) || !std::isfinite(dy) ||
+        std::sqrt(dx * dx + dy * dy) > max_move || refined[i].x < 0 ||
+        refined[i].y < 0 || refined[i].x >= img.cols ||
+        refined[i].y >= img.rows) {
+      continue;
+    }
+    pts[i] = refined[i];
   }
 }
 
@@ -324,7 +486,19 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
     }
   }
 
-  // collect keypoints
+  // Select keypoints. Selection is done on the integer detections and records
+  // its decisions rather than acting on them, so that the sub-pixel refinement
+  // below can run once on the (at most ~num_features_max) chosen points instead
+  // of on the whole detection set, which is an order of magnitude larger. The
+  // mask bookkeeping is unchanged -- it is still updated inside the loop, so a
+  // later keypoint still sees the effect of an earlier acceptance.
+  struct Selection {
+    int kp_index;
+    FeaturePtr rescued; // non-null iff this keypoint revives a dropped track
+  };
+  std::vector<Selection> selected;
+  selected.reserve(std::max(num_to_add, 0));
+
   for (int i = 0; i < kps.size(); ++i) {
     const cv::KeyPoint &kp = kps[i];
     if (MaskValid(mask_, kp.pt.x, kp.pt.y)) {
@@ -332,14 +506,7 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
       if (match_dropped_tracks_ && matched[i] &&
           newly_dropped_tracks[matchIdx[i]]) {
         int idx = matchIdx[i];
-        FeaturePtr f1 = newly_dropped_tracks[idx];
-        if (differential_) {
-          f1->SetDescriptor(descriptors.row(i));
-        }
-        f1->UpdateTrack(kp.pt.x, kp.pt.y);
-        f1->SetKeypoint(kp);
-        f1->SetTrackStatus(TrackStatus::TRACKED);
-        LOG(INFO) << "Potentially rescued dropped feature #" << f1->id();
+        selected.push_back({i, newly_dropped_tracks[idx]});
         // Tell the caller this one was rescued, so it does not get marked
         // DROPPED again. Clearing the slot rather than erasing it keeps the
         // `matchIdx` indices above valid.
@@ -349,14 +516,9 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
         continue;
       }
 
-      // Didn't match to a previously-dropped track, so create a new feature
-      FeaturePtr f = Feature::Create(kp.pt.x, kp.pt.y);
-      features_.push_back(f);
-      num_new_detections_++;
-      if (extract_descriptor_) {
-        f->SetDescriptor(descriptors.row(i));
-      }
-      f->SetKeypoint(kp);
+      // Didn't match to a previously-dropped track, so this becomes a new
+      // feature.
+      selected.push_back({i, nullptr});
 
       // mask out
       MaskOut(mask_, kp.pt.x, kp.pt.y, mask_size_);
@@ -364,6 +526,44 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
     }
     if (num_to_add <= 0 || kp.response < 5)
       break;
+  }
+
+  // Refine the selected detections to sub-pixel accuracy. FAST reports integer
+  // coordinates, and for a *new* feature that pixel is the anchor from which
+  // (X/Z, Y/Z) is initialized and against which every later observation of the
+  // track is compared -- so the +-0.5 px quantization is a per-track bias, not
+  // noise that averages away over the track. No-op unless `subpix_refine_`.
+  std::vector<cv::Point2f> pts;
+  pts.reserve(selected.size());
+  for (const auto &s : selected) {
+    pts.push_back(kps[s.kp_index].pt);
+  }
+  RefineSubPix(img, pts);
+
+  for (size_t j = 0; j < selected.size(); ++j) {
+    const int i = selected[j].kp_index;
+    cv::KeyPoint kp = kps[i];
+    kp.pt = pts[j];
+
+    if (selected[j].rescued) {
+      FeaturePtr f1 = selected[j].rescued;
+      if (differential_) {
+        f1->SetDescriptor(descriptors.row(i));
+      }
+      f1->UpdateTrack(kp.pt.x, kp.pt.y);
+      f1->SetKeypoint(kp);
+      f1->SetTrackStatus(TrackStatus::TRACKED);
+      LOG(INFO) << "Potentially rescued dropped feature #" << f1->id();
+      continue;
+    }
+
+    FeaturePtr f = Feature::Create(kp.pt.x, kp.pt.y);
+    features_.push_back(f);
+    num_new_detections_++;
+    if (extract_descriptor_) {
+      f->SetDescriptor(descriptors.row(i));
+    }
+    f->SetKeypoint(kp);
   }
 }
 
@@ -386,7 +586,10 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
                << image.rows << " vs right " << image_r.cols << "x"
                << image_r.rows;
   }
-  img_r_ = image_r;
+  // The right image gets exactly the same photometric treatment as the left:
+  // left->right KLT compares patches across the two, so equalizing only one of
+  // them would break the brightness-constancy assumption it rests on.
+  img_r_ = Equalize(ToGray(image_r, img_r_gray_), img_r_eq_);
   ++num_stereo_frames_;
 
   // Left-image temporal tracking is exactly the monocular path: the stereo run
@@ -528,9 +731,10 @@ void Tracker::MatchStereo() {
 
 
 void Tracker::UpdateMatch(const cv::Mat &image) {
-  img_ = image.clone();
+  const cv::Mat &src = Equalize(ToGray(image, img_gray_), img_eq_);
+  img_ = src.clone();
   if (normalize_) {
-    cv::normalize(image, img_, 0, 255, cv::NORM_MINMAX);
+    cv::normalize(src, img_, 0, 255, cv::NORM_MINMAX);
   }
   // This path builds no pyramid, so anything still in `pyramid_` belongs to an
   // older frame and `MatchStereo` must not reuse it.
@@ -677,25 +881,27 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   //
   // The cost of not copying is that `img_` no longer owns its pixels, which is
   // why `pyramid_` has to (see `BuildOwnedPyramid`).
+  // Contrast equalization, when enabled, happens before everything else: the
+  // KLT, the detector and the descriptors must all see the same pixels.
+  const cv::Mat &src = Equalize(ToGray(image, img_gray_), img_eq_);
   if (normalize_) {
-    cv::normalize(image, img_, 0, 255, cv::NORM_MINMAX);
+    cv::normalize(src, img_, 0, 255, cv::NORM_MINMAX);
   } else {
-    img_ = image;
+    img_ = src;
   }
   pyramid_is_current_ = false;
 
   if (!initialized_) {
     rows_ = img_.rows;
     cols_ = img_.cols;
-    mask_ = cv::Mat(rows_, cols_, CV_8UC1);
-    mask_.setTo(0);
+    // `valid_mask_` folds in both the border margin and the field-of-view test;
+    // it is what every frame's `mask_` starts from.
+    BuildValidMask(0);
+    valid_mask_.copyTo(mask_);
 
     // build image pyramid
     BuildOwnedPyramid(img_, pyramid_, win_size_, max_level_);
     pyramid_is_current_ = true;
-    // setup the mask
-    ResetMask(mask_(
-        cv::Rect(margin_, margin_, cols_ - 2 * margin_, rows_ - 2 * margin_)));
     // detect an initial set of features (nothing to rescue on the first frame)
     std::vector<FeaturePtr> no_dropped_tracks;
     DetectLK(img_, num_features_max_, no_dropped_tracks, false, cv::Mat());
@@ -703,8 +909,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     return;
   }
   // reset mask
-  ResetMask(mask_(
-      cv::Rect(margin_, margin_, cols_ - 2 * margin_, rows_ - 2 * margin_)));
+  valid_mask_.copyTo(mask_);
 
   // build new pyramid
   std::vector<cv::Mat> pyramid;
@@ -836,6 +1041,16 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   if (do_outlier_rejection_) {
     outlier_rejection_success = OutlierRejection(pts0, pts1, status, H);
     num_valid_features -= num_outliers_rejected_;
+  }
+
+  if (epipolar_rejection_) {
+    // After the mask/displacement pass and after the homography pass, so it only
+    // ever sees correspondences the cheaper tests already accepted -- and so the
+    // valid-feature budget below is reduced by the union, not double-counted.
+    num_epipolar_rejected_ =
+        OutlierRejectionEpipolar(pts0, pts1, status, 0);
+    num_valid_features -= num_epipolar_rejected_;
+    num_failed_to_track_ = num_zeros(status);
   }
 
   // Mark newly dropped tracks for possible rescue
@@ -1012,6 +1227,77 @@ bool Tracker::OutlierRejection(const std::vector<cv::Point2f> pts0,
   return true;
 }
 
+
+int Tracker::OutlierRejectionEpipolar(const std::vector<cv::Point2f> &pts0,
+                                      const std::vector<cv::Point2f> &pts1,
+                                      std::vector<uint8_t> &match_status,
+                                      int cam_id) {
+  CHECK(pts0.size() == pts1.size());
+  CHECK(match_status.size() == pts0.size());
+
+  auto cam = Camera::instance(cam_id);
+  if (cam == nullptr) {
+    return 0;
+  }
+
+  // Unproject the surviving correspondences. `idx` maps back into the caller's
+  // indexing, which is parallel to `features_`.
+  std::vector<cv::Point2f> n0, n1;
+  std::vector<int> idx;
+  n0.reserve(pts0.size());
+  n1.reserve(pts0.size());
+  idx.reserve(pts0.size());
+  for (int i = 0; i < static_cast<int>(pts0.size()); ++i) {
+    if (!match_status[i]) {
+      continue;
+    }
+    Vec2 x0 = cam->UnProject(Vec2{static_cast<number_t>(pts0[i].x),
+                                  static_cast<number_t>(pts0[i].y)});
+    Vec2 x1 = cam->UnProject(Vec2{static_cast<number_t>(pts1[i].x),
+                                  static_cast<number_t>(pts1[i].y)});
+    if (!x0.allFinite() || !x1.allFinite() ||
+        x0.norm() > epipolar_max_norm_ || x1.norm() > epipolar_max_norm_) {
+      continue;
+    }
+    n0.emplace_back(x0(0), x0(1));
+    n1.emplace_back(x1(0), x1(1));
+    idx.push_back(i);
+  }
+
+  if (static_cast<int>(n0.size()) < epipolar_min_pts_) {
+    return 0;
+  }
+
+  // The threshold is quoted in pixels for legibility; the fit is in normalized
+  // coordinates, so divide by the larger focal length (the conservative choice:
+  // it makes the band narrower along the better-resolved axis).
+  const number_t f = std::max(cam->fx(), cam->fy());
+  if (!(f > 0)) {
+    return 0;
+  }
+
+  cv::Mat mask;
+  cv::Mat F = cv::findFundamentalMat(n0, n1, cv::FM_RANSAC,
+                                     epipolar_thresh_px_ / f,
+                                     epipolar_confidence_, mask);
+  // findFundamentalMat returns an empty matrix (and an empty or, with the
+  // 7-point solver, a multi-row mask) when it cannot fit a model. Treat that as
+  // "no information this frame" rather than rejecting everything.
+  if (F.empty() || mask.total() != n0.size()) {
+    return 0;
+  }
+
+  int rejected = 0;
+  for (int k = 0; k < static_cast<int>(idx.size()); ++k) {
+    if (mask.at<uint8_t>(k) == 0) {
+      match_status[idx[k]] = 0;
+      ++rejected;
+    }
+  }
+  ++num_epipolar_frames_;
+  num_epipolar_total_rejected_ += rejected;
+  return rejected;
+}
 
 
 ////////////////////////////////////////

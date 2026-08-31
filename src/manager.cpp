@@ -84,7 +84,10 @@ void Estimator::UpdateStep(const timestamp_t &ts,
     OutlierRejection();
   }
 #ifndef NDEBUG
-  CHECK(sum(fsel_) == inliers_.size())
+  // Deferred features (MH_max_strikes > 1) keep their state slot without
+  // appearing in `inliers_`, so the slot count is only equal once they are
+  // counted back in.
+  CHECK(sum(fsel_) == inliers_.size() + num_mh_deferred_)
     << "bookkeeping error in outlier rejection";
 #endif
   // We need to remove floating groups (with no instate features) and
@@ -112,8 +115,16 @@ void Estimator::UpdateStep(const timestamp_t &ts,
   }
 
 #ifndef NDEBUG
-  CHECK(sum(fsel_) == in_current_ekf_update_.size())
-    << "bookkeeping error in removing floating groups";
+  // With deferral on, the slot count exceeds the update set by however many
+  // deferred features survived `DiscardAffectedGroups`, which is not tracked
+  // here; the exact equality only holds under the one-strike policy.
+  if (MH_max_strikes_ == 1) {
+    CHECK(sum(fsel_) == in_current_ekf_update_.size())
+      << "bookkeeping error in removing floating groups";
+  } else {
+    CHECK(sum(fsel_) >= in_current_ekf_update_.size())
+      << "bookkeeping error in removing floating groups";
+  }
 #endif
 
   // Out-of-state (MSCKF) measurements. Computed here, after all the group
@@ -899,6 +910,7 @@ void Estimator::OutlierRejection() {
   if (use_MH_gating_ && instate_features_.size() > min_required_inliers_) {
     inliers_ = MHGating();
   } else {
+    num_mh_deferred_ = 0;
     inliers_.resize(instate_features_.size());
     std::copy(instate_features_.begin(), instate_features_.end(),
               inliers_.begin());

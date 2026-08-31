@@ -249,7 +249,7 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
   }
 
   cache_.Xs = this->Xs(SE3{SO3{Rbc}, Tbc});
-  const int row_budget = static_cast<int>(oos_.Hf.rows());
+  const int row_budget = static_cast<int>(oos_scratch().Hf.rows());
   int rows = 0;
   for (const auto &obs : views) {
     // A view writes 2 rows, or 4 when the right camera contributes. The view cap
@@ -273,11 +273,88 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
   return oos_jac_counter_;
 }
 
+bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
+                                  const Mat3 &Rbc, const Vec3 &Tbc,
+                                  const OOSOptions &options, Mat3 *Hl_out,
+                                  Eigen::Matrix<number_t, 3, kFullSize> *Hx_out,
+                                  Vec3 *res_out) {
+  if (ref_ == nullptr || ref_->sind() < 0 || sind_ < 0) {
+    return false;
+  }
+  // Two monocular views give four rows for three unknowns, which is the floor.
+  if (views.size() < 2) {
+    return false;
+  }
+
+  Mat3 dXc_dx;
+  const Vec3 Xc = this->Xc(&dXc_dx);
+  const Mat3 Rsbr = ref_->Rsb().matrix();
+  const Vec3 Xbr = Rbc * Xc + Tbc;
+  cache_.Xs = Rsbr * Xbr + ref_->Tsb();
+
+  oos_num_obs_ = 0;
+  oos_num_right_obs_ = 0;
+  OOSJacobian &s = oos_scratch();
+  const int row_budget = static_cast<int>(s.Hf.rows());
+  int rows = 0;
+  for (const auto &obs : views) {
+    const int need = (OOSUsesStereo(options) && obs.has_right) ? 4 : 2;
+    if (rows + need > row_budget) {
+      break;
+    }
+    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options);
+    ++oos_num_obs_;
+  }
+  if (rows < 3) {
+    return false;
+  }
+
+  // `oos_.Hf` is d(pixel)/d(Xs) with `Xs` treated as a free 3D point, and
+  // `oos_.Hx` carries only the *observing* group's columns. In the state the
+  // point is not free: it is `Xs(x_, anchor pose, extrinsics)`, so that same
+  // `Hf` also lands on the anchor group's and the extrinsics' columns, and on
+  // the feature's own three. (When the anchor is itself one of the views, both
+  // paths contribute and they add -- exactly as `dXcn_dTbc` in
+  // `Feature::ComputeJacobian` is a sum of two terms.)
+  const Mat3 dXs_dx = Rsbr * Rbc * dXc_dx;
+  const Mat3 dXs_dWsbr = -Rsbr * SO3::hat(Xbr);
+  const Mat3 dXs_dWbc = -Rsbr * Rbc * SO3::hat(Xc);
+  const Mat3 dXs_dTbc = Rsbr;
+
+  const auto HfX = s.Hf.topRows(rows);
+  MatX Hx = s.Hx.topRows(rows);
+  const int roff = kGroupBegin + kGroupSize * ref_->sind();
+  Hx.block(0, roff, rows, 3) += HfX * dXs_dWsbr;
+  Hx.block(0, roff + 3, rows, 3) += HfX; // dXs_dTsbr = I
+  Hx.block(0, Index::Wbc, rows, 3) += HfX * dXs_dWbc;
+  Hx.block(0, Index::Tbc, rows, 3) += HfX * dXs_dTbc;
+  const MatX Hl = HfX * dXs_dx;
+
+  // Column pivoting, because the degenerate direction here is a specific one --
+  // depth, when the views carry no parallax -- and its rank test is what decides
+  // whether this feature can be initialized at all.
+  Eigen::ColPivHouseholderQR<MatX> qr(Hl);
+  qr.setThreshold(1e-6);
+  if (qr.rank() < 3) {
+    return false;
+  }
+  const Mat3 R = qr.matrixR().topLeftCorner<3, 3>().template triangularView<Eigen::Upper>();
+  const Mat3 perm = qr.colsPermutation();
+  const MatX Q = qr.householderQ();
+  const auto Q1 = Q.leftCols(3);
+
+  *Hl_out = R * perm.transpose();
+  *Hx_out = Q1.transpose() * Hx;
+  *res_out = Q1.transpose() * s.inn.head(rows);
+  return Hl_out->allFinite() && Hx_out->allFinite() && res_out->allFinite();
+}
+
 int Feature::MarginalizeOOSPoint(int rows) {
   if (rows < 4) {
     return 0;
   }
-  CHECK_LE(rows, oos_.Hf.rows());
+  OOSJacobian &s = oos_scratch();
+  CHECK_LE(rows, s.Hf.rows());
 
   // Householder QR of Hf (rows x 3): Hf = Q * [R; 0] with R upper triangular,
   // hence every column of Hf lies in the span of the first three columns of Q
@@ -291,15 +368,16 @@ int Feature::MarginalizeOOSPoint(int rows) {
   // implementation used the (non-orthonormal) kernel of a FullPivLU instead,
   // and it also operated on the whole over-sized buffer -- including rows left
   // over from the previous feature -- rather than on the `rows` just filled.
-  Eigen::HouseholderQR<MatX> qr(oos_.Hf.topRows(rows));
+  Eigen::HouseholderQR<MatX> qr(s.Hf.topRows(rows));
   MatX Q = qr.householderQ();
   const int out_rows = rows - 3;
   auto A = Q.rightCols(out_rows);
 
-  MatX Hx = A.transpose() * oos_.Hx.topRows(rows);
-  VecX inn = A.transpose() * oos_.inn.head(rows);
-  oos_.Hx.topRows(out_rows) = Hx;
-  oos_.inn.head(out_rows) = inn;
+  // Straight into this feature's own storage, which Eigen sizes to exactly
+  // `out_rows`. Source and destination are now different objects, so the
+  // temporaries the previous in-place version needed are gone as well.
+  oos_.Hx = A.transpose() * s.Hx.topRows(rows);
+  oos_.inn = A.transpose() * s.inn.head(rows);
 
   return out_rows;
 }
@@ -310,6 +388,7 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   auto g = obs.g;
   CHECK(g->sind() != -1);
+  OOSJacobian &s = oos_scratch();
 
   int goff = kGroupBegin + 6 * obs.g->sind();
   Mat3 Rsb = g->Rsb().matrix();
@@ -340,19 +419,57 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   cache_.dxp_dXcn = cache_.dxp_dxcn * cache_.dxcn_dXcn;
 
-  oos_.inn.segment<2>(row) = obs.xp - cache_.xp;
+  s.inn.segment<2>(row) = obs.xp - cache_.xp;
 
-  oos_.Hf.block<2, 3>(row, 0) =
+  // First-estimates Jacobians. Re-evaluate every derivative w.r.t. this group at
+  // the pose the group had when it entered the state, leaving the residual above
+  // at the current estimate -- see `Group::FreezeFEJ` and
+  // `Feature::RelinearizeFEJ`, and OpenVINS `UpdaterHelper.cpp` which does the
+  // same thing in the same order.
+  //
+  // `cache_.Xs` is deliberately *not* substituted. An out-of-state point is not
+  // a state element: it is re-triangulated from the current window on every
+  // update and then projected out of the residual by the left nullspace of
+  // `Hf`, so it has no linearization point to freeze. Only the group poses in
+  // the window carry one, and those are exactly the columns whose consistency
+  // this is about.
+  Vec3 Xcn_jac = cache_.Xcn;
+  bool fej_applied = false;
+  if (fej_oos_ && g->fej_valid()) {
+    const Mat3 Rsb_f_t = g->Rsb_fej().matrix().transpose();
+    const Vec3 Xb_f = Rsb_f_t * (cache_.Xs - g->Tsb_fej());
+    const Vec3 Xcn_f = Rbc_t * (Xb_f - Tbc);
+    if (Xcn_f(2) > 0 && Xcn_f.allFinite()) {
+      Mat23 dxcn_dXcn_f;
+      const Vec2 xcn_f = project(Xcn_f, &dxcn_dXcn_f);
+      Mat2 dxp_dxcn_f;
+      const Vec2 xp_f = Camera::instance()->Project(xcn_f, &dxp_dxcn_f);
+      if (xp_f.allFinite() && dxp_dxcn_f.allFinite()) {
+        cache_.dXb_dXs = Rsb_f_t;
+        cache_.dXb_dTsb = -Rsb_f_t;
+        cache_.dXb_dWsb = SO3::hat(Xb_f);
+        cache_.dXcn_dWbc = SO3::hat(Xcn_f);
+        cache_.dXcn_dXs = cache_.dXcn_dXb * cache_.dXb_dXs;
+        cache_.dXcn_dWsb = cache_.dXcn_dXb * cache_.dXb_dWsb;
+        cache_.dXcn_dTsb = cache_.dXcn_dXb * cache_.dXb_dTsb;
+        cache_.dxp_dXcn = dxp_dxcn_f * dxcn_dXcn_f;
+        Xcn_jac = Xcn_f;
+        fej_applied = true;
+      }
+    }
+  }
+
+  s.Hf.block<2, 3>(row, 0) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  oos_.Hx.block<2, kFullSize>(row, 0).setZero();
-  oos_.Hx.block<2, 3>(row, goff) =
+  s.Hx.block<2, kFullSize>(row, 0).setZero();
+  s.Hx.block<2, 3>(row, goff) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
-  oos_.Hx.block<2, 3>(row, goff + 3) =
+  s.Hx.block<2, 3>(row, goff + 3) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
-  oos_.Hx.block<2, 3>(row, Index::Wbc) =
+  s.Hx.block<2, 3>(row, Index::Wbc) =
       cache_.dxp_dXcn * cache_.dXcn_dWbc;
-  oos_.Hx.block<2, 3>(row, Index::Tbc) =
+  s.Hx.block<2, 3>(row, Index::Tbc) =
       cache_.dxp_dXcn * cache_.dXcn_dTbc;
 
   if (!OOSUsesStereo(options) || !obs.has_right) {
@@ -387,6 +504,22 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   if (!xp1.allFinite() || !dxp1_dxc1.allFinite()) {
     return 2;
   }
+  if (fej_applied) {
+    // Same split as above: `xp1` (the residual) stays at the current estimate,
+    // the two derivative factors move to the frozen point so that these rows'
+    // Jacobian is consistent with the left rows they share an `Hf` with.
+    const Vec3 Xc1_f = rig.Rc1c0() * Xcn_jac + rig.Tc1c0();
+    if (Xc1_f(2) > 0.0) {
+      Mat23 dxc1_dXc1_f;
+      const Vec2 xc1_f = project(Xc1_f, &dxc1_dXc1_f);
+      Mat2 dxp1_dxc1_f;
+      const Vec2 xp1_f = Camera::instance(1)->Project(xc1_f, &dxp1_dxc1_f);
+      if (xp1_f.allFinite() && dxp1_dxc1_f.allFinite()) {
+        dxc1_dXc1 = dxc1_dXc1_f;
+        dxp1_dxc1 = dxp1_dxc1_f;
+      }
+    }
+  }
   // The weight is folded into the Jacobian and the innovation as they are
   // written, which whitens the two rows in place; see
   // `OOSOptions::stereo_R_scale` for why that is necessary here.
@@ -394,18 +527,18 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   const Mat23 dxp1_dXcn = w * dxp1_dxc1 * dxc1_dXc1 * rig.Rc1c0();
   const int r1 = row + 2;
 
-  oos_.inn.segment<2>(r1) = w * (obs.xp_r - xp1);
+  s.inn.segment<2>(r1) = w * (obs.xp_r - xp1);
 
-  oos_.Hf.block<2, 3>(r1, 0) =
+  s.Hf.block<2, 3>(r1, 0) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  oos_.Hx.block<2, kFullSize>(r1, 0).setZero();
-  oos_.Hx.block<2, 3>(r1, goff) =
+  s.Hx.block<2, kFullSize>(r1, 0).setZero();
+  s.Hx.block<2, 3>(r1, goff) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
-  oos_.Hx.block<2, 3>(r1, goff + 3) =
+  s.Hx.block<2, 3>(r1, goff + 3) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
-  oos_.Hx.block<2, 3>(r1, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
-  oos_.Hx.block<2, 3>(r1, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
+  s.Hx.block<2, 3>(r1, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
+  s.Hx.block<2, 3>(r1, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
 
   ++oos_num_right_obs_;
   return 4;

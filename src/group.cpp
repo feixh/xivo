@@ -47,6 +47,9 @@ void Group::Reset(const SO3 &Rsb, const Vec3 &Tsb) {
   status_ = GroupStatus::CREATED;
   X_.Rsb = Rsb;
   X_.Tsb = Tsb;
+  // Groups come from a pool, so a recycled slot would otherwise inherit the
+  // previous occupant's frozen pose.
+  fej_valid_ = false;
   VLOG(0) << "group #" << id_ << " created";
 }
 

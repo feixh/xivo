@@ -131,6 +131,16 @@ public:
   // The higher, the better.
   number_t score() const;
   number_t outlier_counter() const { return outlier_counter_; }
+
+  /** Consecutive failures of the in-state Mahalanobis gate
+   *  (`Estimator::MHGating`). At the shipped `MH_thresh` of 5.991 that gate is a
+   *  2-dof chi-square at 95%, so a *consistent* filter fails it on 5% of its
+   *  in-state features every frame by construction; destroying a feature on the
+   *  first failure therefore throws away several good, long-lived tracks per
+   *  frame. `MH_max_strikes` lets a feature sit out a frame instead. */
+  int mh_strikes() const { return mh_strikes_; }
+  int AddMHStrike() { return ++mh_strikes_; }
+  void ClearMHStrikes() { mh_strikes_ = 0; }
   /**
    * Gets actual depth of feature from variable `x_` (calculation is different
    * depending on whether or not we're using an inverse-depth or log-depth
@@ -139,6 +149,28 @@ public:
    *       which is guaranteed when using log-depth paramterization. */
   number_t z() const;
   const Vec3 &x() const { return x_; }
+
+  /** First-estimates Jacobians; see `Group::FreezeFEJ` for the rationale.
+   * `FreezeFEJ` records `x_` as it was when the feature entered the state.
+   * Re-anchoring (`ChangeOwner`) re-expresses `x_` in a different group's frame,
+   * which makes the old frozen value meaningless, so that path re-freezes. */
+  void FreezeFEJ() {
+    x_fej_ = x_;
+    fej_valid_ = true;
+  }
+  bool fej_valid() const { return fej_valid_; }
+  const Vec3 &x_fej() const { return x_fej_; }
+
+  /** 0 = off, 1 = group poses only, 2 = group poses and feature. Set once from
+   * the config; a static because `ComputeJacobian` is called from several places
+   * that have no business knowing about it. */
+  static void SetFEJMode(int mode) { fej_mode_ = mode; }
+  static int fej_mode() { return fej_mode_; }
+  /** Whether the out-of-state (MSCKF) Jacobians are relinearized at the frozen
+   * group poses as well. Separate from `fej_mode_` so the two can be attributed
+   * independently. */
+  static void SetFEJOOS(bool on) { fej_oos_ = on; }
+
   const Mat3 &P() const { return P_; }
   Vec3 &x() { return x_; }
   Mat3 &P() { return P_; }
@@ -182,6 +214,14 @@ public:
   void ComputeJacobian(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
                        const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
                        const Vec3 &bg, const Vec3 &Vsb, number_t td);
+
+  /** Overwrites the Jacobian blocks `ComputeJacobian` just filled with the same
+   * quantities evaluated at the frozen (first) estimates of the anchor group
+   * and, in mode 2, of the feature itself. Called only when `fej_mode_ > 0`;
+   * leaves the residual alone. */
+  void RelinearizeFEJ(const Mat3 &Rsb, const Vec3 &Tsb, const Mat3 &Rbc,
+                      const Vec3 &Tbc, const Vec3 &gyro, const Mat3 &Cg,
+                      const Vec3 &bg, const Vec3 &Vsb, number_t td);
 
   void inflate_cov(number_t factor) { P_ *= factor; }
 
@@ -231,6 +271,27 @@ public:
    *  nullspace of `oos_.Hf`, which eliminates the 3D point. Returns the number
    *  of rows left, `rows - 3`. */
   int MarginalizeOOSPoint(int rows);
+
+  /** The three rows of this feature's stacked measurement that are invertible in
+   *  its own three parameters, used to give a feature entering the state a
+   *  covariance that knows about the pose uncertainty it was triangulated from.
+   *
+   *  Builds `[Hl | Hx] dx = res` over `views` exactly as the out-of-state update
+   *  does -- except that the anchor group's and the extrinsics' contribution
+   *  *through* the 3D point is added back, since here the point is not a free
+   *  variable but a function of them -- then QR-factorizes `Hl = Q [R; 0]` and
+   *  returns `R * perm'` (3x3, invertible), `Q1' Hx` and `Q1' res`. The
+   *  information in the remaining `2n - 3` rows is dropped; keeping it would mean
+   *  also applying an out-of-state update at promotion time.
+   *
+   *  Returns false when the geometry is degenerate (rank-deficient `Hl`, i.e. no
+   *  parallax) or anything is non-finite; nothing is modified in that case.
+   *  See `Estimator::InitializeFeatureCovariance` for what the caller does with
+   *  it, and OpenVINS `StateHelper::initialize_invertible` for the same recipe. */
+  bool ComputeInitJacobian(const std::vector<Obs> &views, const Mat3 &Rbc,
+                           const Vec3 &Tbc, const OOSOptions &options,
+                           Mat3 *Hl, Eigen::Matrix<number_t, 3, kFullSize> *Hx,
+                           Vec3 *res);
 
   /** Compute Jacobians for Loop Closure measurement update. */
   void ComputeLCJacobian(const Obs &obs, const Mat3 &Rbc, const Vec3 &Tbc,
@@ -448,6 +509,12 @@ private:
   /** "Backup" of `Feature::x_` used in `Estimator::OnePointRANSAC` */
   Vec3 x0_;
 
+  /** First estimate of `x_`; see `FreezeFEJ`. */
+  Vec3 x_fej_;
+  bool fej_valid_{false};
+  static int fej_mode_;
+  static bool fej_oos_;
+
   /** Subfilter (for estimating depth) covariance */
   Mat3 P_;
 
@@ -488,13 +555,30 @@ private:
   int init_counter_;
   bool inlier_;
   number_t outlier_counter_;
+  /** See `mh_strikes()`. Pooled objects, so `Reset` must clear it. */
+  int mh_strikes_{0};
 
   /** Contains current intermediate variables used to compute the Jacobians in both the
    *  EKF and MSCKF measurement models. */
   static JacobianCache cache_;
 
-  /** Current MSCKF measurement Jacobians (both Hf and Hx) and innovation */
+  /** This feature's *marginalized* MSCKF measurement -- `oos_jac_counter_` rows
+   *  of `Hx` and `inn`, and nothing else. Read by `Ho()` / `ro()` in the update,
+   *  which happens after the loop that computes them, so it has to be per
+   *  feature. Sized to exactly the rows it holds; see `OOSJacobian`. */
   OOSJacobian oos_;
+
+  /** The un-marginalized stack, shared by every feature. It is scratch: filled
+   *  and consumed within one `ComputeOOSJacobian` / `ComputeInitJacobian` call,
+   *  never read afterwards. A static for the same reason `cache_` is one -- the
+   *  measurement model is single-threaded by construction. */
+  static OOSJacobian &oos_scratch() {
+    static OOSJacobian s;
+    if (s.Hf.rows() == 0) {
+      s.AllocateScratch();
+    }
+    return s;
+  }
 
   /** Number of rows of the marginalized MSCKF measurement. */
   int oos_jac_counter_;

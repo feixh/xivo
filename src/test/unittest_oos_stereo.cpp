@@ -146,7 +146,7 @@ protected:
     }
   }
 
-  /** Fills `oos_.{Hf,Hx,inn}` without marginalizing, and stashes copies of the
+  /** Fills the shared scratch `{Hf,Hx,inn}` without marginalizing, and stashes copies of the
    *  filled rows. A copy of `Hf` is parked in the (otherwise unused) feature
    *  columns of `Hx`, so that after marginalization those columns hold
    *  `A' * Hf`, which must vanish. */
@@ -158,10 +158,13 @@ protected:
                                              Gbc().translation(), rows,
                                              options_);
     }
-    Hf0_ = f_->oos_.Hf.topRows(rows);
-    f_->oos_.Hx.block(0, kFeatureBegin, rows, 3) = Hf0_;
-    Hx0_ = f_->oos_.Hx.topRows(rows);
-    inn0_ = f_->oos_.inn.head(rows);
+    // The un-marginalized stack lives in the shared scratch now; `f_->oos_`
+    // holds only what `MarginalizeOOSPoint` writes back.
+    OOSJacobian &s = Feature::oos_scratch();
+    Hf0_ = s.Hf.topRows(rows);
+    s.Hx.block(0, kFeatureBegin, rows, 3) = Hf0_;
+    Hx0_ = s.Hx.topRows(rows);
+    inn0_ = s.inn.head(rows);
     return rows;
   }
 
@@ -402,10 +405,10 @@ TEST_F(OOSStereoTest, ViewBudgetIsHalvedForStereo) {
   options_.use_stereo = true;
   auto sel_stereo = f_->SelectOOSObservations(many, options_);
   EXPECT_EQ(static_cast<int>(sel_stereo.size()), kMaxGroup / 2);
-  EXPECT_LE(4 * static_cast<int>(sel_stereo.size()), f_->oos_.Hf.rows());
+  EXPECT_LE(4 * static_cast<int>(sel_stereo.size()), Feature::oos_scratch().Hf.rows());
 
   options_.use_stereo = false;
   auto sel_mono = f_->SelectOOSObservations(many, options_);
   EXPECT_EQ(static_cast<int>(sel_mono.size()), kMaxGroup);
-  EXPECT_LE(2 * static_cast<int>(sel_mono.size()), f_->oos_.Hf.rows());
+  EXPECT_LE(2 * static_cast<int>(sel_mono.size()), Feature::oos_scratch().Hf.rows());
 }

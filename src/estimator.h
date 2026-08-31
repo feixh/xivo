@@ -534,6 +534,30 @@ private:
   void RemoveFeatureFromState(FeaturePtr f);
   void AddFeatureToState(FeaturePtr f);
 
+  /** Give a feature that just took a state slot a covariance -- and a
+   *  cross-covariance with the rest of the state -- consistent with the poses it
+   *  was triangulated from.
+   *
+   *  The default is `Feature::FillCovarianceBlock`, which copies the depth
+   *  sub-filter's 3x3 and zeroes every cross term. The sub-filter treats both the
+   *  reference and the current pose as exact (see `Feature::SubfilterUpdate`), so
+   *  that 3x3 is a *conditional* covariance and the zeros claim the feature is
+   *  independent of the very group it is anchored to. Both make the filter
+   *  over-confident about the geometry from the first frame a feature is used.
+   *
+   *  This instead does the standard delayed-initialization augmentation from the
+   *  feature's stacked measurement over its in-state views (see
+   *  `Feature::ComputeInitJacobian`):
+   *
+   *      P_ff = Hl^-1 (sigma^2 I + Hx P Hx') Hl^-T
+   *      P_xf = -P Hx' Hl^-T
+   *      x   += Hl^-1 res
+   *
+   *  Returns false and leaves the covariance untouched when it cannot be done
+   *  (no parallax, anchor not in the state yet, too few in-state views), in which
+   *  case the caller falls back to `FillCovarianceBlock`. */
+  bool InitializeFeatureCovariance(FeaturePtr f);
+
   void AbsorbError(const VecX &err); // absorb error state into nominal state
   void AbsorbError();                // absorb error state into nominal state
   // helpers
@@ -814,6 +838,22 @@ private:
   int min_required_inliers_;  // minimal inliers needed to perform update
   number_t MH_thresh_multipler_; // if not enough inliers, repeatedly multiple the
                               // MH_thresh by this amount
+  /** How many *consecutive* MH-gate failures destroy an in-state feature. 1 is
+   *  the original policy (destroy on the first failure). Larger values let a
+   *  feature skip the update for a frame and stay in the state -- see
+   *  `Feature::mh_strikes()`. */
+  int MH_max_strikes_;
+  /** In-state features that failed the MH gate this frame but were kept because
+   *  they had strikes to spare. They are not in `inliers_`, so they contribute no
+   *  rows to this update, but their state slots are still occupied. */
+  int num_mh_deferred_{0};
+
+  /** Consistent feature initialization; see `InitializeFeatureCovariance`. */
+  bool consistent_init_{false};
+  int consistent_init_min_views_{2};
+  number_t consistent_init_R_{1.0};
+  number_t consistent_init_max_var_{1e4};
+  int num_consistent_init_{0}, num_consistent_init_failed_{0};
 
   // time
   timestamp_t last_imu_time_, curr_imu_time_; // time when the imu meas arrives
