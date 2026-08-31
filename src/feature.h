@@ -562,8 +562,23 @@ private:
    *  EKF and MSCKF measurement models. */
   static JacobianCache cache_;
 
-  /** Current MSCKF measurement Jacobians (both Hf and Hx) and innovation */
+  /** This feature's *marginalized* MSCKF measurement -- `oos_jac_counter_` rows
+   *  of `Hx` and `inn`, and nothing else. Read by `Ho()` / `ro()` in the update,
+   *  which happens after the loop that computes them, so it has to be per
+   *  feature. Sized to exactly the rows it holds; see `OOSJacobian`. */
   OOSJacobian oos_;
+
+  /** The un-marginalized stack, shared by every feature. It is scratch: filled
+   *  and consumed within one `ComputeOOSJacobian` / `ComputeInitJacobian` call,
+   *  never read afterwards. A static for the same reason `cache_` is one -- the
+   *  measurement model is single-threaded by construction. */
+  static OOSJacobian &oos_scratch() {
+    static OOSJacobian s;
+    if (s.Hf.rows() == 0) {
+      s.AllocateScratch();
+    }
+    return s;
+  }
 
   /** Number of rows of the marginalized MSCKF measurement. */
   int oos_jac_counter_;

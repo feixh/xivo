@@ -7,16 +7,48 @@
 
 namespace xivo {
 
+/** Storage for an out-of-state (MSCKF) measurement.
+ *
+ *  Used in two roles, which is why nothing is allocated by the constructor.
+ *
+ *  As *scratch* (`Feature::oos_scratch()`, one instance for the whole process):
+ *  holds the stacked, un-marginalized `[Hf | Hx] dx = inn` while
+ *  `Feature::ComputeOOSJacobianInternal` fills it one observation at a time, and
+ *  is then consumed by `MarginalizeOOSPoint` or `ComputeInitJacobian`. Call
+ *  `AllocateScratch`.
+ *
+ *  As a per-feature *result*: holds only the `rows - 3` marginalized rows that
+ *  `Feature::Ho()` / `ro()` hand to the update, in an `Hx` sized to exactly
+ *  those rows. `Hf` stays empty -- the whole point of the marginalization is
+ *  that the 3D point is gone.
+ *
+ *  Splitting the two is worth about 300 MB of resident memory. A pooled
+ *  `Feature` used to carry a full scratch buffer, and `MatX` is column-major, so
+ *  the `Hx.block<2, kFullSize>(row, 0).setZero()` that writes one observation
+ *  reaches into all 564 columns and therefore touches every 4 kB page of the
+ *  406 kB allocation. Any feature that took the OOS path even once -- which,
+ *  with `consistent_init`, is nearly every feature -- made its whole buffer
+ *  resident. */
 struct OOSJacobian {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  OOSJacobian() {
+  MatX Hx; // ... w.r.t. state
+  MatX Hf; // ... w.r.t. the free 3D point; scratch role only
+  VecX inn;
+
+  /** Rows for the most observations `SelectOOSObservations` can hand over: one
+   *  per in-state group, times 2 for a stereo view that contributes 4 rows. */
+  void AllocateScratch() {
     Hx.resize(2 * kMaxGroup, kFullSize);
     Hf.resize(2 * kMaxGroup, 3);
     inn.resize(2 * kMaxGroup);
   }
-  MatX Hx; // ... w.r.t. state
-  MatX Hf;
-  VecX inn; // n is std of measurement noise
+
+  /** Drop everything. Pooled objects must not retain this across a `Reset`. */
+  void Release() {
+    Hx.resize(0, 0);
+    Hf.resize(0, 0);
+    inn.resize(0);
+  }
 };
 
 using OOSJacobianPtr = OOSJacobian *;

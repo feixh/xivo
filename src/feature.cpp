@@ -130,6 +130,10 @@ void Feature::Reset(number_t x, number_t y) {
   oos_jac_counter_ = 0;
   oos_num_obs_ = 0;
   oos_mean_reproj_err_ = -1;
+  // A recycled slot must not keep the previous occupant's marginalized rows
+  // resident; `Ho()`/`ro()` are guarded by `oos_jac_counter_`, so this is about
+  // memory and not correctness.
+  oos_.Release();
 
   sim_.Xs << -1, -1, -1;
   sim_.xp << -1, -1;

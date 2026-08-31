@@ -249,7 +249,7 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
   }
 
   cache_.Xs = this->Xs(SE3{SO3{Rbc}, Tbc});
-  const int row_budget = static_cast<int>(oos_.Hf.rows());
+  const int row_budget = static_cast<int>(oos_scratch().Hf.rows());
   int rows = 0;
   for (const auto &obs : views) {
     // A view writes 2 rows, or 4 when the right camera contributes. The view cap
@@ -294,7 +294,8 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
 
   oos_num_obs_ = 0;
   oos_num_right_obs_ = 0;
-  const int row_budget = static_cast<int>(oos_.Hf.rows());
+  OOSJacobian &s = oos_scratch();
+  const int row_budget = static_cast<int>(s.Hf.rows());
   int rows = 0;
   for (const auto &obs : views) {
     const int need = (OOSUsesStereo(options) && obs.has_right) ? 4 : 2;
@@ -320,8 +321,8 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
   const Mat3 dXs_dWbc = -Rsbr * Rbc * SO3::hat(Xc);
   const Mat3 dXs_dTbc = Rsbr;
 
-  const auto HfX = oos_.Hf.topRows(rows);
-  MatX Hx = oos_.Hx.topRows(rows);
+  const auto HfX = s.Hf.topRows(rows);
+  MatX Hx = s.Hx.topRows(rows);
   const int roff = kGroupBegin + kGroupSize * ref_->sind();
   Hx.block(0, roff, rows, 3) += HfX * dXs_dWsbr;
   Hx.block(0, roff + 3, rows, 3) += HfX; // dXs_dTsbr = I
@@ -344,7 +345,7 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
 
   *Hl_out = R * perm.transpose();
   *Hx_out = Q1.transpose() * Hx;
-  *res_out = Q1.transpose() * oos_.inn.head(rows);
+  *res_out = Q1.transpose() * s.inn.head(rows);
   return Hl_out->allFinite() && Hx_out->allFinite() && res_out->allFinite();
 }
 
@@ -352,7 +353,8 @@ int Feature::MarginalizeOOSPoint(int rows) {
   if (rows < 4) {
     return 0;
   }
-  CHECK_LE(rows, oos_.Hf.rows());
+  OOSJacobian &s = oos_scratch();
+  CHECK_LE(rows, s.Hf.rows());
 
   // Householder QR of Hf (rows x 3): Hf = Q * [R; 0] with R upper triangular,
   // hence every column of Hf lies in the span of the first three columns of Q
@@ -366,15 +368,16 @@ int Feature::MarginalizeOOSPoint(int rows) {
   // implementation used the (non-orthonormal) kernel of a FullPivLU instead,
   // and it also operated on the whole over-sized buffer -- including rows left
   // over from the previous feature -- rather than on the `rows` just filled.
-  Eigen::HouseholderQR<MatX> qr(oos_.Hf.topRows(rows));
+  Eigen::HouseholderQR<MatX> qr(s.Hf.topRows(rows));
   MatX Q = qr.householderQ();
   const int out_rows = rows - 3;
   auto A = Q.rightCols(out_rows);
 
-  MatX Hx = A.transpose() * oos_.Hx.topRows(rows);
-  VecX inn = A.transpose() * oos_.inn.head(rows);
-  oos_.Hx.topRows(out_rows) = Hx;
-  oos_.inn.head(out_rows) = inn;
+  // Straight into this feature's own storage, which Eigen sizes to exactly
+  // `out_rows`. Source and destination are now different objects, so the
+  // temporaries the previous in-place version needed are gone as well.
+  oos_.Hx = A.transpose() * s.Hx.topRows(rows);
+  oos_.inn = A.transpose() * s.inn.head(rows);
 
   return out_rows;
 }
@@ -385,6 +388,7 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   auto g = obs.g;
   CHECK(g->sind() != -1);
+  OOSJacobian &s = oos_scratch();
 
   int goff = kGroupBegin + 6 * obs.g->sind();
   Mat3 Rsb = g->Rsb().matrix();
@@ -415,7 +419,7 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
 
   cache_.dxp_dXcn = cache_.dxp_dxcn * cache_.dxcn_dXcn;
 
-  oos_.inn.segment<2>(row) = obs.xp - cache_.xp;
+  s.inn.segment<2>(row) = obs.xp - cache_.xp;
 
   // First-estimates Jacobians. Re-evaluate every derivative w.r.t. this group at
   // the pose the group had when it entered the state, leaving the residual above
@@ -455,17 +459,17 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
     }
   }
 
-  oos_.Hf.block<2, 3>(row, 0) =
+  s.Hf.block<2, 3>(row, 0) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  oos_.Hx.block<2, kFullSize>(row, 0).setZero();
-  oos_.Hx.block<2, 3>(row, goff) =
+  s.Hx.block<2, kFullSize>(row, 0).setZero();
+  s.Hx.block<2, 3>(row, goff) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
-  oos_.Hx.block<2, 3>(row, goff + 3) =
+  s.Hx.block<2, 3>(row, goff + 3) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
-  oos_.Hx.block<2, 3>(row, Index::Wbc) =
+  s.Hx.block<2, 3>(row, Index::Wbc) =
       cache_.dxp_dXcn * cache_.dXcn_dWbc;
-  oos_.Hx.block<2, 3>(row, Index::Tbc) =
+  s.Hx.block<2, 3>(row, Index::Tbc) =
       cache_.dxp_dXcn * cache_.dXcn_dTbc;
 
   if (!OOSUsesStereo(options) || !obs.has_right) {
@@ -523,18 +527,18 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   const Mat23 dxp1_dXcn = w * dxp1_dxc1 * dxc1_dXc1 * rig.Rc1c0();
   const int r1 = row + 2;
 
-  oos_.inn.segment<2>(r1) = w * (obs.xp_r - xp1);
+  s.inn.segment<2>(r1) = w * (obs.xp_r - xp1);
 
-  oos_.Hf.block<2, 3>(r1, 0) =
+  s.Hf.block<2, 3>(r1, 0) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  oos_.Hx.block<2, kFullSize>(r1, 0).setZero();
-  oos_.Hx.block<2, 3>(r1, goff) =
+  s.Hx.block<2, kFullSize>(r1, 0).setZero();
+  s.Hx.block<2, 3>(r1, goff) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
-  oos_.Hx.block<2, 3>(r1, goff + 3) =
+  s.Hx.block<2, 3>(r1, goff + 3) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dTsb;
-  oos_.Hx.block<2, 3>(r1, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
-  oos_.Hx.block<2, 3>(r1, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
+  s.Hx.block<2, 3>(r1, Index::Wbc) = dxp1_dXcn * cache_.dXcn_dWbc;
+  s.Hx.block<2, 3>(r1, Index::Tbc) = dxp1_dXcn * cache_.dXcn_dTbc;
 
   ++oos_num_right_obs_;
   return 4;

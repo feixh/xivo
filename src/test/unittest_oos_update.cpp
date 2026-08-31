@@ -103,7 +103,7 @@ protected:
     f_->x_ << Xc(0) / Xc(2), Xc(1) / Xc(2), std::log(Xc(2));
   }
 
-  /** Fills `oos_.{Hf,Hx,inn}` without marginalizing, and stashes copies of the
+  /** Fills the shared scratch `{Hf,Hx,inn}` without marginalizing, and stashes copies of the
    *  filled rows. A copy of `Hf` is parked in the (otherwise unused) feature
    *  columns of `Hx`, so that after marginalization those columns hold
    *  `A' * Hf`, which must vanish. */
@@ -115,10 +115,13 @@ protected:
                                              Gbc().translation(), rows,
                                              options_);
     }
-    Hf0_ = f_->oos_.Hf.topRows(rows);
-    f_->oos_.Hx.block(0, kFeatureBegin, rows, 3) = Hf0_;
-    Hx0_ = f_->oos_.Hx.topRows(rows);
-    inn0_ = f_->oos_.inn.head(rows);
+    // The un-marginalized stack lives in the shared scratch now; `f_->oos_`
+    // holds only what `MarginalizeOOSPoint` writes back.
+    OOSJacobian &s = Feature::oos_scratch();
+    Hf0_ = s.Hf.topRows(rows);
+    s.Hx.block(0, kFeatureBegin, rows, 3) = Hf0_;
+    Hx0_ = s.Hx.topRows(rows);
+    inn0_ = s.inn.head(rows);
     return rows;
   }
 
