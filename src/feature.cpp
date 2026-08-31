@@ -121,6 +121,7 @@ void Feature::Reset(number_t x, number_t y) {
   inn_r_ << 0, 0;
   right_jac_valid_ = false;
   outlier_counter_ = 0;
+  mh_strikes_ = 0;
   lc_match_ = -1;
   triangulation_successful_ = false;
   oos_jac_counter_ = 0;

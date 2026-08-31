@@ -8,6 +8,7 @@
 
 #include "opencv2/core/core.hpp"
 #include "opencv2/features2d/features2d.hpp"
+#include "opencv2/imgproc.hpp" // cv::CLAHE, for the member below
 #include "json/json.h"
 #include "mapper.h"
 
@@ -122,6 +123,23 @@ private:
   number_t outlier_rejection_confidence_;
   number_t outlier_rejection_reproj_thresh_;
   int num_outliers_rejected_ = 0;
+  /** Fundamental-matrix RANSAC on normalized bearings; see
+   * `OutlierRejectionEpipolar`. Independent of `do_outlier_rejection_`. */
+  bool epipolar_rejection_;
+  /** RANSAC inlier band, in pixels; divided by the focal length before use so
+   * that it means the same thing in normalized coordinates. */
+  number_t epipolar_thresh_px_;
+  number_t epipolar_confidence_;
+  /** Fewer valid correspondences than this and the frame is left alone: a
+   * 7-point fit on a handful of points rejects at random. */
+  int epipolar_min_pts_;
+  /** Bearings longer than this are excluded from the fit (not rejected). At
+   * theta -> pi/2 the bearing diverges, so a single grazing track would
+   * otherwise dominate the algebraic residual. */
+  number_t epipolar_max_norm_;
+  int num_epipolar_rejected_ = 0;
+  int num_epipolar_frames_ = 0;
+  int num_epipolar_total_rejected_ = 0;
   int num_failed_to_track_ = 0;
   int num_new_detections_ = 0;
   // All of these are cumulative over the whole run, deliberately: a mix of
@@ -191,10 +209,73 @@ private:
    * detected at the very edges of images.
    */
   cv::Mat mask_;
+  /** The per-frame starting point for `mask_`: white everywhere a detection is
+   *  admissible on *this camera*, black elsewhere. That is the `margin_` border
+   *  plus, when `max_theta_` is finite, everything outside the camera model's
+   *  usable field of view (see `BuildValidMask`). Built once, on the first
+   *  frame, and copied over `mask_` at the start of every frame -- which is what
+   *  the old `ResetMask(mask_(interior))` did, minus the FOV part. */
+  cv::Mat valid_mask_;
+  /** Largest half-angle from the optical axis, in radians, at which a detection
+   *  is accepted. `M_PI` (the default) admits the whole image, reproducing the
+   *  original behaviour exactly.
+   *
+   *  This is not cosmetic on a fisheye. A feature's state is
+   *  `(X/Z, Y/Z, log Z)`, so a bearing at theta >= pi/2 has no representation at
+   *  all, and `EquidistantCamera::UnProject` clamps theta to just under pi/2
+   *  rather than failing -- turning such a pixel into a bearing with
+   *  |(X/Z, Y/Z)| ~ 6.4e3. On the TUM-VI 512x512 intrinsics theta = pi/2 lands
+   *  at r = 297 px from the principal point, so 7% of the image (the four
+   *  corners) is in that regime and another 4% is above 85 deg, where
+   *  tan(theta) > 11 and the parameterization is merely useless rather than
+   *  meaningless. */
+  number_t max_theta_;
   /** Number of pixels around a currently tracked feature where we shouldn't look
    *  for new features (so that we don't have two features for the same corner) */
   int mask_size_;
   int margin_;
+
+  /** Sub-pixel refinement of new detections (`cv::cornerSubPix`). FAST reports
+   *  integer coordinates, and a new detection's pixel *is* the anchor that
+   *  defines two of the three components of the feature's state, so the +-0.5 px
+   *  quantization there is a bias that persists for the whole track rather than
+   *  noise that averages out. */
+  bool subpix_refine_;
+  int subpix_win_size_;
+  int subpix_max_iter_;
+  number_t subpix_eps_;
+
+  /** Contrast equalization applied to the input image before tracking:
+   *  `NONE` (default, original behaviour), `HISTOGRAM` (`cv::equalizeHist`) or
+   *  `CLAHE`. */
+  enum class HistogramMethod : int { NONE = 0, HISTOGRAM = 1, CLAHE = 2 };
+  HistogramMethod histogram_method_;
+  number_t clahe_clip_limit_;
+  int clahe_grid_size_;
+  cv::Ptr<cv::CLAHE> clahe_;
+  /** Destinations for the equalized images. Members, not locals, because `img_`
+   *  and `img_r_` are non-owning views that must stay valid for the frame. */
+  cv::Mat img_eq_, img_r_eq_;
+  /** Convert incoming frames to single-channel luminance. See `ToGray`. */
+  bool grayscale_;
+  cv::Mat img_gray_, img_r_gray_;
+
+  /** Applies `histogram_method_` to `src`, writing into `dst`, and returns the
+   *  image the rest of the frame should use. A no-op returns `src` itself so
+   *  nothing is copied when equalization is off. */
+  /** BGR -> luminance, into `dst`, when `grayscale_` is on and `src` needs it.
+   * Returns a reference to whichever of the two now holds the image. */
+  const cv::Mat &ToGray(const cv::Mat &src, cv::Mat &dst) const;
+
+  const cv::Mat &Equalize(const cv::Mat &src, cv::Mat &dst);
+
+  /** Fills `valid_mask_` for a `rows_` x `cols_` image of camera `cam_id`. */
+  void BuildValidMask(int cam_id);
+
+  /** Runs `cv::cornerSubPix` on `pts` in place, reverting any point that leaves
+   *  the image or moves further than the search window (which means the corner
+   *  was not really there). No-op if `subpix_refine_` is false. */
+  void RefineSubPix(const cv::Mat &img, std::vector<cv::Point2f> &pts) const;
 
   // optical flow params
   int win_size_;
@@ -226,6 +307,17 @@ private:
                         const std::vector<cv::Point2f> pts1,
                         std::vector<uint8_t>& match_status,
                         cv::Mat& H);
+
+  /** Two-view epipolar outlier rejection, after OpenVINS'
+   * `TrackKLT::perform_matching`. Both point sets are unprojected to normalized
+   * bearings first, because the pixel-space mapping of a fisheye is nonlinear
+   * and a fundamental matrix does not exist in distorted coordinates. Zeroes
+   * `match_status` for the rejected correspondences and returns how many.
+   * Correspondences already at status 0, and those outside
+   * `epipolar_max_norm_`, take no part in the fit and are left as they are. */
+  int OutlierRejectionEpipolar(const std::vector<cv::Point2f> &pts0,
+                               const std::vector<cv::Point2f> &pts1,
+                               std::vector<uint8_t> &match_status, int cam_id);
 };
 
 // helpers

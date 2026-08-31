@@ -131,6 +131,16 @@ public:
   // The higher, the better.
   number_t score() const;
   number_t outlier_counter() const { return outlier_counter_; }
+
+  /** Consecutive failures of the in-state Mahalanobis gate
+   *  (`Estimator::MHGating`). At the shipped `MH_thresh` of 5.991 that gate is a
+   *  2-dof chi-square at 95%, so a *consistent* filter fails it on 5% of its
+   *  in-state features every frame by construction; destroying a feature on the
+   *  first failure therefore throws away several good, long-lived tracks per
+   *  frame. `MH_max_strikes` lets a feature sit out a frame instead. */
+  int mh_strikes() const { return mh_strikes_; }
+  int AddMHStrike() { return ++mh_strikes_; }
+  void ClearMHStrikes() { mh_strikes_ = 0; }
   /**
    * Gets actual depth of feature from variable `x_` (calculation is different
    * depending on whether or not we're using an inverse-depth or log-depth
@@ -488,6 +498,8 @@ private:
   int init_counter_;
   bool inlier_;
   number_t outlier_counter_;
+  /** See `mh_strikes()`. Pooled objects, so `Reset` must clear it. */
+  int mh_strikes_{0};
 
   /** Contains current intermediate variables used to compute the Jacobians in both the
    *  EKF and MSCKF measurement models. */

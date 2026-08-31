@@ -776,6 +776,15 @@ private:
   int min_required_inliers_;  // minimal inliers needed to perform update
   number_t MH_thresh_multipler_; // if not enough inliers, repeatedly multiple the
                               // MH_thresh by this amount
+  /** How many *consecutive* MH-gate failures destroy an in-state feature. 1 is
+   *  the original policy (destroy on the first failure). Larger values let a
+   *  feature skip the update for a frame and stay in the state -- see
+   *  `Feature::mh_strikes()`. */
+  int MH_max_strikes_;
+  /** In-state features that failed the MH gate this frame but were kept because
+   *  they had strikes to spare. They are not in `inliers_`, so they contribute no
+   *  rows to this update, but their state slots are still occupied. */
+  int num_mh_deferred_{0};
 
   // time
   timestamp_t last_imu_time_, curr_imu_time_; // time when the imu meas arrives

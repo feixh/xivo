@@ -536,6 +536,7 @@ Estimator::Estimator(const Json::Value &cfg)
   min_required_inliers_ = cfg_.get("min_inliers", 5).asInt();
   MH_thresh_ = cfg_.get("MH_thresh", 5.991).asDouble();
   MH_thresh_multipler_ = cfg_.get("MH_adjust_factor", 1.1).asDouble();
+  MH_max_strikes_ = std::max(1, cfg_.get("MH_max_strikes", 1).asInt());
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
   // The key is `feature_owner_change_cov_factor` everywhere else -- in every
