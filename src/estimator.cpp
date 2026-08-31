@@ -567,6 +567,11 @@ Estimator::Estimator(const Json::Value &cfg)
   // Default off: it changes the initial attitude on every dataset, so leaving it
   // opt-in keeps the monocular baseline configs bit-for-bit as they were.
   gravity_init_derotate_ = cfg_.get("gravity_init_derotate", false).asBool();
+  // See `Estimator::gwb`. On by default: publishing in the initial body frame
+  // rather than the gravity-aligned one is a bug in the output convention, not a
+  // tuning choice, and it costs 0.8-3.0 deg of reported attitude error on
+  // TUM-VI. Off restores the old convention exactly.
+  gravity_align_output_ = cfg_.get("gravity_align_output", true).asBool();
   gravity_init_buf_.clear();
   gravity_init_gyro_buf_.clear();
   gravity_init_time_buf_.clear();

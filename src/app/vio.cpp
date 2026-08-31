@@ -134,8 +134,10 @@ int main(int argc, char **argv) {
       // grew by 96 bytes for every dataset entry -- image *and* IMU -- and was
       // the largest single accumulating block in the process (~3.1 MB by the end
       // of room1, ~4.7 MB across the last reallocation).
-      Vec3 Tsb = (Vec3)est->gsb().translation();
-      Vec3 Wsb = (Vec3)est->gsb().so3().log();
+      // Gravity-aligned, like every other published pose; see `Estimator::gwb`.
+      const SE3 gwb = est->gwb();
+      Vec3 Tsb = (Vec3)gwb.translation();
+      Vec3 Wsb = (Vec3)gwb.so3().log();
       ostream << StrFormat("%ld", est->ts().count()) << " "
         << Tsb.transpose() << " "
         << Wsb.transpose() << std::endl;
