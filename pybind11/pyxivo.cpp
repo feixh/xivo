@@ -226,8 +226,12 @@ public:
 
   void ScaleInitVelocity(double scale) { estimator_->ScaleInitVelocity(scale); }
 
-  Eigen::Matrix<double, 3, 4> gsb() { return estimator_->gsb().matrix3x4(); }
-  Eigen::Matrix<double, 3, 4> gsc() { return estimator_->gsc().matrix3x4(); }
+  // The published pose is the gravity-aligned one: see `Estimator::gwb`. Under
+  // the default `gravity_align_output` these are `gsb`/`gsc` levelled by the
+  // filter's gravity estimate; set the key false and they are `gsb`/`gsc`
+  // exactly.
+  Eigen::Matrix<double, 3, 4> gsb() { return estimator_->gwb().matrix3x4(); }
+  Eigen::Matrix<double, 3, 4> gsc() { return estimator_->gwc().matrix3x4(); }
   Eigen::Matrix<double, 3, 4> gbc() { return estimator_->gbc().matrix3x4(); }
   Eigen::Matrix<double, -1, -1> Pstate() { return estimator_->Pstate(); }
   Eigen::Matrix<double, -1, -1> P() { return estimator_-> P(); }

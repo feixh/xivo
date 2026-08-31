@@ -177,6 +177,44 @@ public:
   SE3 gbc() const { return SE3{X_.Rbc, X_.Tbc}; }
   SE3 gsb() const { return SE3{X_.Rsb, X_.Tsb}; }
   SE3 gsc() const { return gsb() * gbc(); }
+
+  /** The body pose in the *gravity-aligned* spatial frame -- what a consumer of
+   *  this filter should be given, and what every other VIO reports.
+   *
+   *  `gsb` is expressed in `S`, the frame in which `X_.Rsb` starts at identity:
+   *  the body frame of the first IMU sample. `S` is not level. The filter knows
+   *  by how much -- that is exactly what the two-degree-of-freedom `Wsg` state
+   *  is: gravity in `S` is `Rsg * g_`, so `Rsg` maps the gravity-aligned frame
+   *  `W` (z along `-g_`, i.e. up) into `S`, and `p_w = Rsg' p_s`. But nothing
+   *  ever applied that rotation to the output, so every pose XIVO published was
+   *  tilted by the rig's initial attitude relative to gravity.
+   *
+   *  On TUM-VI room1-room6 that tilt is 0.8-3.0 deg, and it lands in the
+   *  orientation error undiminished: the standard evaluation aligns yaw and
+   *  position only (`ov_eval ... posyaw`, and every other VIO benchmark, because
+   *  yaw and position are the unobservable directions and roll/pitch are *not*),
+   *  so a roll/pitch frame offset is not something an evaluator can remove. It
+   *  was 60-100% of the reported orientation ATE on those sequences -- room2
+   *  reported 3.23 deg against a 3.33 deg initial tilt.
+   *
+   *  `Rsg` is a state, so this uses the filter's current estimate of it, which
+   *  is the causally-available best one. It converges well: against the mocap,
+   *  the final `Rsg` is within 0.05 deg (room2) and 0.40 deg (room4) of true
+   *  gravity, where the 20-sample accel average it starts from is off by 1.3 and
+   *  2.6 deg. `Rsg` carries no yaw by construction (`State::operator+=` zeroes
+   *  the third component of its tangent update and reprojects), so this is a
+   *  pure levelling and cannot rotate the trajectory about the vertical.
+   *
+   *  Rotation and translation both, or the result would not be a pose in any
+   *  frame. */
+  SE3 gwb() const {
+    if (!gravity_align_output_) {
+      return gsb();
+    }
+    const SO3 Rws = X_.Rsg.inverse();
+    return SE3{Rws * X_.Rsb, Rws * X_.Tsb};
+  }
+  SE3 gwc() const { return gwb() * gbc(); }
   const State& X() const { return X_; }
   const timestamp_t &ts() const { return curr_time_; }
   MatX P() const {
@@ -827,6 +865,11 @@ private:
    * (20 samples, no de-rotation) against 0.73 deg de-rotated over 200.
    * See notes-stereo/m6-attitude-initialization.md. */
   bool gravity_init_derotate_{false};
+  /** Publish poses in the gravity-aligned frame rather than in the initial body
+   *  frame; see `gwb`. Defaults on -- it is the convention every consumer and
+   *  every evaluator assumes -- and touches nothing the filter reads, so the
+   *  estimate itself is bit-identical either way. */
+  bool gravity_align_output_{true};
   // measurements buffer
   struct InternalBuffer
       : public std::vector<std::unique_ptr<internal::Message>> {

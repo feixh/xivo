@@ -567,6 +567,11 @@ Estimator::Estimator(const Json::Value &cfg)
   // Default off: it changes the initial attitude on every dataset, so leaving it
   // opt-in keeps the monocular baseline configs bit-for-bit as they were.
   gravity_init_derotate_ = cfg_.get("gravity_init_derotate", false).asBool();
+  // See `Estimator::gwb`. On by default: publishing in the initial body frame
+  // rather than the gravity-aligned one is a bug in the output convention, not a
+  // tuning choice, and it costs 0.8-3.0 deg of reported attitude error on
+  // TUM-VI. Off restores the old convention exactly.
+  gravity_align_output_ = cfg_.get("gravity_align_output", true).asBool();
   gravity_init_buf_.clear();
   gravity_init_gyro_buf_.clear();
   gravity_init_time_buf_.clear();
@@ -1775,12 +1780,41 @@ void Estimator::SwitchRefGroup() {
     // now fix covariance of the new gauge group. This prevents the group's
     // state from changing.
     int offset = kGroupBegin + 6 * g->sind();
+    const int N = err_.size();
     if (group_degrees_fixed_ == 4) {
-      P_.block(offset+2, 0, 4, err_.size()).setZero();
-      P_.block(0, offset+2, err_.size(), 4).setZero();
+      // Exactly four of a VIO's degrees of freedom are unobservable: the global
+      // position, and the rotation about gravity. The three translation
+      // rows/cols below fix the former.
+      //
+      // The rotational one is *not* the group's third rotation coordinate.
+      // `SO3xR3::operator+=` applies the update on the right (`Rsb *=
+      // SO3::exp(dW)`), so dW lives in the group's own body frame and dW(2) is a
+      // rotation about the *body* z-axis. Over TUM-VI room1-room6 the body
+      // z-axis sits a median 7-17 deg from vertical (p90 20-41 deg, max 74 deg),
+      // so zeroing dW(2) simultaneously left part of the yaw gauge free and
+      // declared a component of the group's *observable* tilt to be known
+      // exactly -- and a direction with an identically-zero row of `P_` can
+      // never be corrected again by any later measurement (its Kalman gain row
+      // is `P_.row(i) H' S^-1` = 0), so that tilt error was frozen into the
+      // anchor of every feature the group owns.
+      //
+      // The unobservable direction written in the group's body frame: rotating
+      // the whole trajectory by dtheta about the vertical n_s takes Rsb ->
+      // exp(dtheta n_s^) Rsb = Rsb exp(dtheta (Rsb' n_s)^), so it is
+      // u = Rsb' n_s. Project u out of the group's rotation block and of all of
+      // its cross-covariances. That is the same congruence P <- M P M' the old
+      // code applied, just with the correct u instead of u = e3 (for which
+      // I - u u' is diag(1,1,0), i.e. zeroing the third row and column).
+      const Vec3 n_s = X_.Rsg * Vec3{0, 0, 1};
+      const Vec3 u = (g->Rsb().inverse() * n_s).normalized();
+      const Mat3 Pi = Mat3::Identity() - u * u.transpose();
+      P_.block(offset, 0, 3, N) = (Pi * P_.block(offset, 0, 3, N)).eval();
+      P_.block(0, offset, N, 3) = (P_.block(0, offset, N, 3) * Pi).eval();
+      P_.block(offset + 3, 0, 3, N).setZero();
+      P_.block(0, offset + 3, N, 3).setZero();
     } else {
-      P_.block(offset, 0, 6, err_.size()).setZero();
-      P_.block(0, offset, err_.size(), 6).setZero();
+      P_.block(offset, 0, 6, N).setZero();
+      P_.block(0, offset, N, 6).setZero();
     }
   }
 }
