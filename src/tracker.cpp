@@ -186,6 +186,8 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
     histogram_method_ = HistogramMethod::HISTOGRAM;
   } else if (hist == "CLAHE") {
     histogram_method_ = HistogramMethod::CLAHE;
+  } else if (hist == "GAINMAP") {
+    histogram_method_ = HistogramMethod::GAINMAP;
   } else {
     LOG(FATAL) << "Invalid tracker histogram_method " << hist;
   }
@@ -195,6 +197,19 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
     clahe_ = cv::createCLAHE(clahe_clip_limit_,
                              cv::Size(clahe_grid_size_, clahe_grid_size_));
   }
+  std::string eq_scope = cfg_.get("equalize_for", "ALL").asString();
+  if (eq_scope == "ALL") {
+    equalize_scope_ = EqualizeScope::ALL;
+  } else if (eq_scope == "DETECT") {
+    equalize_scope_ = EqualizeScope::DETECT;
+  } else {
+    LOG(FATAL) << "Invalid tracker equalize_for " << eq_scope
+               << " (expected ALL or DETECT)";
+  }
+  auto gainmap_cfg = cfg_["gainmap"];
+  gainmap_bins_ = std::max(2, gainmap_cfg.get("bins", 32).asInt());
+  gainmap_smooth_ = std::max(0, gainmap_cfg.get("smooth", 2).asInt());
+  gainmap_max_gain_ = gainmap_cfg.get("max_gain", 4.0).asDouble();
   // Both of these abort on a multi-channel input, and the driver hands us BGR
   // (see `ToGray`). Rather than leave a config that aborts on the first frame,
   // turn the conversion on for them.
@@ -236,6 +251,20 @@ Tracker::Tracker(const Json::Value &cfg) : cfg_{cfg} {
   // The right search reuses the temporal KLT window/levels unless overridden.
   stereo_win_size_ = stereo_cfg.get("win_size", win_size_).asInt();
   stereo_max_level_ = stereo_cfg.get("max_level", max_level_).asInt();
+  stereo_back_track_ = stereo_cfg.get("back_track", true).asBool();
+  stereo_seed_prev_disparity_ =
+      stereo_cfg.get("seed_prev_disparity", false).asBool();
+  stereo_max_disparity_jump_ =
+      stereo_cfg.get("max_disparity_jump",
+                     std::numeric_limits<number_t>::infinity())
+          .asDouble();
+  if (std::isfinite(stereo_max_disparity_jump_) &&
+      !stereo_seed_prev_disparity_) {
+    LOG(WARNING) << "tracker: stereo_matching.max_disparity_jump needs "
+                    "seed_prev_disparity, which maintains the table it reads; "
+                    "ignoring it";
+    stereo_max_disparity_jump_ = std::numeric_limits<number_t>::infinity();
+  }
 
   std::string detector_type = cfg_.get("detector", "FAST").asString();
   LOG(INFO) << "detector type=" << detector_type;
@@ -316,7 +345,94 @@ const cv::Mat &Tracker::ToGray(const cv::Mat &src, cv::Mat &dst) const {
   return dst;
 }
 
-const cv::Mat &Tracker::Equalize(const cv::Mat &src, cv::Mat &dst) {
+void Tracker::BuildGainMap(const cv::Mat &src, int cam, cv::Mat &gain) const {
+  CHECK(src.type() == CV_8UC1) << "GAINMAP needs a single-channel 8-bit image";
+  const int rows = src.rows, cols = src.cols;
+
+  // The vignette is centred on the optical axis, not on the sensor, so use the
+  // principal point when the camera model is available.
+  number_t cx = 0.5 * cols, cy = 0.5 * rows;
+  auto camera = Camera::instance(cam);
+  if (camera != nullptr) {
+    cx = camera->cx();
+    cy = camera->cy();
+  }
+
+  // Mean intensity per radial bin. `rmax` is the largest radius any pixel can
+  // have from this centre, so the last bin is never empty.
+  const number_t rmax =
+      std::sqrt(std::max(cx, number_t(cols) - cx) * std::max(cx, number_t(cols) - cx) +
+                std::max(cy, number_t(rows) - cy) * std::max(cy, number_t(rows) - cy));
+  const int NB = gainmap_bins_;
+  std::vector<double> sum(NB, 0.0), cnt(NB, 0.0);
+  const number_t inv = NB / (rmax > 0 ? rmax : 1);
+  for (int r = 0; r < rows; ++r) {
+    const uint8_t *s = src.ptr<uint8_t>(r);
+    const number_t dy = r + number_t(0.5) - cy;
+    for (int c = 0; c < cols; ++c) {
+      const number_t dx = c + number_t(0.5) - cx;
+      int b = static_cast<int>(std::sqrt(dx * dx + dy * dy) * inv);
+      if (b >= NB) b = NB - 1;
+      sum[b] += s[c];
+      cnt[b] += 1.0;
+    }
+  }
+  std::vector<double> mean(NB, 0.0);
+  for (int b = 0; b < NB; ++b) {
+    mean[b] = cnt[b] > 0 ? sum[b] / cnt[b] : 0.0;
+  }
+  // A single frame's profile is smooth in expectation but not in realization;
+  // smoothing it keeps one dark annulus from turning into a ring in the gain.
+  std::vector<double> prof(NB, 0.0);
+  for (int b = 0; b < NB; ++b) {
+    double acc = 0.0, w = 0.0;
+    for (int k = -gainmap_smooth_; k <= gainmap_smooth_; ++k) {
+      const int j = b + k;
+      if (j < 0 || j >= NB || cnt[j] <= 0) continue;
+      acc += mean[j];
+      w += 1.0;
+    }
+    prof[b] = w > 0 ? acc / w : mean[b];
+  }
+  // Normalize to the *brightest* annulus, so every gain is >= 1 and the correction
+  // only ever brightens. Normalizing to the centre instead would darken anything
+  // brighter than the centre, throwing away contrast the detector already had.
+  double ref = 0.0;
+  for (int b = 0; b < NB; ++b) ref = std::max(ref, prof[b]);
+  std::vector<double> g(NB, 1.0);
+  if (ref > 1.0) {
+    for (int b = 0; b < NB; ++b) {
+      g[b] = prof[b] > 1.0 ? std::min<double>(gainmap_max_gain_, ref / prof[b])
+                           : gainmap_max_gain_;
+    }
+  }
+
+  // Per-pixel map, linearly interpolated between bin *centres* so there is no
+  // visible step at a bin boundary -- a step would be an edge, and the detector
+  // would find corners along it.
+  gain.create(rows, cols, CV_16UC1);
+  for (int r = 0; r < rows; ++r) {
+    uint16_t *d = gain.ptr<uint16_t>(r);
+    const number_t dy = r + number_t(0.5) - cy;
+    for (int c = 0; c < cols; ++c) {
+      const number_t dx = c + number_t(0.5) - cx;
+      const number_t t = std::sqrt(dx * dx + dy * dy) * inv - number_t(0.5);
+      int b0 = static_cast<int>(std::floor(t));
+      number_t f = t - b0;
+      if (b0 < 0) { b0 = 0; f = 0; }
+      if (b0 >= NB - 1) { b0 = NB - 2; f = 1; }
+      const double gv = g[b0] * (1.0 - f) + g[b0 + 1] * f;
+      d[c] = static_cast<uint16_t>(
+          std::lround(std::min(255.0, std::max(1.0, gv)) * 256.0));
+    }
+  }
+  LOG(INFO) << "gain map for camera " << cam << ": centre (" << cx << ", " << cy
+            << "), profile " << prof.front() << " -> " << prof.back()
+            << ", gain " << g.front() << " -> " << g.back();
+}
+
+
+const cv::Mat &Tracker::Equalize(const cv::Mat &src, cv::Mat &dst, int cam) {
   switch (histogram_method_) {
   case HistogramMethod::HISTOGRAM:
     cv::equalizeHist(src, dst);
@@ -324,10 +440,37 @@ const cv::Mat &Tracker::Equalize(const cv::Mat &src, cv::Mat &dst) {
   case HistogramMethod::CLAHE:
     clahe_->apply(src, dst);
     return dst;
+  case HistogramMethod::GAINMAP: {
+    const int idx = (cam == 1) ? 1 : 0;
+    cv::Mat &gain = gain_q8_[idx];
+    if (gain.empty() || gain.rows != src.rows || gain.cols != src.cols) {
+      BuildGainMap(src, idx, gain);
+    }
+    dst.create(src.size(), CV_8UC1);
+    for (int r = 0; r < src.rows; ++r) {
+      const uint8_t *s = src.ptr<uint8_t>(r);
+      const uint16_t *g = gain.ptr<uint16_t>(r);
+      uint8_t *d = dst.ptr<uint8_t>(r);
+      for (int c = 0; c < src.cols; ++c) {
+        const int v = (static_cast<int>(s[c]) * static_cast<int>(g[c])) >> 8;
+        d[c] = v > 255 ? uint8_t(255) : static_cast<uint8_t>(v);
+      }
+    }
+    return dst;
+  }
   case HistogramMethod::NONE:
   default:
     return src;
   }
+}
+
+
+const cv::Mat &Tracker::DetectionImage() {
+  if (equalize_scope_ != EqualizeScope::DETECT ||
+      histogram_method_ == HistogramMethod::NONE) {
+    return img_;
+  }
+  return Equalize(img_, img_det_, /*cam=*/0);
 }
 
 
@@ -588,8 +731,14 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
   }
   // The right image gets exactly the same photometric treatment as the left:
   // left->right KLT compares patches across the two, so equalizing only one of
-  // them would break the brightness-constancy assumption it rests on.
-  img_r_ = Equalize(ToGray(image_r, img_r_gray_), img_r_eq_);
+  // them would break the brightness-constancy assumption it rests on. Under
+  // `DETECT` neither is equalized -- detection only ever happens on the left --
+  // so the pair stays consistent and the right image's equalization, which no
+  // detector ever reads, is not computed at all.
+  const cv::Mat &gray_r = ToGray(image_r, img_r_gray_);
+  img_r_ = equalize_scope_ == EqualizeScope::DETECT
+               ? gray_r
+               : Equalize(gray_r, img_r_eq_, /*cam=*/1);
   ++num_stereo_frames_;
 
   // Left-image temporal tracking is exactly the monocular path: the stereo run
@@ -635,14 +784,23 @@ void Tracker::MatchStereo() {
     return;
   }
 
-  // The left pyramid is the one temporal tracking just built, provided the
-  // window and level count match -- which they do unless `stereo_matching`
-  // overrides them, since they default to the KLT values. `pyramid_` holds the
-  // *current* frame's pyramid after `UpdateLK`'s swap, but not on the paths that
-  // return before it, hence the flag rather than an assumption.
+  // The left pyramid is the one temporal tracking just built, provided the window
+  // matches and it is at least as deep as the stereo search needs -- which it is
+  // unless `stereo_matching` overrides them, since they default to the KLT values.
+  // `pyramid_` holds the *current* frame's pyramid after `UpdateLK`'s swap, but
+  // not on the paths that return before it, hence the flag rather than an
+  // assumption.
+  //
+  // A *deeper* left pyramid than `stereo_max_level_` is fine and is the point of
+  // the `<=`: `calcOpticalFlowPyrLK` clamps its `maxLevel` down to the shallower
+  // of the two pyramids it is handed (`lkpyramid.cpp`, the `levels1 < maxLevel`
+  // and `levels2 < maxLevel` tests), so a shallow right pyramid plus an explicit
+  // `stereo_max_level_` is what actually decides how many levels get searched.
+  // Without the `<=` a config that shortens only the stereo search would pay for a
+  // second full left pyramid to throw most of it away.
   const bool reuse_left = pyramid_is_current_ &&
                           stereo_win_size_ == win_size_ &&
-                          stereo_max_level_ == max_level_;
+                          stereo_max_level_ <= max_level_;
   std::vector<cv::Mat> pyr_l_own, pyr_r;
   if (!reuse_left) {
     cv::buildOpticalFlowPyramid(img_, pyr_l_own,
@@ -657,10 +815,33 @@ void Tracker::MatchStereo() {
   cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
                             max_iter_, eps_);
 
-  // Left -> right. No initial-flow hint is given: the disparity of a feature
-  // depends on its unknown depth, so seeding with the left location (which
-  // OPTFLOW_USE_INITIAL_FLOW would do) is already the best guess available.
+  // Left -> right. Unseeded, the best guess available is the left location itself,
+  // since the disparity depends on the unknown depth. With
+  // `seed_prev_disparity`, an already-matched feature is seeded with the offset
+  // that worked last frame, which is a far better guess -- disparity is smooth in
+  // depth and depth is smooth in time -- and is what makes a shallow
+  // `stereo_max_level_` safe.
   std::vector<cv::Point2f> pts_r;
+  // Parallel to `vf`, so the jump gate below does not repeat the hash lookup.
+  std::vector<cv::Point2f> prev_d;
+  std::vector<uint8_t> have_prev;
+  int lr_flags = 0;
+  if (stereo_seed_prev_disparity_) {
+    pts_r.reserve(vf.size());
+    prev_d.resize(vf.size(), cv::Point2f(0.f, 0.f));
+    have_prev.assign(vf.size(), 0);
+    for (size_t i = 0; i < vf.size(); ++i) {
+      auto it = stereo_prev_disparity_.find(vf[i]->id());
+      if (it == stereo_prev_disparity_.end()) {
+        pts_r.push_back(pts_l[i]);
+      } else {
+        prev_d[i] = it->second;
+        have_prev[i] = 1;
+        pts_r.emplace_back(pts_l[i].x + it->second.x, pts_l[i].y + it->second.y);
+      }
+    }
+    lr_flags = cv::OPTFLOW_USE_INITIAL_FLOW;
+  }
   std::vector<uint8_t> status_lr;
   // `cv::noArray()` for the error: nothing here reads it, and asking for it makes
   // OpenCV run an extra full-window photometric pass per point at level 0. It is
@@ -668,23 +849,32 @@ void Tracker::MatchStereo() {
   // `status` unchanged for every point this function can accept.
   cv::calcOpticalFlowPyrLK(pyr_l, pyr_r, pts_l, pts_r, status_lr, cv::noArray(),
                            cv::Size(stereo_win_size_, stereo_win_size_),
-                           stereo_max_level_, criteria);
+                           stereo_max_level_, criteria, lr_flags);
 
   // Right -> left, for the circular-consistency check. Running it on the whole
   // batch is cheaper than filtering first and re-entering OpenCV, and the
   // rejected entries are simply ignored below.
   std::vector<cv::Point2f> pts_l_back;
   std::vector<uint8_t> status_rl;
-  cv::calcOpticalFlowPyrLK(pyr_r, pyr_l, pts_r, pts_l_back, status_rl,
-                           cv::noArray(),
-                           cv::Size(stereo_win_size_, stereo_win_size_),
-                           stereo_max_level_, criteria);
+  if (stereo_back_track_) {
+    cv::calcOpticalFlowPyrLK(pyr_r, pyr_l, pts_r, pts_l_back, status_rl,
+                             cv::noArray(),
+                             cv::Size(stereo_win_size_, stereo_win_size_),
+                             stereo_max_level_, criteria);
+  }
 
   auto cam_l = Camera::instance(0);
   auto cam_r = Camera::instance(1);
 
+  // Rebuilt from scratch each frame, so a disparity can only ever be one frame
+  // old and the table cannot outlive the features it describes.
+  std::unordered_map<int, cv::Point2f> disparity_next;
+  if (stereo_seed_prev_disparity_) {
+    disparity_next.reserve(vf.size() * 2);
+  }
+
   for (size_t i = 0; i < vf.size(); ++i) {
-    if (!status_lr[i] || !status_rl[i]) {
+    if (!status_lr[i] || (stereo_back_track_ && !status_rl[i])) {
       ++num_stereo_rejected_klt_;
       continue;
     }
@@ -704,14 +894,30 @@ void Tracker::MatchStereo() {
       continue;
     }
 
+    // Temporal disparity consistency: a real feature's disparity cannot jump.
+    if (std::isfinite(stereo_max_disparity_jump_) && have_prev[i]) {
+      const number_t jx = dx - prev_d[i].x;
+      const number_t jy = dy - prev_d[i].y;
+      if (std::sqrt(jx * jx + jy * jy) > stereo_max_disparity_jump_) {
+        // Counted as a circular rejection: the two gates do the same job (reject a
+        // left-right correspondence that is not self-consistent) and the shipped
+        // configs enable exactly one of them, so keeping one counter keeps the
+        // printed diagnostic comparable across the two.
+        ++num_stereo_rejected_circular_;
+        continue;
+      }
+    }
+
     // Circular consistency: the round trip must land back where it started.
     // This is the single most effective filter against repeated texture, since
     // an aliased match is usually not symmetric.
-    const number_t bx = pts_l_back[i].x - pts_l[i].x;
-    const number_t by = pts_l_back[i].y - pts_l[i].y;
-    if (std::sqrt(bx * bx + by * by) > stereo_circular_thresh_) {
-      ++num_stereo_rejected_circular_;
-      continue;
+    if (stereo_back_track_) {
+      const number_t bx = pts_l_back[i].x - pts_l[i].x;
+      const number_t by = pts_l_back[i].y - pts_l[i].y;
+      if (std::sqrt(bx * bx + by * by) > stereo_circular_thresh_) {
+        ++num_stereo_rejected_circular_;
+        continue;
+      }
     }
 
     // Epipolar check on unprojected bearings. Doing it in normalized
@@ -726,11 +932,20 @@ void Tracker::MatchStereo() {
 
     vf[i]->SetRightObs(Vec2{pts_r[i].x, pts_r[i].y});
     ++num_stereo_matched_;
+    if (stereo_seed_prev_disparity_) {
+      disparity_next.emplace(vf[i]->id(), cv::Point2f(dx, dy));
+    }
+  }
+
+  if (stereo_seed_prev_disparity_) {
+    stereo_prev_disparity_.swap(disparity_next);
   }
 }
 
 
 void Tracker::UpdateMatch(const cv::Mat &image) {
+  // This path detects on every frame, so `DETECT` has nothing to defer and the
+  // two scopes coincide.
   const cv::Mat &src = Equalize(ToGray(image, img_gray_), img_eq_);
   img_ = src.clone();
   if (normalize_) {
@@ -881,9 +1096,15 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   //
   // The cost of not copying is that `img_` no longer owns its pixels, which is
   // why `pyramid_` has to (see `BuildOwnedPyramid`).
-  // Contrast equalization, when enabled, happens before everything else: the
-  // KLT, the detector and the descriptors must all see the same pixels.
-  const cv::Mat &src = Equalize(ToGray(image, img_gray_), img_eq_);
+  // Contrast equalization, when enabled and scoped to `ALL`, happens before
+  // everything else: the KLT, the detector and the descriptors then all see the
+  // same pixels. Under `DETECT` it is deferred to `DetectionImage()`, so that
+  // tracking runs on the raw frame and the equalization is not computed at all on
+  // a frame that does not detect.
+  const cv::Mat &gray = ToGray(image, img_gray_);
+  const cv::Mat &src = equalize_scope_ == EqualizeScope::DETECT
+                           ? gray
+                           : Equalize(gray, img_eq_);
   if (normalize_) {
     cv::normalize(src, img_, 0, 255, cv::NORM_MINMAX);
   } else {
@@ -904,7 +1125,8 @@ void Tracker::UpdateLK(const cv::Mat &image) {
     pyramid_is_current_ = true;
     // detect an initial set of features (nothing to rescue on the first frame)
     std::vector<FeaturePtr> no_dropped_tracks;
-    DetectLK(img_, num_features_max_, no_dropped_tracks, false, cv::Mat());
+    DetectLK(DetectionImage(), num_features_max_, no_dropped_tracks, false,
+             cv::Mat());
     initialized_ = true;
     return;
   }
@@ -1067,7 +1289,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   // this can rescue dropped featuers by matching them to newly detected ones
   if (num_valid_features < num_features_min_) {
     bool check_homography = do_outlier_rejection_ && outlier_rejection_success;
-    DetectLK(img_, num_features_max_ - num_valid_features,
+    DetectLK(DetectionImage(), num_features_max_ - num_valid_features,
              newly_dropped_tracks, check_homography, H);
   }
 

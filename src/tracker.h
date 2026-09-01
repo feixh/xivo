@@ -5,6 +5,7 @@
 
 #include <list>
 #include <memory>
+#include <unordered_map>
 
 #include "opencv2/core/core.hpp"
 #include "opencv2/features2d/features2d.hpp"
@@ -176,7 +177,75 @@ private:
    * huge displacement means the KLT latched onto unrelated texture. */
   number_t stereo_max_disparity_;
   int stereo_win_size_;
+  /** Pyramid levels searched by the left->right match; defaults to `max_level_`,
+   *  the temporal search's depth.
+   *
+   *  The two searches are not the same problem. The temporal one has to survive a
+   *  fast rotation, which can move a feature a long way, so it needs coarse
+   *  levels. The stereo one is bounded by the baseline and the scene depth, so
+   *  `2` is enough on TUM-VI's 10 cm baseline and is what the shipped stereo
+   *  config uses. The saving is in the LK solve, which iterates at every level,
+   *  not in the pyramid: building 3 levels and 5 levels differ by 0.004 ms. */
   int stereo_max_level_;
+  /** Run the right->left KLT and apply the circular-consistency test above.
+   *  Default true (the original behaviour).
+   *
+   *  It is a third full KLT pass over ~136 points, 1.7 of the 9.3 ms a stereo
+   *  frame spends in `track`, and it is the one rejection test in `MatchStereo`
+   *  with a cheap substitute: the epipolar residual already rejects any match off
+   *  the (calibrated, rigid) epipolar curve, and the disparity band rejects the
+   *  "KLT never moved" and "KLT latched onto unrelated texture" failures. What is
+   *  left uncovered is an aliased match that lands *on* the epipolar curve at a
+   *  plausible disparity, which the tightened `epipolar_thresh` below is aimed at.
+   *
+   *  For reference, the 71.3 FPS OpenVINS baseline does not re-verify already
+   *  tracked points across the pair at all -- `ov_core/src/track/TrackKLT.cpp:278`
+   *  carries an upstream `// TODO: we should probably still do this to reject
+   *  outliers` where the check would go, and line 668's `perform_matching` is
+   *  commented out for new detections too.
+   *
+   *  **Measured, and now off in the shipped stereo config.** The substitution
+   *  happens cleanly: epipolar rejections go 12576 -> 51617 while circular go
+   *  34942 -> 7476, and the matched fraction only moves 88.3% -> 85.8%. Together
+   *  with `max_level` below, `track` falls 9.91 -> 6.81 ms and stereo throughput
+   *  rises 38.20 -> 48.49 FPS (paired, room1), with the accuracy ensemble still
+   *  well inside the contract (stereo ATE 0.0472 -> 0.0488 against a 0.0677
+   *  floor). See notes-frontfast/m3-stereo-matching.md. */
+  bool stereo_back_track_;
+  /** Seed the left->right KLT with each feature's *previous* frame disparity
+   *  instead of with zero disparity (`OPTFLOW_USE_INITIAL_FLOW`). Default false.
+   *
+   *  Disparity is a smooth function of an already-tracked feature's depth, so last
+   *  frame's offset is a far better guess than "the same pixel", which is what an
+   *  unseeded search starts from. A good seed is what makes it safe to drop
+   *  pyramid levels from the stereo pass (`stereo_matching.max_level`): the levels
+   *  exist only to make a large initial residual converge.
+   *
+   *  **Measured a wash, so it stays off.** It does what it claims -- `track` falls
+   *  another 0.28 ms -- but it also keeps more matches alive, which puts 0.36 ms
+   *  back into `process-tracks`, so paired room1 stereo is 48.30 FPS with it and
+   *  48.49 without, and it costs ~5 MB of peak RSS for the id->disparity table.
+   *  It turns out `max_level: 2` does not need the seed on this baseline: the
+   *  ensembles are equal to within noise either way (stereo ATE 0.0491 seeded vs
+   *  0.0488 unseeded). Kept because it is the enabler for a *shorter* stereo
+   *  search than 2 on a wider baseline. */
+  bool stereo_seed_prev_disparity_;
+  /** Reject a match whose disparity moved further than this many pixels since the
+   *  feature's previous frame. Default infinity (off), and it needs
+   *  `seed_prev_disparity` on, since that is what maintains the table.
+   *
+   *  This is the cheap stand-in for the circular-consistency check, and it targets
+   *  the same failure. Disparity is fx*b/Z: it is smooth in time for a real
+   *  feature (a 0.1 m baseline at fx 191 px gives 19 px of disparity at 1 m, and
+   *  the depth of a tracked point cannot jump between frames), whereas an aliased
+   *  match on repetitive texture snaps to a *different* period of the pattern and
+   *  so moves by a multiple of that period in one frame. It costs the hash lookup
+   *  the seeding already does, against the back-track's third full KLT pass. */
+  number_t stereo_max_disparity_jump_;
+  /** Last accepted (dx, dy) from left to right, per feature id. Kept here rather
+   *  than on `Feature` so the stereo front end owns all of its own state. Pruned
+   *  against the live feature set each frame, so it cannot outgrow it. */
+  std::unordered_map<int, cv::Point2f> stereo_prev_disparity_;
 
   cv::Mat img_;
   /** Right image of the current stereo pair; empty on monocular runs. */
@@ -246,16 +315,105 @@ private:
   number_t subpix_eps_;
 
   /** Contrast equalization applied to the input image before tracking:
-   *  `NONE` (default, original behaviour), `HISTOGRAM` (`cv::equalizeHist`) or
-   *  `CLAHE`. */
-  enum class HistogramMethod : int { NONE = 0, HISTOGRAM = 1, CLAHE = 2 };
+   *  `NONE` (default, original behaviour), `HISTOGRAM` (`cv::equalizeHist`),
+   *  `CLAHE`, or `GAINMAP` (a frozen radial gain, see `BuildGainMap`). */
+  enum class HistogramMethod : int {
+    NONE = 0,
+    HISTOGRAM = 1,
+    CLAHE = 2,
+    GAINMAP = 3
+  };
   HistogramMethod histogram_method_;
   number_t clahe_clip_limit_;
   int clahe_grid_size_;
   cv::Ptr<cv::CLAHE> clahe_;
+
+  /** `GAINMAP`: a per-pixel multiplicative gain in Q8 fixed point, one map per
+   *  camera, estimated from that camera's first frame and then frozen.
+   *
+   *  What it replaces and why. `CLAHE` was turned on to defeat a *smooth radial
+   *  vignette*: TUM-VI's 512x512 fisheye frames measure mean intensity 62.9 at
+   *  r < 80 px of the principal point and 33.2 at r > 270 px, while FAST uses one
+   *  global threshold, so detection starved in exactly the periphery that carries
+   *  the parallax. A full per-tile histogram equalization of every frame is a very
+   *  expensive way to correct a fixed property of the lens: it costs 0.784 ms per
+   *  512x512 image, and because it raises local contrast *everywhere* it also
+   *  inflates FAST's keypoint count from 293 to 3047 per frame, which is another
+   *  0.4 ms of detect-plus-sort. A frozen gain map costs 0.153 ms and leaves the
+   *  detector's workload where it was.
+   *
+   *  Estimated, not calibrated: the radial profile comes from the camera's own
+   *  first frame, so the mechanism carries over to any lens and any dataset with
+   *  no offline step and nothing baked into the tree.
+   *
+   *  **Measured verdict on TUM-VI: this is slower end to end, and it is off.**
+   *  Paired room1 mono, 75.71 FPS against CLAHE's 80.55. `track` did fall as
+   *  predicted, 3.579 -> 3.205 ms, but `process-tracks` rose 5.632 -> 6.683 and
+   *  peak RSS 101.9 -> 112.2 MB, because the run initialised 21874 features
+   *  instead of 17743: tracking on a less-equalized image loses tracks, and a
+   *  lost track costs more in the OOS/MSCKF path than the CLAHE that would have
+   *  kept it. The premise above is also wrong for this lens -- the 62.9 -> 33.2
+   *  radial falloff is mostly the dark corners *outside* the ~190 deg image
+   *  circle, not vignetting inside it, so a radial gain only lifts FAST's supply
+   *  from 278 to 363 kps/frame where CLAHE gives 2919 (`harness/bench_gain.cpp`).
+   *  Kept, off, because the negative result is worth being able to re-run and
+   *  because a lens with real vignetting would behave differently. See
+   *  notes-frontfast/m1-where-the-front-end-time-goes.md. */
+  cv::Mat gain_q8_[2];
+  /** Bins across the radius when estimating the profile. 262144 pixels over 32
+   *  bins is ~8k samples per bin, so scene content averages out of the annulus
+   *  mean; azimuthal structure cancels by construction. */
+  int gainmap_bins_;
+  /** Moving-average half-width, in bins, applied to the profile before it is
+   *  inverted. Keeps a single dark annulus in frame 0 from becoming a ring in the
+   *  gain. */
+  int gainmap_smooth_;
+  /** Upper clamp on the gain. Amplifying a very dark annulus amplifies its noise
+   *  floor with it, and beyond ~4x there is no signal left to amplify. */
+  number_t gainmap_max_gain_;
+  /** Which images the equalization is applied to.
+   *
+   *  `ALL` (default) is the original behaviour: every image the front end touches
+   *  is equalized, so the KLT, the detector, the descriptors and the stereo match
+   *  all see equalized pixels.
+   *
+   *  `DETECT` applies it only where it earns its keep. The measured mechanism
+   *  behind `histogram_method: CLAHE`'s -0.0158 m is *keypoint supply*: on
+   *  TUM-VI's 512x512 frames FAST at threshold 20 finds 270 candidates on the raw
+   *  image and 2853 on the CLAHE'd one (`harness/bench_gain.cpp`), and that
+   *  supply is consumed entirely inside `DetectLK`. Nothing else in the frame
+   *  needs it -- the KLT wants brightness constancy, which a per-frame adaptive
+   *  equalization actively works against, since its tile histograms (and hence its
+   *  mapping) change with the scene from one frame to the next.
+   *
+   *  So under `DETECT` the pyramid, the temporal KLT and the stereo match run on
+   *  the raw image, and the equalization is computed only on the frames where
+   *  `DetectLK` actually runs (i.e. when the tracker is below
+   *  `num_features_min`), and only for the left camera, which is the only one that
+   *  detects. The detector therefore sees byte-for-byte the same image it sees
+   *  under `ALL`; what changes is the tracker's input, and how often the
+   *  equalization runs at all.
+   *
+   *  **Measured verdict on TUM-VI: also slower end to end, and also off.** Paired
+   *  room1: mono 73.29 FPS against `ALL`'s 75.29, stereo 38.53 against 38.72. The
+   *  image pass got cheaper by exactly the predicted amount (`track` 3.85 -> 3.42
+   *  mono, 9.79 -> 8.70 stereo) and the run still lost, because `process-tracks`
+   *  rose more (6.09 -> 6.91 mono, 9.98 -> 11.23 stereo) and stereo peak RSS went
+   *  136.4 -> 195.7 MB. Same mechanism as `GAINMAP`: the KLT does need CLAHE, not
+   *  for brightness constancy but because tracks that die land in the OOS path.
+   *  Kept, off, for the same reason. See notes-frontfast/m1-*.md. */
+  enum class EqualizeScope : int { ALL = 0, DETECT = 1 };
+  EqualizeScope equalize_scope_;
   /** Destinations for the equalized images. Members, not locals, because `img_`
    *  and `img_r_` are non-owning views that must stay valid for the frame. */
   cv::Mat img_eq_, img_r_eq_;
+  /** Under `EqualizeScope::DETECT`, the equalized copy `DetectLK` runs on.
+   *  Separate from `img_eq_` so that switching scopes cannot alias `img_`. */
+  cv::Mat img_det_;
+  /** The image `DetectLK` (and `RefineSubPix` with it) should run on: `img_`
+   *  under `ALL`, an equalization of it under `DETECT`. Computed at most once per
+   *  frame, on the frames that detect. */
+  const cv::Mat &DetectionImage();
   /** Convert incoming frames to single-channel luminance. See `ToGray`. */
   bool grayscale_;
   cv::Mat img_gray_, img_r_gray_;
@@ -267,7 +425,14 @@ private:
    * Returns a reference to whichever of the two now holds the image. */
   const cv::Mat &ToGray(const cv::Mat &src, cv::Mat &dst) const;
 
-  const cv::Mat &Equalize(const cv::Mat &src, cv::Mat &dst);
+  /** `cam` selects the gain map for `GAINMAP`; ignored by the other methods. */
+  const cv::Mat &Equalize(const cv::Mat &src, cv::Mat &dst, int cam = 0);
+
+  /** Fills `gain` (CV_16UC1, Q8) with the inverse of `src`'s radial intensity
+   *  profile, normalized so that the brightest annulus has gain 1. Uses camera
+   *  `cam`'s principal point as the centre when that camera exists, the image
+   *  centre otherwise. Called once per camera, on its first frame. */
+  void BuildGainMap(const cv::Mat &src, int cam, cv::Mat &gain) const;
 
   /** Fills `valid_mask_` for a `rows_` x `cols_` image of camera `cam_id`. */
   void BuildValidMask(int cam_id);

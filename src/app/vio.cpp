@@ -12,6 +12,7 @@
 #include "metrics.h"
 #include "tracker.h"
 #include "loader.h"
+#include "pngfast.h"
 #include "viewer.h"
 #include "visualize.h"
 #include "graphwriter.h"
@@ -47,6 +48,9 @@ int main(int argc, char **argv) {
   // The estimator config decides whether this is a stereo run, so read it before
   // choosing a loader.
   auto est_cfg = LoadJson(cfg["estimator_cfg"].asString());
+  // Same key, same default, same place in the sequence as
+  // pybind11/pyxivo.cpp's EstimatorWrapper: before CreateSystem.
+  SetFastPngDecode(est_cfg.get("fast_png_decode", false).asBool());
   const bool stereo = est_cfg.get("stereo", false).asBool();
 
   std::unique_ptr<DataLoader> loader;
@@ -91,18 +95,19 @@ int main(int argc, char **argv) {
       // mutually exclusive and a stereo pair cannot be mistaken for a left-only
       // frame.
       bool did_visual = false;
-      // IMREAD_GRAYSCALE, not the default IMREAD_COLOR: the estimator only ever
+      // Single channel, not the default IMREAD_COLOR: the estimator only ever
       // uses one channel, and decoding a grayscale PNG into 8UC3 makes the
       // decode, the pyramid and the KLT solve carry three identical planes.
-      // Kept in step with pybind11/pyxivo.cpp's ReadImage(); see
+      // `ReadGrayImage` is the same decode pybind11/pyxivo.cpp uses, including
+      // the optional fast PNG path; see src/pngfast.h and
       // notes-speed/m1-grayscale.md.
       if (auto msg = dynamic_cast<msg::StereoImage *>(raw_msg)) {
-        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
-        auto image_r = cv::imread(msg->image_path_r_, cv::IMREAD_GRAYSCALE);
+        auto image = ReadGrayImage(msg->image_path_);
+        auto image_r = ReadGrayImage(msg->image_path_r_);
         est->VisualMeasStereo(msg->ts_, image, image_r);
         did_visual = true;
       } else if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
-        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
+        auto image = ReadGrayImage(msg->image_path_);
         est->VisualMeas(msg->ts_, image);
         did_visual = true;
       }

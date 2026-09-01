@@ -10,6 +10,14 @@
   "use_canvas": true,
   "use_debug_view": false,
   "async_run": false,
+  // Decode grayscale PNGs with src/pngfast.cpp (libdeflate + a fused unfilter and
+  // 16->8 strip) instead of libpng+zlib: 2.81 -> 1.42 ms per 512x512 16-bit
+  // image, byte-identical output. unitTests_pngfast pins that against
+  // cv::imdecode, and the XIVO_DUMP_PRECISE trajectories match under cmp, so
+  // this is +9.3% FPS in both modes at exactly zero accuracy cost. Anything the
+  // fast path cannot reproduce falls back to cv::imdecode. See
+  // notes-frontfast/m2-png-decode.md.
+  "fast_png_decode": true,
   "print_bias_info": true,
   "draw_OOS": true,
   "integration_method": "PrinceDormand",
@@ -355,7 +363,11 @@
     "do_outlier_rejection": false,
     "KLT": {
       "win_size": 15,
-      "max_level": 5,
+      // 4, not the historical 5: the temporal search's cost is in the LK solve,
+      // which iterates at every level (2.365 -> 2.041 ms per 180 points), while
+      // the pyramid itself is free either way. +3.5% mono, +2% stereo, and the
+      // mono ensemble moved 0.0566 -> 0.0555 m ATE, i.e. it costs no accuracy.
+      "max_level": 4,
       "max_iter": 30,
       "eps": 0.01
     },
@@ -428,6 +440,16 @@
     },
     "stereo_matching": {
       "comment": "gates on the left->right KLT match; see notes-stereo/m3",
+      // The left->right match, restructured; see notes-frontfast/m3-stereo-matching.md.
+      // `back_track: false` drops the right->left KLT solve and lets the epipolar
+      // residual carry those rejections (epipolar 12576 -> 51617, circular 34942 ->
+      // 7476, matched 88.3% -> 85.8%). `max_level: 2` shortens the search, which is
+      // safe because the disparity is bounded by a 10 cm baseline, unlike the
+      // temporal search's rotation. Together: `track` 9.91 -> 6.81 ms, stereo 41.0
+      // -> 53.6 FPS over six rooms, stereo ATE 0.0472 -> 0.0488 m against a 0.0677
+      // floor.
+      "back_track": false,
+      "max_level": 2,
       "epipolar_thresh": 0.005,
       "circular_thresh": 1.0,
       "min_disparity": 1.0,
