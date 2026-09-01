@@ -5,15 +5,12 @@
 
 #include "estimator.h"
 #include "camera_manager.h"
+#include "pngfast.h"
 #include "stereo.h"
 #include "opencv2/core/eigen.hpp"
 #include "opencv2/highgui/highgui.hpp"
 #include "utils.h"
 
-// For ReadImage: one read(2) per frame instead of libpng's stdio dribble.
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <vector>
 
 // for visualization
@@ -88,33 +85,13 @@ cv::Mat CloneImageFromBuffer(const py::buffer_info &info) {
  *  sniff -- 1.15% of stereo CPU was in the syscall stub. `imdecode` runs the same
  *  `PngDecoder`, differing only in that its read callback is a `memcpy`
  *  (`grfmt_png.cpp`), so the decoded pixels are bit-identical. The buffer is
- *  reused across frames so the read costs no allocation. */
+ *  reused across frames so the read costs no allocation.
+ *
+ *  Both of those live in `xivo::ReadGrayImage` now, together with the optional
+ *  fast grayscale-PNG path that replaces libpng entirely (`src/pngfast.h`), so
+ *  that the C++ drivers under `src/app/` get the same decode as this one. */
 cv::Mat ReadImage(const std::string &path) {
-  thread_local std::vector<uchar> buf;
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    return cv::imread(path, cv::IMREAD_GRAYSCALE); // let OpenCV log the error
-  }
-  struct stat st;
-  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
-    ::close(fd);
-    return cv::imread(path, cv::IMREAD_GRAYSCALE);
-  }
-  buf.resize(static_cast<size_t>(st.st_size));
-  size_t off = 0;
-  while (off < buf.size()) {
-    const ssize_t n = ::read(fd, buf.data() + off, buf.size() - off);
-    if (n <= 0) {
-      break;
-    }
-    off += static_cast<size_t>(n);
-  }
-  ::close(fd);
-  if (off != buf.size()) {
-    return cv::imread(path, cv::IMREAD_GRAYSCALE);
-  }
-  const cv::Mat raw(1, static_cast<int>(buf.size()), CV_8U, buf.data());
-  return cv::imdecode(raw, cv::IMREAD_GRAYSCALE);
+  return xivo::ReadGrayImage(path);
 }
 
 } // namespace
@@ -133,6 +110,10 @@ public:
     }
 
     auto cfg = LoadJson(cfg_path);
+    // Read before CreateSystem so a bad key fails before any state is built.
+    // Top-level rather than under `tracker_cfg`: decoding happens here, in the
+    // driver, before the estimator sees anything.
+    SetFastPngDecode(cfg.get("fast_png_decode", false).asBool());
     estimator_ = CreateSystem(cfg);
     camera_ = CameraManager::instance();
 

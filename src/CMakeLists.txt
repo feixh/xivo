@@ -80,6 +80,8 @@ list(APPEND deps
         lapack
         blas
         fmt
+        z
+        ${XIVO_DEFLATE_LIB}
         )
 if (IS_LINUX)
   list(APPEND deps GL)
@@ -123,6 +125,7 @@ add_library(xest STATIC
         mapper.cpp
         camera_manager.cpp
         stereo.cpp
+        pngfast.cpp
         imu.cpp)
 if (IS_MAC)
   target_link_libraries(xest INTERFACE ${deps} "-Wl, -framework OpenGL")
@@ -287,6 +290,14 @@ add_executable(unitTests_pyramid
                test/unittest_pyramid.cpp)
 target_link_libraries(unitTests_pyramid xest ${deps} gtest gtest_main)
 add_test(NAME Pyramid COMMAND unitTests_pyramid
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# The fast grayscale-PNG decoder against cv::imdecode. No estimator state, so it
+# needs nothing but xest.
+add_executable(unitTests_pngfast
+               test/unittest_pngfast.cpp)
+target_link_libraries(unitTests_pngfast xest ${deps} gtest gtest_main)
+add_test(NAME PngFast COMMAND unitTests_pngfast
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_determinism

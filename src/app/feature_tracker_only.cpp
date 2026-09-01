@@ -12,6 +12,7 @@
 #include "metrics.h"
 #include "tracker.h"
 #include "loader.h"
+#include "pngfast.h"
 #include "viewer.h"
 #include "visualize.h"
 #include "graphwriter.h"
@@ -71,8 +72,9 @@ int main(int argc, char **argv) {
 
       if (auto msg = dynamic_cast<msg::Image *>(raw_msg)) {
         // One channel is all the tracker uses; see pybind11/pyxivo.cpp's
-        // ReadImage() and notes-speed/m1-grayscale.md.
-        auto image = cv::imread(msg->image_path_, cv::IMREAD_GRAYSCALE);
+        // ReadImage() and notes-speed/m1-grayscale.md. Same decoder as the
+        // other two drivers, fast PNG path included (src/pngfast.h).
+        auto image = ReadGrayImage(msg->image_path_);
         est->VisualMeasTrackerOnly(msg->ts_, image);
 
         if (viewer) {

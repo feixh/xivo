@@ -171,6 +171,22 @@ add_definitions(-DUSE_ONLINE_TEMPORAL_CALIB)
 find_package(OpenCV REQUIRED)
 find_package(Python3 REQUIRED Interpreter Development)
 
+# libdeflate, for the fast grayscale-PNG path in src/pngfast.cpp. Optional:
+# without it that path uses zlib's `uncompress` instead and keeps about half of
+# its speedup. Set here rather than in src/CMakeLists.txt because pyxivo is
+# built from this list and calls the same decoder.
+find_library(LIBDEFLATE_LIBRARY NAMES deflate libdeflate)
+find_path(LIBDEFLATE_INCLUDE_DIR libdeflate.h)
+if (LIBDEFLATE_LIBRARY AND LIBDEFLATE_INCLUDE_DIR)
+  message(STATUS "libdeflate: ${LIBDEFLATE_LIBRARY}")
+  add_definitions(-DXIVO_HAVE_LIBDEFLATE)
+  include_directories(${LIBDEFLATE_INCLUDE_DIR})
+  set(XIVO_DEFLATE_LIB ${LIBDEFLATE_LIBRARY})
+else()
+  message(STATUS "libdeflate: not found, fast PNG decode will use zlib")
+  set(XIVO_DEFLATE_LIB "")
+endif()
+
 link_directories(
         ${PROJECT_SOURCE_DIR}/lib
         ${PROJECT_SOURCE_DIR}/thirdparty/gflags/lib
