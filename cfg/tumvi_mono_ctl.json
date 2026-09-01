@@ -4,6 +4,14 @@
   "use_canvas": true,
   "use_debug_view": false,
   "async_run": false,
+  // Decode grayscale PNGs with src/pngfast.cpp (libdeflate + a fused unfilter and
+  // 16->8 strip) instead of libpng+zlib: 2.81 -> 1.42 ms per 512x512 16-bit
+  // image, byte-identical output. unitTests_pngfast pins that against
+  // cv::imdecode, and the XIVO_DUMP_PRECISE trajectories match under cmp, so
+  // this is +9.3% FPS in both modes at exactly zero accuracy cost. Anything the
+  // fast path cannot reproduce falls back to cv::imdecode. See
+  // notes-frontfast/m2-png-decode.md.
+  "fast_png_decode": true,
   "print_bias_info": true,
   "draw_OOS": true,
   "integration_method": "PrinceDormand",
@@ -297,7 +305,11 @@
     "do_outlier_rejection": false,
     "KLT": {
       "win_size": 15,
-      "max_level": 5,
+      // 4, not the historical 5: the temporal search's cost is in the LK solve,
+      // which iterates at every level (2.365 -> 2.041 ms per 180 points), while
+      // the pyramid itself is free either way. +3.5% mono, +2% stereo, and the
+      // mono ensemble moved 0.0566 -> 0.0555 m ATE, i.e. it costs no accuracy.
+      "max_level": 4,
       "max_iter": 30,
       "eps": 0.01
     },
