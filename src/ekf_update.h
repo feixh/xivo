@@ -10,6 +10,10 @@
 
 namespace xivo {
 
+/** Ceiling on `ekf_update.chunks`, only so that `EkfUpdateDowndate` can hold the
+ *  chunk boundaries on the stack. */
+constexpr int kMaxUpdateChunks = 16;
+
 /** One row block of the stacked measurement Jacobian `H`, and what is known
  *  about its sparsity.
  *
@@ -97,17 +101,60 @@ void EkfUpdateJoseph(MatX &P, const MatX &H, const VecX &inn, const VecX &diagR,
  *  `blocks` must cover every row of `H` exactly once, in order, and every slot
  *  they name must lie inside `live`. Returns false and leaves `P` and `err`
  *  untouched if `S` is not numerically positive definite; the caller is expected
- *  to fall back to `EkfUpdateJoseph`. */
+ *  to fall back to `EkfUpdateJoseph`.
+ *
+ *  `fuse` (`ekf_update.fuse_passes`) changes how `H P` and `M H^T` are ordered --
+ *  see `MeasurementTimesCov`. It changes no other step.
+ *
+ *  `chunks` (`ekf_update.chunks`, 1 = off) splits the `m` rows into that many
+ *  consecutive groups at block boundaries and applies them one after another, each
+ *  against the covariance the previous ones left behind and with its innovation
+ *  re-predicted as `r_c -= H_c * err_so_far`. That is the *same* update, not an
+ *  approximation of it: the information form
+ *
+ *      P+^-1 = P^-1 + sum_c H_c^T R_c^-1 H_c,
+ *      P+^-1 err = sum_c H_c^T R_c^-1 r_c
+ *
+ *  is additive in the chunks whenever `R` is block diagonal across them (here `R`
+ *  is diagonal, so it always is) and `H` is held at the one linearization point,
+ *  which it is -- nothing is re-evaluated between chunks. The reason to want it is
+ *  that `S` is `m x m`: the Cholesky factorization costs `m^3/6` and the triangular
+ *  solve `m^2 n_live / 2`, so `C` chunks pay `1/C^2` and `1/C` of those, while the
+ *  downdate's `n_live^2 m / 2` is unchanged. At the stereo working point (`m` 360,
+ *  `n_live` 490) the factorization and the solve are 44% of the update.
+ *
+ *  What it costs: `C` mirrors of the live triangle instead of one (the next chunk
+ *  reads both triangles of `P`), `C` sets of the small per-block gemms in `H P`,
+ *  and `C` passes over the live triangle in the downdate instead of one. It is a
+ *  different *factorization*, so unlike `live`-restriction it is not expected to
+ *  agree with the batch form bit for bit -- `unitTests_ekf_update` bounds the
+ *  difference against `EkfUpdateJoseph`.
+ *
+ *  A chunk whose `S_c` has no Cholesky factor is dropped with a warning if an
+ *  earlier chunk has already been applied (`P` cannot be rolled back, and dropping
+ *  measurements leaves the filter consistent); if it is the first, the function
+ *  returns false as before and the caller's Joseph fallback still sees an untouched
+ *  `P`. */
 bool EkfUpdateDowndate(MatX &P, const MatX &H, const VecX &inn,
                        const VecX &diagR, const std::vector<MeasBlock> &blocks,
-                       const StateRuns &live, VecX &err);
+                       const StateRuns &live, VecX &err, bool fuse = false,
+                       int chunks = 1);
 
 /** `M = H P`, using the block sparsity of `H` on its rows and the occupied
  *  extent `live` on its columns. Equal to the dense `H * P` in full: the columns
  *  outside `live` are set to zero rather than left alone, which is what they are
- *  in the product anyway. Exposed for the test. */
+ *  in the product anyway. Exposed for the test.
+ *
+ *  `fuse` picks the pass order. The default drives one gemm per (row block, column
+ *  run of `H`, live run), which means `kJacFixedRuns` read-modify-write passes over
+ *  the whole `rows x live` destination; `fuse` drives the fixed shared runs as the
+ *  single run that bounds them (their gaps are exactly zero in `H`) and writes
+ *  rather than accumulates, then walks each merged group span together with the
+ *  features inside it so those rows are touched once more instead of twice. At the
+ *  shipped capacity the product carries ~5 MFLOP against 18 MB of destination
+ *  traffic, so it is the traffic that sets the time. Same sum, reassociated. */
 void MeasurementTimesCov(const MatX &H, const MatX &P,
                          const std::vector<MeasBlock> &blocks,
-                         const StateRuns &live, MatX &M);
+                         const StateRuns &live, MatX &M, bool fuse = false);
 
 } // namespace xivo

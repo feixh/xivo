@@ -1,5 +1,6 @@
 // The EKF measurement update. See ekf_update.h for the algebra.
 // Author: efficiency work (branch auto-efficiency)
+#include <algorithm>
 #include <cmath>
 
 #include "glog/logging.h"
@@ -68,6 +69,22 @@ void CheckLiveExtent(const MatX &P, const MatX &H, const StateRuns &live) {
  *  same columns for every visual measurement in the update. */
 constexpr int kJacFixedRuns = static_cast<int>(kJacSharedRuns.size()) - 1;
 
+/** The single run that *bounds* the fixed shared runs, gaps included.
+ *
+ *  `Wsb Tsb`, `bg`, `Wbc Tbc` and `td` are four runs inside the motion block with
+ *  `Vsb` and `ba` between them; every visual measurement is zero in the gaps, and
+ *  `H_` is `setZero`d whole at the top of each update, so multiplying through them
+ *  adds exact zeros. Trading 6 columns of arithmetic for going over the
+ *  destination once instead of four times is the whole point: at 360 x 491 the
+ *  destination is 1.4 MB, four read-modify-write passes over it is 11 MB of
+ *  traffic against 4 MFLOP of work, and the product is bandwidth-bound rather
+ *  than flop-bound. */
+constexpr ColRun JacFixedSpan() {
+  const ColRun a = kJacSharedRuns[0];
+  const ColRun b = kJacSharedRuns[kJacFixedRuns - 1];
+  return {a.start, b.start + b.len - a.start};
+}
+
 /** The reference group's column run of a sparse block. */
 inline ColRun GroupRun(const MeasBlock &b) {
   return {kGroupBegin + kGroupSize * b.gsind, kGroupSize};
@@ -81,10 +98,9 @@ inline ColRun FeatureRun(const MeasBlock &b) {
 /** One past the last block of the maximal run of consecutive sparse blocks
  *  starting at `b0`, and the number of rows of `H` it spans. Blocks cover the
  *  rows of `H` in order and without gaps, so a run of blocks is a run of rows. */
-inline int SparseSpanEnd(const std::vector<MeasBlock> &blocks, int b0,
-                         int &rows) {
+inline int SparseSpanEnd(const MeasBlock *blocks, int nb, int b0, int &rows) {
   int b1 = b0;
-  while (b1 < static_cast<int>(blocks.size()) && blocks[b1].sparse()) {
+  while (b1 < nb && blocks[b1].sparse()) {
     ++b1;
   }
   rows = blocks[b1 - 1].row + blocks[b1 - 1].rows - blocks[b0].row;
@@ -97,8 +113,8 @@ inline int SparseSpanEnd(const std::vector<MeasBlock> &blocks, int b0,
  *  identical slots, so the `Feature` grouping halves the block count in stereo,
  *  and a group is usually shared by several consecutive features. */
 enum class MergeBy { Group, Feature };
-inline int MergeEnd(const std::vector<MeasBlock> &blocks, int b0, int b1,
-                    MergeBy by, int &rows) {
+inline int MergeEnd(const MeasBlock *blocks, int b0, int b1, MergeBy by,
+                    int &rows) {
   int k = b0 + 1;
   while (k < b1 && blocks[k].gsind == blocks[b0].gsind &&
          (by == MergeBy::Group || blocks[k].fsind == blocks[b0].fsind)) {
@@ -142,17 +158,16 @@ void ZeroOutsideRuns(MatX &M, const StateRuns &live) {
   }
 }
 
-} // namespace
-
-void MeasurementTimesCov(const MatX &H, const MatX &P,
-                         const std::vector<MeasBlock> &blocks,
-                         const StateRuns &live, MatX &M) {
-  M.resize(H.rows(), P.cols());
-  // The columns outside the occupied extent are columns of zeros of `P`, so they
-  // are columns of zeros of the product; write them once here rather than let
-  // three later loops step over them.
-  ZeroOutsideRuns(M, live);
-
+/** `M = H P` over one sub-range of the blocks, writing only the rows of `M` that
+ *  range covers and leaving the rest alone. The columns of `M` outside `live` are
+ *  the caller's job (they are zeroed once per update, not once per range).
+ *
+ *  Splitting the update into chunks is what needs a range rather than the whole
+ *  vector: a chunk's rows of `M` are `H_c P_{c-1}`, formed against the covariance
+ *  the previous chunks left behind, so they cannot all be formed at once. */
+void MeasurementTimesCovRange(const MatX &H, const MatX &P,
+                              const MeasBlock *blocks, int nb,
+                              const StateRuns &live, MatX &M, bool fuse) {
   // The flop count of this product is tiny -- 283 rows x 25 nonzero columns x 331
   // live columns is 2.3 MFLOP -- but issuing it as one gemm per (row block,
   // column run, live run) meant ~1700 calls per stereo update with M as small as
@@ -183,7 +198,6 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
   // `unitTests_ekf_update` checks the result against the dense Joseph form.
   // The branch carries a full 6-member ensemble as its accuracy proof; see
   // notes-speed/m2-batched-sparse-products.md.
-  const int nb = static_cast<int>(blocks.size());
   for (int b0 = 0; b0 < nb;) {
     if (!blocks[b0].sparse()) {
       // A dense block still only meets the occupied rows of `P`, so the sum is
@@ -209,8 +223,54 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
     }
 
     int span_rows = 0;
-    const int b1 = SparseSpanEnd(blocks, b0, span_rows);
+    const int b1 = SparseSpanEnd(blocks, nb, b0, span_rows);
     const int r0 = blocks[b0].row;
+
+    if (fuse) {
+      // The same three-way batching, rearranged so that each element of `M` is
+      // visited by as few passes as possible rather than by one per column run:
+      //
+      //  - the fixed shared runs become the single run that bounds them, and the
+      //    gemm *writes* instead of accumulating, which also absorbs the `setZero`;
+      //  - a merged group span and the features inside it write the same rows, so
+      //    they are driven in one loop and those rows stay in cache between them.
+      //
+      // Same sum, different order and different gemm shapes: a reassociation, with
+      // the same caveat as the batching itself.
+      constexpr ColRun fs = JacFixedSpan();
+      for (int j = 0; j < live.nruns; ++j) {
+        const ColRun &cj = live.runs[j];
+        M.block(r0, cj.start, span_rows, cj.len).noalias() =
+            H.block(r0, fs.start, span_rows, fs.len) *
+            P.block(fs.start, cj.start, fs.len, cj.len);
+      }
+      for (int i = b0; i < b1;) {
+        int grows = 0;
+        const int kg = MergeEnd(blocks, i, b1, MergeBy::Group, grows);
+        const ColRun rg = GroupRun(blocks[i]);
+        for (int j = 0; j < live.nruns; ++j) {
+          const ColRun &cj = live.runs[j];
+          M.block(blocks[i].row, cj.start, grows, cj.len).noalias() +=
+              H.block(blocks[i].row, rg.start, grows, rg.len) *
+              P.block(rg.start, cj.start, rg.len, cj.len);
+        }
+        for (int f = i; f < kg;) {
+          int frows = 0;
+          const int kf = MergeEnd(blocks, f, kg, MergeBy::Feature, frows);
+          const ColRun rf = FeatureRun(blocks[f]);
+          for (int j = 0; j < live.nruns; ++j) {
+            const ColRun &cj = live.runs[j];
+            M.block(blocks[f].row, cj.start, frows, cj.len).noalias() +=
+                H.block(blocks[f].row, rf.start, frows, rf.len) *
+                P.block(rf.start, cj.start, rf.len, cj.len);
+          }
+          f = kf;
+        }
+        i = kg;
+      }
+      b0 = b1;
+      continue;
+    }
 
     for (int j = 0; j < live.nruns; ++j) {
       const ColRun &cj = live.runs[j];
@@ -253,31 +313,42 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
   }
 }
 
-namespace {
-
-/** `S = M H^T`, using the block sparsity on the *columns* of the result and the
- *  occupied extent on the summation index. Restricting the latter is exact
- *  whatever `H` looks like there, because `M` is zero outside `live`. */
-void CovTimesMeasurementT(const MatX &M, const MatX &H,
-                          const std::vector<MeasBlock> &blocks,
-                          const StateRuns &live, MatX &S) {
-  S.resize(M.rows(), H.rows());
+/** `S = M H^T` over one sub-range of the blocks. The range owns rows
+ *  `[mr0, mr0 + mrows)` of `M` -- its own rows of `H P` -- and the same columns of
+ *  `H^T`, so what it produces is one `mrows x mrows` matrix -- the diagonal block of
+ *  the full `S` that this range owns. The off-diagonal blocks are the
+ *  cross-covariances between ranges, which sequential processing folds into `P`
+ *  instead of forming, so they are never allocated: `S` is written at
+ *  `topLeftCorner(mrows, mrows)` and need be no bigger than the widest range. That
+ *  is a reason to split `S` even where the arithmetic does not care -- `S` and the
+ *  Cholesky factor Eigen copies out of it are `rows^2` each, together 11.3 MB of the
+ *  stereo peak RSS at the widest update, and `C` chunks make them `(rows/C)^2`.
+ *  Rows of `M` are indexed absolutely (it stays full height, holding `W` for the
+ *  chunk); columns of `S` are relative to the range's first row.
+ *
+ *  Uses the block sparsity on the columns and the occupied extent `live` on the
+ *  summation index. Restricting the latter is exact whatever `H` looks like there,
+ *  because `M` is zero outside `live`. */
+void CovTimesMeasurementTRange(const MatX &M, const MatX &H,
+                               const MeasBlock *blocks, int nb,
+                               const StateRuns &live, MatX &S, bool fuse) {
+  const int mr0 = blocks[0].row;
+  const int mrows = blocks[nb - 1].row + blocks[nb - 1].rows - mr0;
   // Batched exactly as `MeasurementTimesCov` above, and for the same reason: the
   // columns of `S` a block owns are its rows of `H`, so a span of consecutive
   // sparse blocks owns a contiguous span of columns and the fixed shared runs
   // collapse into one gemm each over the whole span. Same caveat as above: the
   // sum is the same one, reassociated at the last bit, not bit-identical.
-  const int nb = static_cast<int>(blocks.size());
   for (int b0 = 0; b0 < nb;) {
     if (!blocks[b0].sparse()) {
       const MeasBlock &b = blocks[b0];
       RunSet sum;
       DenseSumRuns(b, live, sum);
-      auto dst = S.middleCols(b.row, b.rows);
+      auto dst = S.block(0, b.row - mr0, mrows, b.rows);
       dst.setZero();
       for (int i = 0; i < sum.nruns; ++i) {
         const ColRun &ci = sum.runs[i];
-        dst.noalias() += M.middleCols(ci.start, ci.len) *
+        dst.noalias() += M.block(mr0, ci.start, mrows, ci.len) *
                          H.block(b.row, ci.start, b.rows, ci.len).transpose();
       }
       ++b0;
@@ -285,22 +356,52 @@ void CovTimesMeasurementT(const MatX &M, const MatX &H,
     }
 
     int span_rows = 0;
-    const int b1 = SparseSpanEnd(blocks, b0, span_rows);
+    const int b1 = SparseSpanEnd(blocks, nb, b0, span_rows);
     const int r0 = blocks[b0].row;
 
-    S.middleCols(r0, span_rows).setZero();
+    if (fuse) {
+      // Fused exactly as `MeasurementTimesCov` above, and for the same reason: at
+      // 360 x 360 the destination is 1 MB and the four shared-run passes over it
+      // cost more in traffic than the 4 MFLOP they carry.
+      constexpr ColRun fs = JacFixedSpan();
+      S.block(0, r0 - mr0, mrows, span_rows).noalias() =
+          M.block(mr0, fs.start, mrows, fs.len) *
+          H.block(r0, fs.start, span_rows, fs.len).transpose();
+      for (int i = b0; i < b1;) {
+        int grows = 0;
+        const int kg = MergeEnd(blocks, i, b1, MergeBy::Group, grows);
+        const ColRun rg = GroupRun(blocks[i]);
+        S.block(0, blocks[i].row - mr0, mrows, grows).noalias() +=
+            M.block(mr0, rg.start, mrows, rg.len) *
+            H.block(blocks[i].row, rg.start, grows, rg.len).transpose();
+        for (int f = i; f < kg;) {
+          int frows = 0;
+          const int kf = MergeEnd(blocks, f, kg, MergeBy::Feature, frows);
+          const ColRun rf = FeatureRun(blocks[f]);
+          S.block(0, blocks[f].row - mr0, mrows, frows).noalias() +=
+              M.block(mr0, rf.start, mrows, rf.len) *
+              H.block(blocks[f].row, rf.start, frows, rf.len).transpose();
+          f = kf;
+        }
+        i = kg;
+      }
+      b0 = b1;
+      continue;
+    }
+
+    S.block(0, r0 - mr0, mrows, span_rows).setZero();
     for (int s = 0; s < kJacFixedRuns; ++s) {
       const ColRun &rs = kJacSharedRuns[s];
-      S.middleCols(r0, span_rows).noalias() +=
-          M.middleCols(rs.start, rs.len) *
+      S.block(0, r0 - mr0, mrows, span_rows).noalias() +=
+          M.block(mr0, rs.start, mrows, rs.len) *
           H.block(r0, rs.start, span_rows, rs.len).transpose();
     }
     for (int i = b0; i < b1;) {
       int rows = 0;
       const int k = MergeEnd(blocks, i, b1, MergeBy::Group, rows);
       const ColRun rg = GroupRun(blocks[i]);
-      S.middleCols(blocks[i].row, rows).noalias() +=
-          M.middleCols(rg.start, rg.len) *
+      S.block(0, blocks[i].row - mr0, mrows, rows).noalias() +=
+          M.block(mr0, rg.start, mrows, rg.len) *
           H.block(blocks[i].row, rg.start, rows, rg.len).transpose();
       i = k;
     }
@@ -308,8 +409,8 @@ void CovTimesMeasurementT(const MatX &M, const MatX &H,
       int rows = 0;
       const int k = MergeEnd(blocks, i, b1, MergeBy::Feature, rows);
       const ColRun rf = FeatureRun(blocks[i]);
-      S.middleCols(blocks[i].row, rows).noalias() +=
-          M.middleCols(rf.start, rf.len) *
+      S.block(0, blocks[i].row - mr0, mrows, rows).noalias() +=
+          M.block(mr0, rf.start, mrows, rf.len) *
           H.block(blocks[i].row, rf.start, rows, rf.len).transpose();
       i = k;
     }
@@ -335,7 +436,65 @@ void MirrorLowerTriangle(MatX &P, const StateRuns &live) {
   }
 }
 
+/** Below this many rows a chunk is not worth opening: what splitting saves is
+ *  quadratic and cubic in the chunk's rows, and what it costs -- one more mirror of
+ *  the live triangle -- does not depend on them at all. Measured on room5, the two
+ *  cross at ~85 rows for the first split, so requiring 48 rows per chunk leaves the
+ *  benefit intact on a full update and turns chunking off on a thin one rather than
+ *  paying `C` mirrors for a factorization that was already free. */
+constexpr int kMinChunkRows = 48;
+
+/** Splits `blocks` into consecutive ranges of roughly equal numbers of rows, cut
+ *  at block boundaries (a block is one measurement's rows and cannot be split).
+ *  Fills `first[0..n]` with the block index each range starts at, `first[n] == nb`,
+ *  and returns `n`. Never returns more than `chunks`, and never an empty range.
+ *
+ *  Equal row counts are what matter rather than equal block counts: the triangular
+ *  solve costs `k^2 n_live / 2` and the factorization `k^3 / 6` in a chunk of `k`
+ *  rows, both convex in `k`, so the even split is the cheapest one. */
+int SplitChunks(const std::vector<MeasBlock> &blocks, int chunks, int rows,
+                int *first) {
+  const int nb = static_cast<int>(blocks.size());
+  first[0] = 0;
+  if (chunks < 2 || nb < 2) {
+    first[1] = nb;
+    return 1;
+  }
+  chunks = std::min(chunks, std::max(1, rows / kMinChunkRows));
+  chunks = std::min(chunks, std::min(nb, kMaxUpdateChunks));
+  if (chunks < 2) {
+    first[1] = nb;
+    return 1;
+  }
+  const int target = (rows + chunks - 1) / chunks;
+  int n = 0, acc = 0;
+  for (int b = 0; b < nb; ++b) {
+    acc += blocks[b].rows;
+    const int rest = chunks - n - 1; // ranges still to be opened after this one
+    if (acc >= target && rest > 0 && nb - (b + 1) >= rest) {
+      first[++n] = b + 1;
+      acc = 0;
+    }
+  }
+  first[++n] = nb;
+  return n;
+}
+
 } // namespace
+
+void MeasurementTimesCov(const MatX &H, const MatX &P,
+                         const std::vector<MeasBlock> &blocks,
+                         const StateRuns &live, MatX &M, bool fuse) {
+  M.resize(H.rows(), P.cols());
+  // The columns outside the occupied extent are columns of zeros of `P`, so they
+  // are columns of zeros of the product; write them once here rather than let
+  // three later loops step over them.
+  ZeroOutsideRuns(M, live);
+  if (!blocks.empty()) {
+    MeasurementTimesCovRange(H, P, blocks.data(),
+                             static_cast<int>(blocks.size()), live, M, fuse);
+  }
+}
 
 void EkfUpdateJoseph(MatX &P, const MatX &H, const VecX &inn, const VecX &diagR,
                      VecX &err) {
@@ -368,65 +527,129 @@ void EkfUpdateJoseph(MatX &P, const MatX &H, const VecX &inn, const VecX &diagR,
 
 bool EkfUpdateDowndate(MatX &P, const MatX &H, const VecX &inn,
                        const VecX &diagR, const std::vector<MeasBlock> &blocks,
-                       const StateRuns &live, VecX &err) {
+                       const StateRuns &live, VecX &err, bool fuse, int chunks) {
 #if !defined(NDEBUG) || defined(XIVO_CHECK_OCCUPIED_STATE)
   CheckLiveExtent(P, H, live);
 #endif
-  MatX M, S;
-  MeasurementTimesCov(H, P, blocks, live, M);
-  CovTimesMeasurementT(M, H, blocks, live, S);
-  for (int i = 0; i < diagR.size(); ++i) {
-    S(i, i) += diagR(i);
+  if (blocks.empty()) {
+    err.setZero(P.rows());
+    return true;
   }
+  const int rows = static_cast<int>(H.rows());
+  int first[kMaxUpdateChunks + 1];
+  const int nchunks = SplitChunks(blocks, chunks, rows, first);
 
-  // `S` is symmetric positive definite whenever `P` is positive semidefinite and
-  // the measurement noise is positive, which is the whole point of the Joseph
-  // form's guarantee upstream. If it is not -- a covariance that has already
-  // gone indefinite, or an `S` so ill-conditioned that its factor does not
-  // exist in double -- there is no factor to downdate through, and the caller
-  // falls back.
-  Eigen::LLT<MatX> llt(S);
-  if (llt.info() != Eigen::Success) {
-    return false;
+  // `M` holds `W` a chunk at a time, so it stays full height; its columns outside
+  // the occupied extent are zero for every chunk and are written once here. `S`,
+  // though, only ever holds the diagonal block the current chunk owns, so it is
+  // sized to the widest chunk instead of to the whole update -- which is where most
+  // of this key's memory saving comes from, since `Eigen::LLT` then copies a
+  // `kmax x kmax` matrix rather than a `rows x rows` one. At the widest stereo
+  // update (860 rows) those two were 5.6 MB each.
+  MatX M(rows, P.cols());
+  ZeroOutsideRuns(M, live);
+  int kmax = 0;
+  for (int c = 0; c < nchunks; ++c) {
+    const MeasBlock &lo = blocks[first[c]], &hi = blocks[first[c + 1] - 1];
+    kmax = std::max(kmax, hi.row + hi.rows - lo.row);
   }
-
-  // In place: `M` becomes `W = L^-1 (H P)`. Only the occupied columns; the rest
-  // are zero, and `L^-1 0 = 0`.
-  for (int i = 0; i < live.nruns; ++i) {
-    llt.matrixL().solveInPlace(M.middleCols(live.runs[i].start, live.runs[i].len));
-  }
-  VecX u = inn;
-  llt.matrixL().solveInPlace(u);
+  MatX S(kmax, kmax);
   err.setZero(P.rows());
-  for (int i = 0; i < live.nruns; ++i) {
-    const ColRun &r = live.runs[i];
-    err.segment(r.start, r.len).noalias() =
-        M.middleCols(r.start, r.len).transpose() * u;
-  }
+  int applied = 0;
 
-  // `P -= W^T W`, on the lower triangle only, then mirrored. Going through the
-  // factor is what keeps the subtracted term symmetric and positive
-  // semidefinite by construction; forming `K M` instead would leave a
-  // difference of two rounded products whose asymmetry grows without bound.
-  //
-  // Restricted to the occupied extent: one `rankUpdate` per run on the diagonal
-  // and one gemm per run pair below it, in place of a single `kFullSize`-square
-  // `rankUpdate`. That step reads and writes the whole of `P` -- 2.5 MB -- and is
-  // bandwidth-bound, so dropping the ~47% of it that is provably zero is close to
-  // a proportional saving rather than a flop-count one.
-  for (int i = 0; i < live.nruns; ++i) {
-    const ColRun &ri = live.runs[i];
-    auto Wi = M.middleCols(ri.start, ri.len);
-    P.block(ri.start, ri.start, ri.len, ri.len)
-        .selfadjointView<Eigen::Lower>()
-        .rankUpdate(Wi.transpose(), -1.0);
-    for (int j = 0; j < i; ++j) {
-      const ColRun &rj = live.runs[j];
-      P.block(ri.start, rj.start, ri.len, rj.len).noalias() -=
-          Wi.transpose() * M.middleCols(rj.start, rj.len);
+  for (int c = 0; c < nchunks; ++c) {
+    const MeasBlock *cb = blocks.data() + first[c];
+    const int cnb = first[c + 1] - first[c];
+    const int r0 = cb[0].row;
+    const int k = cb[cnb - 1].row + cb[cnb - 1].rows - r0;
+
+      MeasurementTimesCovRange(H, P, cb, cnb, live, M, fuse);
+    CovTimesMeasurementTRange(M, H, cb, cnb, live, S, fuse);
+    auto Sc = S.topLeftCorner(k, k);
+    for (int i = 0; i < k; ++i) {
+      Sc(i, i) += diagR(r0 + i);
     }
+
+    // `S` is symmetric positive definite whenever `P` is positive semidefinite
+    // and the measurement noise is positive, which is the whole point of the
+    // Joseph form's guarantee upstream. If it is not -- a covariance that has
+    // already gone indefinite, or an `S` so ill-conditioned that its factor does
+    // not exist in double -- there is no factor to downdate through.
+    Eigen::LLT<MatX> llt(Sc);
+    if (llt.info() != Eigen::Success) {
+      if (applied == 0) {
+        // Nothing has touched `P` yet, so the caller can still fall back to the
+        // Joseph form over the whole batch. This is the only exit that does.
+        err.setZero(P.rows());
+        return false;
+      }
+      // A later chunk cannot: `P` already carries the earlier ones and undoing a
+      // downdate numerically is worse than not doing one. Dropping the chunk
+      // leaves the filter consistent -- it is the same as those measurements
+      // having been gated out -- so that is what happens, loudly. Unreached on
+      // TUM-VI, as is the batch fallback it replaces.
+      LOG(WARNING) << "EkfUpdateDowndate: chunk " << c << " of " << nchunks
+                   << " (" << k << " rows at " << r0
+                   << ") has no Cholesky factor; dropping those measurements";
+      continue;
+    }
+
+    // In place: the chunk's rows of `M` become `W = L^-1 (H_c P)`. Only the
+    // occupied columns; the rest are zero, and `L^-1 0 = 0`.
+    for (int i = 0; i < live.nruns; ++i) {
+      const ColRun &r = live.runs[i];
+      llt.matrixL().solveInPlace(M.block(r0, r.start, k, r.len));
+    }
+
+    VecX u = inn.segment(r0, k);
+    if (applied > 0) {
+      // Re-predict: the earlier chunks have already moved the estimate by `err`,
+      // and this chunk's innovation was formed at the old one. `H` itself is
+      // *not* re-evaluated -- keeping the linearization point fixed is exactly
+      // what makes the sequence equal the batch update rather than approximate
+      // it (the information form `P+^-1 = P^-1 + sum_c H_c^T R_c^-1 H_c` is
+      // additive, and `P+^-1 err = sum_c H_c^T R_c^-1 r_c` with the corrected
+      // `r_c`).
+      for (int i = 0; i < live.nruns; ++i) {
+        const ColRun &r = live.runs[i];
+        u.noalias() -=
+            H.block(r0, r.start, k, r.len) * err.segment(r.start, r.len);
+      }
+    }
+    llt.matrixL().solveInPlace(u);
+    for (int i = 0; i < live.nruns; ++i) {
+      const ColRun &r = live.runs[i];
+      err.segment(r.start, r.len).noalias() +=
+          M.block(r0, r.start, k, r.len).transpose() * u;
+    }
+
+    // `P -= W^T W`, on the lower triangle only, then mirrored. Going through the
+    // factor is what keeps the subtracted term symmetric and positive
+    // semidefinite by construction; forming `K M` instead would leave a
+    // difference of two rounded products whose asymmetry grows without bound.
+    //
+    // Restricted to the occupied extent: one `rankUpdate` per run on the diagonal
+    // and one gemm per run pair below it, in place of a single `kFullSize`-square
+    // `rankUpdate`. That step reads and writes the whole of `P` -- 2.5 MB -- and is
+    // bandwidth-bound, so dropping the ~47% of it that is provably zero is close to
+    // a proportional saving rather than a flop-count one.
+    for (int i = 0; i < live.nruns; ++i) {
+      const ColRun &ri = live.runs[i];
+      auto Wi = M.block(r0, ri.start, k, ri.len);
+      P.block(ri.start, ri.start, ri.len, ri.len)
+          .selfadjointView<Eigen::Lower>()
+          .rankUpdate(Wi.transpose(), -1.0);
+      for (int j = 0; j < i; ++j) {
+        const ColRun &rj = live.runs[j];
+        P.block(ri.start, rj.start, ri.len, rj.len).noalias() -=
+            Wi.transpose() * M.block(r0, rj.start, k, rj.len);
+      }
+    }
+    // The next chunk forms `H P` off both triangles, so this is not merely
+    // cosmetic once there is a next chunk.
+    MirrorLowerTriangle(P, live);
+    ++applied;
   }
-  MirrorLowerTriangle(P, live);
   return true;
 }
 

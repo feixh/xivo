@@ -48,6 +48,29 @@
   // with it, agreement over a whole mono room1 run is 4e-14 m (see
   // notes-n-prompts/notes-oosfast/m1-sparse-oos-products.md).
   "oos_fast": { "enable": true },
+  // How the measurement update spends its arithmetic.
+  //
+  //  - `chunks` applies the update's rows in that many consecutive groups, each
+  //    against the covariance the previous ones left and with its innovation
+  //    re-predicted. Sequential processing of a block-diagonal-R measurement is the
+  //    *same* update, not an approximation (see `EkfUpdateDowndate`), and it is
+  //    worth having because the Cholesky factorization of `S` costs `m^3/6` and the
+  //    triangular solve `m^2 n/2`, so C chunks pay 1/C^2 and 1/C of them. It also
+  //    shrinks `S` and Eigen's copy of its factor from `m^2` to `(m/C)^2`, which is
+  //    most of this file's peak-RSS saving. `run_gap`/`exact_runs`/`fuse_passes`
+  //    below are worth ~2%; `chunks` is worth ~28% of the update.
+  //  - `exact_runs` describes the live extent by the occupied slots themselves
+  //    instead of by two high-water marks, and `run_gap` is how many provably-zero
+  //    dimensions it may absorb rather than split a run in two. 3 measures best:
+  //    the default 6 absorbs every single-slot hole and saves nothing, and 0 splits
+  //    into ~8 runs, whose extra gemm and mirror calls cost more than the ~10
+  //    dimensions they save.
+  //  - `fuse_passes` forms `H P` and `M H^T` in one pass over the destination per
+  //    row block instead of one per column run of the Jacobian.
+  //
+  // All four are rearrangements of the same sums.
+  "ekf_update": { "exact_runs": true, "run_gap": 3, "fuse_passes": true,
+                  "chunks": 4 },
   "OOS": {
     "pose_window": 20,
     "min_observations": 2,

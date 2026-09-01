@@ -221,6 +221,24 @@ Estimator::Estimator(const Json::Value &cfg)
   }
 
   {
+    // How the measurement update spends its arithmetic. Four choices, all off by
+    // default so that a build without the section reproduces the previous numbers,
+    // and all of them the same update rather than approximations of it -- see
+    // `OccupiedStateRunsExact`, `MeasurementTimesCov` and `EkfUpdateDowndate`.
+    // `chunks` is the one that matters; the other three are worth ~2% between them.
+    const auto &eu = cfg_["ekf_update"];
+    exact_state_runs_ = eu.get("exact_runs", false).asBool();
+    state_run_gap_ = eu.get("run_gap", kGroupSize).asInt();
+    fuse_update_passes_ = eu.get("fuse_passes", false).asBool();
+    update_chunks_ = std::min(std::max(eu.get("chunks", 1).asInt(), 1),
+                              kMaxUpdateChunks);
+    LOG(INFO) << "ekf_update exact_runs=" << exact_state_runs_
+              << "; run_gap=" << state_run_gap_
+              << "; fuse_passes=" << fuse_update_passes_
+              << "; chunks=" << update_chunks_;
+  }
+
+  {
     // First-estimates Jacobians (Huang et al.). `fej.mode`:
     //   0  off -- not one instruction of the measurement model changes
     //   1  group poses only: each in-state group's measurement Jacobian is
@@ -1758,6 +1776,10 @@ void Estimator::Predict(std::list<FeaturePtr> &features) {
 }
 
 StateRuns Estimator::OccupiedState() const {
+  if (exact_state_runs_) {
+    return OccupiedStateRunsExact(gsel_.data(), kMaxGroup, fsel_.data(),
+                                  kMaxFeature, state_run_gap_);
+  }
   int groups_used = 0, features_used = 0;
   for (int i = 0; i < kMaxGroup; ++i) {
     if (gsel_[i]) {
@@ -1783,7 +1805,8 @@ void Estimator::MeasurementUpdate() {
   census_.live_dim += live.dim;
   census_.live_runs += live.nruns;
 
-  if (EkfUpdateDowndate(P_, H_, inn_, diagR_, meas_blocks_, live, err_)) {
+  if (EkfUpdateDowndate(P_, H_, inn_, diagR_, meas_blocks_, live, err_,
+                        fuse_update_passes_, update_chunks_)) {
     return;
   }
   LOG(WARNING) << "innovation covariance is not positive definite; falling back "

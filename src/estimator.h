@@ -392,7 +392,11 @@ private:
    *  marks over `gsel_` and `fsel_` -- 135 bool tests, against the ~9 MFLOP of the
    *  update it shrinks. The premise is verified against `P_` and `H_` themselves
    *  inside `EkfUpdateDowndate`, in debug builds and under
-   *  `-DXIVO_CHECK_OCCUPIED_STATE`. */
+   *  `-DXIVO_CHECK_OCCUPIED_STATE`.
+   *
+   *  With `ekf_update.exact_runs` it is instead the exact set of occupied slots
+   *  (`OccupiedStateRunsExact`), which is ~5% smaller in dimension because the
+   *  marks cover the vacant slots below them. */
   StateRuns OccupiedState() const;
   /** Predicts measurement (pixels) of features in input. */
   void Predict(std::list<FeaturePtr> &features);
@@ -659,6 +663,19 @@ private:
   std::array<bool, kMaxGroup> gsel_;
   /** Whether or not each feature is in-state */
   std::array<bool, kMaxFeature> fsel_;
+  /** `ekf_update.exact_runs`: describe the live extent by the occupied slots
+   *  themselves rather than by two high-water marks. */
+  bool exact_state_runs_{false};
+  /** `ekf_update.run_gap`: how many provably-zero dimensions the exact extent may
+   *  absorb rather than split a run in two. */
+  int state_run_gap_{kGroupSize};
+  /** `ekf_update.fuse_passes`: form `H P` and `M H^T` in one pass over the
+   *  destination per row block instead of one per column run of the Jacobian. */
+  bool fuse_update_passes_{false};
+  /** `ekf_update.chunks`: how many consecutive groups the update's rows are split
+   *  into and applied one after another. 1 is the batch update. See
+   *  `EkfUpdateDowndate` for why the sequence is the same update and what it buys. */
+  int update_chunks_{1};
   /** Data and operators for IMU calibration variables `Ca` and `Cg` */
   IMU imu_;
   /** Current estimate of the gravity vector resolved in the reference frame. */
