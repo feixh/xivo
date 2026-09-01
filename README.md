@@ -28,6 +28,9 @@ This software is primarily built and tested on Ubuntu 20.04 with compiler g++9. 
 - [glog][glog]: Logging.
 - [gflags][gflags]: Command-line options.
 - [jsoncpp][jsoncpp]: Configuration.
+- (optional) [libdeflate][libdeflate]: Faster grayscale-PNG decode (`src/pngfast.cpp`).
+  Detected by CMake; without it that path falls back to zlib and keeps about half of
+  its speedup.
 - (optional) [googletest][gtest]: Unit tests.
 - (optional) [g2o][g2o]: To use pose graph optimization.
 - (optional) [ROS][ros]: To use in live mode with ROS.
@@ -46,6 +49,7 @@ All dependencies, except for OpenCV, are included in the `thirdparty` directory.
 [gflags]: https://github.com/gflags/gflags
 [jsoncpp]: https://github.com/open-source-parsers/jsoncpp
 [pybind11]: https://github.com/pybind/pybind11
+[libdeflate]: https://github.com/ebiggers/libdeflate
 [ros]: https://www.ros.org/
 
 
@@ -245,6 +249,11 @@ Two ideas were measured and rejected: `-flto` and `-fvisibility=hidden` are both
 noise here (+0.4% at best), because the hot code is templated Eigen in headers and
 there is no cross-TU inlining left to win.
 
+Those FPS figures are the `cfg/tumvi_*` configs at this point in the history. The
+accuracy work that came next cost 41% of the throughput, and it was then won back and
+more: the shipped `cfg/eff_*` configs run at **123.4 (mono) and 70.0 (stereo) FPS** over
+room1–room6 today — see [the OpenVINS comparison](#head-to-head-against-openvins-orientation-position-efficiency).
+
 ### Where this lands against other open-source VIO
 
 Our [wiki](https://github.com/ucla-vision/xivo/wiki/Performance-Evaluation) carries
@@ -286,6 +295,125 @@ OKVIS's quoted rate. After [the efficiency work](#efficiency) it runs at **44 FP
 so the parity now comes at 2.2× real time on a single core, and the qualitative
 form of the original claim holds again at the shipped capacity.
 
+Every number in this subsection is third-party and quoted. The next subsection redoes
+the exercise properly against one system — OpenVINS — built and run on this machine,
+scored by the same code, on the same core.
+
+
+### Head-to-head against OpenVINS: orientation, position, efficiency
+
+The brief for this round was concrete: **match or beat [OpenVINS](https://github.com/rpng/open_vins)
+on orientation, on monocular position, and on runtime cost**, borrowing ideas or code
+from it but taking no dependency on it. The reference is OpenVINS v2.7
+(`v2.7-20-g6948812`), built ROS-free and run on this machine rather than quoted from a
+paper, so both systems see the same sequences, the same ground truth, one evaluation
+code path and one core. Six branches were developed on isolated `git worktree`s and
+merged into `auto`; `ctest` is 22/22 at the endpoint.
+
+Six-room means over TUM-VI room1–room6. Bold beats OpenVINS. `±` is the spread of
+6-member ensembles whose members perturb the initial velocity by ~1e-6 m/s — six
+orders of magnitude inside the filter's own prior, so it is the scale below which a
+difference is not attributable:
+
+| metric | XIVO before | **XIVO now** | OpenVINS | margin |
+| --- | --- | --- | --- | --- |
+| mono ATE@0.02 [m] | 0.0928 ± 0.0067 | **0.0555 ± 0.0026** | 0.0621 | 11% |
+| mono ATE position, `posyaw` [m] | 0.0968 | **0.0575 ± 0.0028** | 0.0638 | 10% |
+| mono ATE orientation [deg] | 1.8243 | **0.8788 ± 0.0303** | 1.5742 | 44% |
+| mono RPE 8 m, position [m] | 0.0480 | **0.0265 ± 0.0009** | 0.0308 | 14% |
+| mono RPE 8 m, orientation [deg] | 0.5153 | **0.5131 ± 0.0033** | 0.6445 | 20% |
+| stereo ATE@0.02 [m] | 0.0636 ± 0.0045 | **0.0490 ± 0.0022** | 0.0677 | 28% |
+| stereo ATE position, `posyaw` [m] | 0.0688 | **0.0507 ± 0.0022** | 0.0697 | 27% |
+| stereo ATE orientation [deg] | 1.7982 | **0.8921 ± 0.0557** | 1.4440 | 38% |
+| stereo RPE 8 m, position [m] | 0.0292 | **0.0215 ± 0.0008** | 0.0265 | 19% |
+| stereo RPE 8 m, orientation [deg] | 0.5074 | **0.5161 ± 0.0080** | 0.5837 | 12% |
+
+Efficiency, one core (`taskset -c 0`, `setarch -R`, every thread pool at 1, idle box),
+whole-process wall clock including PNG decode, peak RSS from `/usr/bin/time`. Means of
+three passes taken alternately in one session:
+
+| | mono FPS | stereo FPS | mono peak RSS | stereo peak RSS |
+| --- | --- | --- | --- | --- |
+| XIVO before this round | 101.8 | 45.0 | 134.1 MB | 139.3 MB |
+| **XIVO now** | **123.4** | 70.0 | **86.7 MB** | **94.6 MB** |
+| OpenVINS | 114.4 | 71.1 | 88.2 MB | 95.4 MB |
+| ratio | **1.08×** | 0.98× | **0.98×** | **0.99×** |
+
+**Thirteen of the fourteen numbers above clear OpenVINS.** The one that does not is
+stereo throughput, and it misses by 1.6% — 14.285 ms/frame against 14.057 — uniformly
+across sequences rather than on one bad room. Mono wins all six sequences on speed.
+
+The two shipped configs carry every key this round tuned; run them like any other:
+
+    python scripts/pyxivo.py -root /path/to/tumvi -dataset tumvi \
+      -seq room1 -cfg cfg/eff_mono.json   -mode eval -dump /tmp/out
+    python scripts/pyxivo.py -root /path/to/tumvi -dataset tumvi \
+      -seq room1 -cfg cfg/eff_stereo.json -mode eval -dump /tmp/out
+
+(`-mode eval` writes the trajectory; `-mode runOnly` imports no savers and dumps
+nothing, which is why timing and scoring are separate passes. `XIVO_DUMP_PRECISE=1`
+switches the dump to 17 significant digits, which is what the bit-identity claims below
+are checked with. The build gained one optional dependency, libdeflate; without it the
+PNG path falls back to zlib and keeps about half of its speedup.)
+
+What each branch did, in merge order. Each throughput ratio is paired against *that
+branch's own* baseline, so they do not multiply out to the table above:
+
+| | branch | what | effect |
+| --- | --- | --- | --- |
+| 1 | `auto-orient` | publish the pose in the gravity-aligned frame (`Estimator::gwb()`/`gwc()`, `gravity_align_output`, default `true`), and fix the 4-DoF gauge about **gravity** instead of the gauge group's body z-axis | orientation ATE 1.82 → **0.95** deg mono, 1.80 → **0.98** stereo; the estimate itself is bit-identical |
+| 2 | `auto-speed` | single-channel decode at the entry points, batched block-sparse EKF products, three computed quantities nothing reads, and a pooled-Jacobian memory pass | 1.39× mono, 1.42× stereo; peak RSS −52 MB in both modes |
+| 3 | `auto-position` | seven config keys, of which CLAHE equalization is the largest single effect in the whole project: `histogram_method: CLAHE`, `subpix_refine`, `use_OOS` + `OOS.pose_window: 20` + `min_observations: 2`, `consistent_init`, `oos_meas_std: 1.0`, `grayscale` | mono ATE 0.0928 → 0.0566 m; costs 41% of throughput |
+| 4 | `auto-oosfast` | column-sparse out-of-state and feature-promotion products, a cheap consistent init, one shared OOS buffer | 1.23× mono, 1.13× stereo — 2.25 and 2.68 ms/frame recovered; −8 MB peak RSS; **bit-identical**, 72 paired runs |
+| 5 | `auto-frontfast` | `src/pngfast.cpp` (libdeflate + fused unfilter + 16→8 strip): 2.81 → 1.42 ms per image with **zero changed output bytes**; a cheaper stereo match (`back_track: false`, `max_level: 2`); temporal KLT `max_level` 5 → 4 | 1.14× mono, 1.31× stereo; the decoder alone is +9.3% in both modes at zero accuracy cost |
+| 6 | `auto-covrun` | apply the update's rows in `C` sequential chunks against the covariance the previous chunks left, re-predicting each chunk's innovation — exactly the batch update, since the information form is additive, and it makes the innovation covariance `(m/C)²` instead of `m²` | 1.03× mono, 1.10× stereo — −1.38 ms/frame and −10.5 MB stereo peak RSS, at zero accuracy cost |
+
+Tests: `unitTests_ekf_update` (23 cases, including the chunked update checked against
+both the batch downdate and an independent dense Joseph form at the real dimensions)
+and `unitTests_pngfast` (the fast decoder pinned against `cv::imdecode`) are new.
+
+Six qualifications, because several of these numbers are easy to over-read:
+
+- **The orientation win is a frame-convention fix, not better attitude estimation.**
+  XIVO's spatial frame `S` is the body frame of the first IMU sample, tilted by whatever
+  the rig's attitude happened to be at startup, and nothing applied the filter's own
+  `Rsg` to the published pose. The benchmark had been comparing a tilted frame against
+  OpenVINS' level one. After the fix the residual tilt is 0.307 deg against OpenVINS'
+  0.312 — **that is the benchmark's floor**, not XIVO's remaining error. What is a real
+  win is yaw: 0.704 deg against 1.473, better on all six sequences.
+- **ATE@0.02 is blind to a global rotation**, which is why the `posyaw` rows are quoted
+  beside it: those align position and yaw only, so a roll/pitch offset lands in the
+  reported orientation error undiminished.
+- **The accuracy gains come from the config, not the code.** Every new key is a no-op
+  when absent, so merging the code without the config is bit-identical. `use_OOS` and
+  `consistent_init` must ship *together* — `consistent_init` is +0.0057 m without the
+  OOS window and −0.0138 m with it.
+- **One deliberate accuracy trade** exists in the whole round: stereo spends 0.0019 m
+  of ATE on the cheaper stereo match for +30.7% throughput. Nothing else was traded, and
+  0.0187 m of stereo margin is left unspent.
+- **Two borrowed ideas ship off**: first-estimates Jacobians (implemented, correct,
+  measured inside the noise floor) and two-view epipolar rejection (+0.0030 m once CLAHE
+  is in — the two remove the same bad correspondences).
+- **A seventh branch was measured and deliberately not merged.** `auto-covscratch`
+  removes Eigen's copy of the innovation covariance; it is bit-identical and 0.022
+  ms/frame faster, and it reproducibly costs 1.6 MB of stereo peak RSS, which turns 13
+  of 14 metrics into 12. It is kept as a branch, not shipped.
+
+Nothing from OpenVINS is linked or included: `grep -rni` over `src`, `pybind11`,
+`CMakeLists.txt` and `cfg` finds eleven matches and all eleven are comments citing a
+file as the origin of a recipe. What was borrowed — the gravity-aligned output frame,
+the Joseph/invertible-init update recipe, CLAHE's two constants, `back_track: false` —
+is reimplemented, and one borrowed idea (`measurement_compress_inplace`) was rejected
+on the numbers, because it only pays when the stacked residual has more rows than the
+state and XIVO's has fewer.
+
+The full write-up, including the measurement protocol, the leads that turned out to be
+wrong, and how to reproduce every table, is
+[`notes-n-prompts/report-xivo-vs-openvins.md`](notes-n-prompts/report-xivo-vs-openvins.md);
+per-branch notes are in `notes-n-prompts/notes-{orient,position,speed,oosfast,frontfast}/`
+(`notes-oosfast/` also holds the chunked update, m6, and the unmerged m7), and the
+OpenVINS baseline itself is in `notes-n-prompts/notes-openvins-baseline/` and
+[`report-openvins-baseline.md`](notes-n-prompts/report-openvins-baseline.md).
 
 ---
 ## [LICENSE AND DISCLAIMER ARE COPIED FROM THE ORIGINAL REPO]
