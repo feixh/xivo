@@ -108,6 +108,26 @@ inline int MergeEnd(const std::vector<MeasBlock> &blocks, int b0, int b1,
   return k;
 }
 
+/** The column runs a dense block's summation index has to cover: its own recorded
+ *  runs when it has them, otherwise the whole live extent. Returned by value into
+ *  a caller-owned `RunSet` so both loops below can iterate one thing.
+ *
+ *  A block's runs are a subset of `live` in practice (an out-of-state track only
+ *  references in-state groups), but nothing here depends on that: a run outside
+ *  `live` contributes `H(:, i) * P(i, i)` with `H(:, i)` zero. */
+inline void DenseSumRuns(const MeasBlock &b, const StateRuns &live, RunSet &out) {
+  out.Clear();
+  if (b.runs != nullptr) {
+    for (int i = 0; i < b.runs->nruns; ++i) {
+      out.Add(b.runs->runs[i].start, b.runs->runs[i].len);
+    }
+    return;
+  }
+  for (int i = 0; i < live.nruns; ++i) {
+    out.Add(live.runs[i].start, live.runs[i].len);
+  }
+}
+
 /** Zeros the columns of `M` that fall in the gaps between the runs of `live`. */
 void ZeroOutsideRuns(MatX &M, const StateRuns &live) {
   int c = 0;
@@ -168,13 +188,18 @@ void MeasurementTimesCov(const MatX &H, const MatX &P,
     if (!blocks[b0].sparse()) {
       // A dense block still only meets the occupied rows of `P`, so the sum is
       // over `live` on both sides: `nruns^2` gemms rather than one rows x N x N.
+      // When the block knows its own columns (an out-of-state one does) the
+      // summation index shrinks from the whole live extent to those, which is
+      // where the `live x live` read of `P` -- 1.9 MB per block -- goes away.
       const MeasBlock &b = blocks[b0];
+      RunSet sum;
+      DenseSumRuns(b, live, sum);
       for (int j = 0; j < live.nruns; ++j) {
         const ColRun &cj = live.runs[j];
         auto dst = M.block(b.row, cj.start, b.rows, cj.len);
         dst.setZero();
-        for (int i = 0; i < live.nruns; ++i) {
-          const ColRun &ci = live.runs[i];
+        for (int i = 0; i < sum.nruns; ++i) {
+          const ColRun &ci = sum.runs[i];
           dst.noalias() += H.block(b.row, ci.start, b.rows, ci.len) *
                            P.block(ci.start, cj.start, ci.len, cj.len);
         }
@@ -246,10 +271,12 @@ void CovTimesMeasurementT(const MatX &M, const MatX &H,
   for (int b0 = 0; b0 < nb;) {
     if (!blocks[b0].sparse()) {
       const MeasBlock &b = blocks[b0];
+      RunSet sum;
+      DenseSumRuns(b, live, sum);
       auto dst = S.middleCols(b.row, b.rows);
       dst.setZero();
-      for (int i = 0; i < live.nruns; ++i) {
-        const ColRun &ci = live.runs[i];
+      for (int i = 0; i < sum.nruns; ++i) {
+        const ColRun &ci = sum.runs[i];
         dst.noalias() += M.middleCols(ci.start, ci.len) *
                          H.block(b.row, ci.start, b.rows, ci.len).transpose();
       }

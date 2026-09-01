@@ -204,12 +204,31 @@ void Estimator::GateStereoMeasurements() {
 }
 
 
+void Estimator::ReserveOOSRows(int rows) {
+  if (oos_H_.rows() >= rows && oos_H_.cols() == err_.size()) {
+    return;
+  }
+  // Geometric, and preserving what is already stacked -- `MatX::resize` does not.
+  // In practice this fires a handful of times in the first seconds of a run and
+  // then never again.
+  const int keep = std::min<int>(num_oos_rows_, oos_H_.rows());
+  MatX old = oos_H_.topRows(keep);
+  VecX old_inn = oos_inn_.head(keep);
+  oos_H_.setZero(std::max(rows, 2 * static_cast<int>(oos_H_.rows())), err_.size());
+  oos_inn_.setZero(oos_H_.rows());
+  if (keep > 0 && old.cols() == oos_H_.cols()) {
+    oos_H_.topRows(keep) = old;
+    oos_inn_.head(keep) = old_inn;
+  }
+}
+
 int Estimator::ComputeOOSMeasurements() {
   timer_.Tick("oos-jacobian");
 
   Graph &graph{*Graph::instance()};
 
   oos_used_.clear();
+  oos_blocks_.clear();
   num_oos_candidates_ = oos_features_.size();
   num_oos_used_ = 0;
   num_oos_short_ = 0;
@@ -254,6 +273,16 @@ int Estimator::ComputeOOSMeasurements() {
       ++num_oos_gated_;
       continue;
     }
+    // Out of the shared buffer and into ours, now, while these rows are still this
+    // feature's: the next candidate overwrites them. This copy is what pays for
+    // `Feature::oos_result()` being one buffer instead of ~800.
+    ReserveOOSRows(num_oos_rows_ + rows);
+    // `rows` is what `ComputeOOSJacobian` just returned, so the map is exactly that
+    // tall and needs no slicing.
+    oos_H_.middleRows(num_oos_rows_, rows) = f->oos_Hx();
+    oos_inn_.segment(num_oos_rows_, rows) = f->oos_inn().head(rows);
+    oos_blocks_.push_back({num_oos_rows_, rows, f->oos_runs()});
+
     oos_used_.push_back(f);
     num_oos_rows_ += rows;
     total_oos_obs_ += f->oos_num_obs();
@@ -282,10 +311,29 @@ bool Estimator::OOSGating(FeaturePtr f) {
     return true;
   }
   const int n = f->oos_inn_size();
-  MatX H = f->Ho();
-  VecX r = f->ro();
+  // Named, not `const auto H = f->oos_Hx().topRows(n)`: `oos_Hx()` returns a map by
+  // value, and slicing the temporary would leave the block holding a reference to a
+  // dead object. The map is already exactly `n` rows tall, so there is nothing to
+  // slice anyway.
+  const Eigen::Map<MatX> H = f->oos_Hx();
+  const auto r = f->oos_inn().head(n);
 
-  MatX S = H * P_ * H.transpose();
+  // `H` is `n x kFullSize` but structurally nonzero in only `Wbc`/`Tbc` and the
+  // pose block of each observing group -- 36 columns of 564 for a 5-view track.
+  // Formed densely, the gate reads all 2.5 MB of `P_` for every candidate and
+  // spends 94% of its arithmetic on zero. See `RunSet` in `core.h`; the compacted
+  // product is the same matrix, up to gemm reassociation.
+  const RunSet &rs = f->oos_runs();
+  MatX S;
+  if (rs.nruns > 0) {
+    MatX Hc(n, rs.dim);
+    GatherRunCols(H, rs, Hc);
+    MatX Pc(rs.dim, rs.dim);
+    GatherRunCov(P_, rs, Pc);
+    S.noalias() = Hc * Pc * Hc.transpose();
+  } else {
+    S.noalias() = H * P_ * H.transpose();
+  }
   S.diagonal().array() += Roos_;
   number_t mh_dist = r.dot(S.llt().solve(r));
   // Normalized per degree of freedom, so that the threshold does not depend on
@@ -302,6 +350,15 @@ bool Estimator::OOSGating(FeaturePtr f) {
 void Estimator::CleanupOOSFeatures() {
   Graph &graph{*Graph::instance()};
   for (auto f : oos_features_) {
+    // The marginalized measurement has been consumed by the update above, and this
+    // is the last point at which the feature is reachable. Drop its claim on the
+    // shared `Feature::oos_result()` here rather than at the pooled slot's next
+    // `Reset`: `CircBufWithHash` searches slots circularly, so a recycled slot can
+    // be handed out long after this and a stale `oos_inn_size()` would make `Ho()`
+    // return another feature's rows. Nothing reads the rows again, so this changes
+    // no arithmetic -- though it does move heap addresses, which is not the same as
+    // leaving the output bit-identical; see notes-oosfast/m5-shared-oos-buffer.md.
+    f->ReleaseOOS();
     if (graph.HasFeature(f)) {
       graph.RemoveFeature(f);
       Feature::Destroy(f);
@@ -409,16 +466,20 @@ void Estimator::FilterUpdate(int oos_rows) {
   // Feature::MarginalizeOOSPoint) -- the diagonal diagR_ would otherwise be
   // wrong.
   int offset = instate_size;
-  for (auto f : oos_used_) {
-    int n = f->oos_inn_size();
-    H_.block(offset, 0, n, err_.size()) = f->Ho();
-    inn_.segment(offset, n) = f->ro();
-    diagR_.segment(offset, n).setConstant(Roos_);
-    // Dense: the marginalized rows span every group the track was observed
-    // from, up to `oos_options_.max_observations` of them, and the left-nullspace
-    // projection mixes them.
-    meas_blocks_.push_back({offset, n, -1, -1});
-    offset += n;
+  for (const auto &b : oos_blocks_) {
+    H_.block(offset, 0, b.rows, err_.size()) = oos_H_.middleRows(b.row, b.rows);
+    inn_.segment(offset, b.rows) = oos_inn_.segment(b.row, b.rows);
+    diagR_.segment(offset, b.rows).setConstant(Roos_);
+    // Not of the fixed in-state shape: the marginalized rows span every group the
+    // track was observed from, up to `oos_options_.max_observations` of them, and
+    // the left-nullspace projection mixes them. Which groups those are is still
+    // known, and passing it lets the update skip the rest of the state; `nruns ==
+    // 0` when `oos_fast.enable` is off, and then it is null and the block is
+    // treated as fully dense as before. The pointer is into `oos_blocks_`, which is
+    // not touched again until the next `ComputeOOSMeasurements`.
+    meas_blocks_.push_back(
+        {offset, b.rows, -1, -1, b.runs.nruns > 0 ? &b.runs : nullptr});
+    offset += b.rows;
   }
   CHECK_EQ(offset, total_size);
 

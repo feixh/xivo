@@ -266,7 +266,21 @@ public:
    *  \todo make the following private */
   int ComputeOOSJacobianInternal(const Obs &obs, const Mat3 &Rbc,
                                  const Vec3 &Tbc, int row,
-                                 const OOSOptions &options);
+                                 const OOSOptions &options,
+                                 const RunSet *runs = nullptr);
+
+  /** The error-state column runs an out-of-state row block over `views` can be
+   *  nonzero in: `Wbc`/`Tbc` plus the pose block of every group in `views`, plus
+   *  `extra_gsind`'s if it is >= 0 (the anchor group, which
+   *  `ComputeInitJacobian` also writes). Everything else
+   *  `ComputeOOSJacobianInternal` leaves exactly zero, which is what makes the
+   *  compacted products in `Estimator::OOSGating` and
+   *  `Estimator::InitializeFeatureCovariance` equal to the dense ones. */
+  static RunSet OOSColumnRuns(const std::vector<Obs> &views,
+                              int extra_gsind = -1);
+  /** The runs of the marginalized measurement `Ho()` returns; `nruns == 0` when
+   *  the sparsity was not recorded (`OOSOptions::fast_sparse` off). */
+  const RunSet &oos_runs() const { return oos_runs_; }
   /** Projects the first `rows` rows of the out-of-state Jacobian onto the left
    *  nullspace of `oos_.Hf`, which eliminates the 3D point. Returns the number
    *  of rows left, `rows - 3`. */
@@ -291,7 +305,7 @@ public:
   bool ComputeInitJacobian(const std::vector<Obs> &views, const Mat3 &Rbc,
                            const Vec3 &Tbc, const OOSOptions &options,
                            Mat3 *Hl, Eigen::Matrix<number_t, 3, kFullSize> *Hx,
-                           Vec3 *res);
+                           Vec3 *res, const RunSet *runs = nullptr);
 
   /** Compute Jacobians for Loop Closure measurement update. */
   void ComputeLCJacobian(const Obs &obs, const Mat3 &Rbc, const Vec3 &Tbc,
@@ -380,8 +394,27 @@ public:
   ////////////////////////////////////////
   // OOS Jacobians accessors
   ////////////////////////////////////////
-  VecX ro() const { return oos_.inn.head(oos_jac_counter_); }
-  MatX Ho() const { return oos_.Hx.topRows(oos_jac_counter_); }
+  VecX ro() const { return oos_result().inn.head(oos_jac_counter_); }
+  MatX Ho() const { return oos_result_Hx(oos_jac_counter_); }
+  /** The same two, as references rather than copies. `Ho()` returns by value, so
+   *  every reader of a marginalized Jacobian paid a `oos_inn_size() x kFullSize`
+   *  copy (up to 257 kB for a 15-view stereo track) before doing anything with it
+   *  -- twice per feature, once in the gate and once when the rows are stacked.
+   *
+   *  Valid only until the next `ComputeOOSJacobian` call: the storage is shared
+   *  (`oos_result()`). `oos_Hx()` is already exactly `oos_inn_size()` rows tall --
+   *  see `oos_result_Hx` for why it is a map and not a block -- while `oos_inn()`
+   *  is the whole buffer and has to be cut with `.head(oos_inn_size())`. */
+  Eigen::Map<MatX> oos_Hx() const { return oos_result_Hx(oos_jac_counter_); }
+  const VecX &oos_inn() const { return oos_result().inn; }
+  /** Forgets the marginalized measurement. Nothing to free since `oos_result()` is
+   *  shared, but a stale `oos_jac_counter_` on a pooled slot would make `Ho()` hand
+   *  out another feature's rows, so the counter is cleared where the old release
+   *  used to be (`Estimator::CleanupOOSFeatures`). */
+  void ReleaseOOS() {
+    oos_runs_.Clear();
+    oos_jac_counter_ = 0;
+  }
 
   void Initialize(number_t z0, const Vec3 &std_xyz);
 
@@ -562,11 +595,11 @@ private:
    *  EKF and MSCKF measurement models. */
   static JacobianCache cache_;
 
-  /** This feature's *marginalized* MSCKF measurement -- `oos_jac_counter_` rows
-   *  of `Hx` and `inn`, and nothing else. Read by `Ho()` / `ro()` in the update,
-   *  which happens after the loop that computes them, so it has to be per
-   *  feature. Sized to exactly the rows it holds; see `OOSJacobian`. */
-  OOSJacobian oos_;
+  /** The error-state columns this feature's marginalized MSCKF measurement can be
+   *  nonzero in. Per feature, because `Estimator::FilterUpdate` hands it to the
+   *  covariance update long after the loop that computed it. 384 bytes, against
+   *  the ~250 kB the rows themselves used to take up here; see `oos_result()`. */
+  RunSet oos_runs_;
 
   /** The un-marginalized stack, shared by every feature. It is scratch: filled
    *  and consumed within one `ComputeOOSJacobian` / `ComputeInitJacobian` call,
@@ -579,6 +612,59 @@ private:
     }
     return s;
   }
+
+  /** The *marginalized* stack, also shared by every feature, and also scratch --
+   *  which is the part that took some getting to.
+   *
+   *  This used to be a per-feature `OOSJacobian oos_`, on the argument that
+   *  `Estimator::FilterUpdate` reads `Ho()`/`ro()` after the loop that computes
+   *  them, so the rows have to survive the loop. They do; they just do not have to
+   *  survive it *here*. `Estimator::ComputeOOSMeasurements` now copies the rows of
+   *  an accepted measurement straight into its own stacked `oos_H_` as soon as the
+   *  gate passes, so nothing reads a feature's rows after the next feature is
+   *  processed.
+   *
+   *  That matters because the per-feature buffer is `(4n-3) x kFullSize` -- up to
+   *  257 kB in stereo at `max_observations: 15` -- and `Feature` is pooled through
+   *  `CircBufWithHash`, whose slot search is circular, so a released feature keeps
+   *  its allocations until the ring comes back round. Measured on TUM-VI room5:
+   *  with the per-feature buffer, resident memory is 13 MB (mono) / ~20 MB
+   *  (stereo) higher than with `OOS.min_observations` set high enough that no
+   *  Jacobian is ever computed. One shared buffer costs 406 kB, once.
+   *
+   *  Valid only between a `ComputeOOSJacobian` call and the next one. `Ho()` and
+   *  `ro()` are views into it and inherit that lifetime. */
+  static OOSJacobian &oos_result() {
+    static OOSJacobian s;
+    if (s.Hx.rows() == 0) {
+      s.Hx.setZero(2 * kMaxGroup, kFullSize);
+      s.inn.setZero(2 * kMaxGroup);
+    }
+    return s;
+  }
+
+public:
+  /** The marginalized Jacobian, as a `rows x kFullSize` matrix over the shared
+   *  buffer's storage.
+   *
+   *  A *map*, and not `oos_result().Hx.topRows(rows)`: a top-rows block of the
+   *  `2 * kMaxGroup`-row buffer would carry outer stride `2 * kMaxGroup`, where the
+   *  per-feature matrix this replaced had outer stride `rows`, and every consumer
+   *  (`H_` staging, the gate) would then read a differently-strided object than
+   *  before. The map has exactly the layout a fresh `rows x kFullSize` matrix
+   *  would. Measured: this makes no difference to the numbers (the md5 of a room1
+   *  run is the same either way) -- Eigen's gemm turns out to be insensitive to the
+   *  *destination* stride -- so it is a matter of keeping the types honest rather
+   *  than of arithmetic.
+   *
+   *  Column `j` starts at `data() + j * rows`, so the map is a different layout for
+   *  every `rows`: only the top `rows` rows are meaningful and only for the feature
+   *  that most recently computed them. */
+  static Eigen::Map<MatX> oos_result_Hx(int rows) {
+    return Eigen::Map<MatX>(oos_result().Hx.data(), rows, kFullSize);
+  }
+
+private:
 
   /** Number of rows of the marginalized MSCKF measurement. */
   int oos_jac_counter_;

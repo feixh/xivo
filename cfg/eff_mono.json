@@ -33,6 +33,13 @@
   // (vs the top-level 5) because a 2-view track still contributes one row after
   // the nullspace projection. max_observations caps the rows one track can
   // contribute; 30 measured worse. Together with use_OOS: -0.005 m mono ATE.
+  // Column-sparse form of the out-of-state and feature-init products: same
+  // matrices, formed over the ~36 error-state columns an out-of-state or
+  // feature-init Jacobian can reach instead of all 564. Defaults to false, so a
+  // merge of the code without this key reproduces the previous numbers exactly;
+  // with it, agreement over a whole mono room1 run is 4e-14 m (see
+  // notes-n-prompts/notes-oosfast/m1-sparse-oos-products.md).
+  "oos_fast": { "enable": true },
   "OOS": {
     "pose_window": 20,
     "min_observations": 2,

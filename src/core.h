@@ -7,8 +7,10 @@
 #pragma once
 #include <array>
 #include <chrono>
+#include <algorithm>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <list>
 #include <memory>
 #include <type_traits>
@@ -256,6 +258,169 @@ inline Mat2 InnovationCov(const Eigen::MatrixBase<JDerived> &J,
   S(0, 0) += R;
   S(1, 1) += R;
   return S;
+}
+
+////////////////////////////////////////
+// SPARSITY OF AN OUT-OF-STATE MEASUREMENT
+////////////////////////////////////////
+/** An ascending, disjoint, maximal list of error-state column runs.
+ *
+ *  `kJacSharedRuns` above describes one *in-state* visual measurement, whose
+ *  shape is fixed: the motion states, one group, one feature. An out-of-state
+ *  (MSCKF) row block does not have a fixed shape -- it spans `Wbc`/`Tbc` plus
+ *  the group-pose block of *every* group the track was observed from, up to
+ *  `OOS.max_observations` of them -- so its sparsity has to be carried as data.
+ *
+ *  It is still worth carrying. At the shipped capacity a 5-view track reaches 36
+ *  columns of 564, so `H P H^T` formed densely spends 94% of its arithmetic (and,
+ *  more to the point, all 2.5 MB of `P_`'s memory traffic) on structural zero.
+ *  That is the same mistake `InnovationCov` was written to avoid for the in-state
+ *  Mahalanobis gate; see `Estimator::OOSGating` and
+ *  `Estimator::InitializeFeatureCovariance` for the two users.
+ *
+ *  Runs are ascending and disjoint by construction, so `Add` may merge and the
+ *  gathers below can walk them in order. */
+constexpr int kMaxMeasRuns = kMaxGroup + 2;
+
+struct RunSet {
+  ColRun runs[kMaxMeasRuns];
+  int nruns{0};
+  int dim{0}; ///< total length of the runs
+
+  void Clear() {
+    nruns = 0;
+    dim = 0;
+  }
+
+  /** Adds `[start, start + len)`, absorbing whatever it touches so the list stays
+   *  ascending, disjoint and maximal (two adjacent group slots become one run of
+   *  12, not two of 6). Idempotent, so a group observed twice costs nothing. */
+  void Add(int start, int len) {
+    if (len <= 0) {
+      return;
+    }
+    int lo = start, hi = start + len;
+    // First run that reaches `lo`; everything before it stays put.
+    int i = 0;
+    while (i < nruns && runs[i].start + runs[i].len < lo) {
+      ++i;
+    }
+    // Every run starting at or before `hi` is absorbed (adjacency counts: a run
+    // starting exactly at `hi` continues this one).
+    int j = i;
+    while (j < nruns && runs[j].start <= hi) {
+      lo = std::min(lo, runs[j].start);
+      hi = std::max(hi, runs[j].start + runs[j].len);
+      ++j;
+    }
+    const int absorbed = j - i;
+    if (absorbed == 0) {
+      // Nothing to absorb: open a new run at `i`.
+      if (nruns >= kMaxMeasRuns) {
+        throw std::runtime_error("RunSet: out of runs");
+      }
+      for (int k = nruns; k > i; --k) {
+        runs[k] = runs[k - 1];
+      }
+      ++nruns;
+    } else if (absorbed > 1) {
+      for (int k = 0; k < nruns - j; ++k) {
+        runs[i + 1 + k] = runs[j + k];
+      }
+      nruns -= absorbed - 1;
+    }
+    runs[i] = {lo, hi - lo};
+    dim = 0;
+    for (int k = 0; k < nruns; ++k) {
+      dim += runs[k].len;
+    }
+  }
+
+  /** Where full-state column `col` lands in the compacted `dim`-wide layout, or
+   *  -1 when it is outside every run. Lets a caller that has to *write* a known
+   *  block (the anchor pose in `Feature::ComputeInitJacobian`) do so directly in
+   *  compacted coordinates. */
+  int Compact(int col) const {
+    int c = 0;
+    for (int i = 0; i < nruns; ++i) {
+      if (col < runs[i].start) {
+        return -1;
+      }
+      if (col < runs[i].start + runs[i].len) {
+        return c + (col - runs[i].start);
+      }
+      c += runs[i].len;
+    }
+    return -1;
+  }
+};
+
+/** Gathers the `rs.dim` columns named by `rs` out of a full-width row block.
+ *  `dst` must already have `src.rows()` rows and at least `rs.dim` columns.
+ *
+ *  `Dst &&` and not `Dst &`, so that a caller can pass a temporary block
+ *  expression (`M.leftCols(d)`) as well as a matrix; taking it by value would
+ *  silently copy and throw the result away. */
+template <typename Derived, typename Dst>
+inline void GatherRunCols(const Eigen::MatrixBase<Derived> &src,
+                          const RunSet &rs, Dst &&dst) {
+  int c = 0;
+  for (int i = 0; i < rs.nruns; ++i) {
+    dst.middleCols(c, rs.runs[i].len) =
+        src.middleCols(rs.runs[i].start, rs.runs[i].len);
+    c += rs.runs[i].len;
+  }
+}
+
+/** Gathers the symmetric `rs.dim` x `rs.dim` submatrix of `P` on the rows and
+ *  columns named by `rs`. */
+template <typename Derived, typename Dst>
+inline void GatherRunCov(const Eigen::MatrixBase<Derived> &P, const RunSet &rs,
+                         Dst &&dst) {
+  int ci = 0;
+  for (int i = 0; i < rs.nruns; ++i) {
+    int cj = 0;
+    for (int j = 0; j < rs.nruns; ++j) {
+      dst.block(ci, cj, rs.runs[i].len, rs.runs[j].len) =
+          P.block(rs.runs[i].start, rs.runs[j].start, rs.runs[i].len,
+                  rs.runs[j].len);
+      cj += rs.runs[j].len;
+    }
+    ci += rs.runs[i].len;
+  }
+}
+
+/** The inverse of `GatherRunCols`: writes the `rs.dim` columns of `src` back into
+ *  the columns of `dst` they came from. Does *not* touch the columns outside
+ *  `rs` -- the caller is responsible for those being zero (usually by having
+ *  zeroed `dst` first). */
+template <typename Derived, typename Dst>
+inline void ScatterRunCols(const Eigen::MatrixBase<Derived> &src,
+                           const RunSet &rs, Dst &&dst) {
+  int c = 0;
+  for (int i = 0; i < rs.nruns; ++i) {
+    dst.middleCols(rs.runs[i].start, rs.runs[i].len) =
+        src.middleCols(c, rs.runs[i].len);
+    c += rs.runs[i].len;
+  }
+}
+
+/** True when `H` is exactly zero in every column outside `rs` -- the premise that
+ *  makes the gathers above equivalent to the dense products. O(rows * cols), so
+ *  callers guard it with `NDEBUG`. */
+template <typename Derived>
+inline bool ColsWithinRuns(const Eigen::MatrixBase<Derived> &H,
+                           const RunSet &rs) {
+  int c = 0;
+  for (int i = 0; i < rs.nruns; ++i) {
+    if (rs.runs[i].start > c &&
+        H.middleCols(c, rs.runs[i].start - c).cwiseAbs().maxCoeff() != 0) {
+      return false;
+    }
+    c = rs.runs[i].start + rs.runs[i].len;
+  }
+  return c >= H.cols() ||
+         H.middleCols(c, H.cols() - c).cwiseAbs().maxCoeff() == 0;
 }
 
 ////////////////////////////////////////

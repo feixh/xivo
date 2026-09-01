@@ -199,6 +199,15 @@ Estimator::Estimator(const Json::Value &cfg)
     // group management exactly as it is without OOS.
     oos_pose_window_ = oos.get("pose_window", 0).asInt();
     oos_augment_every_ = std::max(1, oos.get("augment_every", 1).asInt());
+
+    // Column-sparse form of the out-of-state and feature-init products. Purely an
+    // implementation choice -- same matrices, reassociated -- but off by default
+    // so that merging the code without the key reproduces the previous numbers.
+    // Its own section rather than a member of `OOS`, because it also governs
+    // `consistent_init`'s promotion products, which are not part of the OOS update.
+    oos_options_.fast_sparse =
+        cfg_["oos_fast"].get("enable", false).asBool();
+
     LOG(INFO) << "use_OOS=" << use_OOS_
               << "; OOS min_observations=" << oos_options_.min_observations
               << "; max_observations=" << oos_options_.max_observations
@@ -207,7 +216,8 @@ Estimator::Estimator(const Json::Value &cfg)
               << "; use_stereo=" << oos_options_.use_stereo
               << "; stereo_R_scale=" << oos_options_.stereo_R_scale
               << "; pose_window=" << oos_pose_window_
-              << "; augment_every=" << oos_augment_every_;
+              << "; augment_every=" << oos_augment_every_
+              << "; fast_sparse=" << oos_options_.fast_sparse;
   }
 
   {
@@ -1176,11 +1186,24 @@ bool Estimator::InitializeFeatureCovariance(FeaturePtr f) {
   P_.block(offset, 0, kFeatureSize, size).setZero();
   P_.block(0, offset, size, kFeatureSize).setZero();
 
+  // The columns `Hx` below can be nonzero in: `Wbc`/`Tbc`, the pose block of each
+  // view's group, and the anchor's. 36 of 564 for a 5-view track, and the two
+  // products that follow are the only place in the filter that reads *all* of
+  // `P_` (2.5 MB) more than once per frame -- 6 promotions a frame at two reads
+  // each was ~32 MB of memory traffic per frame, and the largest single cost of
+  // `consistent_init`. Off by default; see `OOSOptions::fast_sparse`.
+  RunSet rs;
+  const RunSet *runs = nullptr;
+  if (oos_options_.fast_sparse) {
+    rs = Feature::OOSColumnRuns(views, ref->sind());
+    runs = &rs;
+  }
+
   Mat3 Hl;
   Eigen::Matrix<number_t, 3, kFullSize> Hx_full;
   Vec3 res;
   if (!f->ComputeInitJacobian(views, X_.Rbc.matrix(), X_.Tbc, oos_options_, &Hl,
-                              &Hx_full, &res)) {
+                              &Hx_full, &res, runs)) {
     ++num_consistent_init_failed_;
     return false;
   }
@@ -1193,11 +1216,34 @@ bool Estimator::InitializeFeatureCovariance(FeaturePtr f) {
 
   // sigma^2 I and not `R_`-scaled per row: `Q1` is orthonormal, so the projected
   // noise covariance of the three retained rows is exactly sigma^2 I.
-  Mat3 M = Hx * P_ * Hx.transpose();
-  M.diagonal().array() += consistent_init_R_;
+  Mat3 M;
+  MatX Pxf; // size x 3
+  if (runs != nullptr) {
+#ifndef NDEBUG
+    CHECK(ColsWithinRuns(Hx, rs))
+        << "the feature-init Jacobian is nonzero outside its recorded runs";
+#endif
+    Eigen::Matrix<number_t, 3, -1> Hc(3, rs.dim);
+    GatherRunCols(Hx, rs, Hc);
+    // `P_ Hx^T` needs only the `rs.dim` columns of `P_`, all of its rows; and
+    // `Hx P_ Hx^T` is then the same gather restricted to the run rows as well.
+    if (init_cov_Pcols_.rows() != size || init_cov_Pcols_.cols() < rs.dim) {
+      init_cov_Pcols_.resize(size, std::max<int>(rs.dim, init_cov_Pcols_.cols()));
+    }
+    auto Pcols = init_cov_Pcols_.leftCols(rs.dim);
+    GatherRunCols(P_.topRows(size), rs, Pcols);
+    MatX Pc(rs.dim, rs.dim);
+    GatherRunCov(P_, rs, Pc);
+    M = Hc * Pc * Hc.transpose();
+    M.diagonal().array() += consistent_init_R_;
+    Pxf = -Pcols * (Hc.transpose() * Hl_inv.transpose());
+  } else {
+    M = Hx * P_ * Hx.transpose();
+    M.diagonal().array() += consistent_init_R_;
+    Pxf = -P_ * (Hx.transpose() * Hl_inv.transpose());
+  }
   Mat3 Pff = Hl_inv * M * Hl_inv.transpose();
   Pff = 0.5 * (Pff + Pff.transpose());
-  const MatX Pxf = -P_ * (Hx.transpose() * Hl_inv.transpose()); // size x 3
   if (!Pff.allFinite() || !Pxf.allFinite() ||
       !(Pff.diagonal().minCoeff() > 0) ||
       Pff.diagonal().maxCoeff() > consistent_init_max_var_) {

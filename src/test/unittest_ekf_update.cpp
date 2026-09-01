@@ -127,6 +127,17 @@ Problem MakeProblem(int n_groups, int n_feats, int oos_rows, unsigned seed) {
   return p;
 }
 
+/** The columns `MakeProblem` fills in its out-of-state block: the motion states
+ *  and the pose block of every group in play. The real thing's are narrower still
+ *  (`Wbc`/`Tbc` plus the observed groups, from `Feature::OOSColumnRuns`), so this
+ *  is the conservative version of the same description. */
+RunSet OOSBlockRuns(int n_groups) {
+  RunSet rs;
+  rs.Add(0, kMotionSize);
+  rs.Add(kGroupBegin, kGroupSize * n_groups);
+  return rs;
+}
+
 /** Relative Frobenius difference, which is what the tolerances below are on:
  *  entries of `P` span the prior variances of a rotation (1e-4) and of a
  *  log-depth (1e0), so an absolute tolerance would be meaningless. */
@@ -227,6 +238,157 @@ TEST(EkfUpdate, ADenseBlockDescriptionGivesTheSameAnswer) {
 
   EXPECT_LT(RelDiff(P_sparse, P_dense), 1e-12);
   EXPECT_LT((err_sparse - err_dense).norm() / err_dense.norm(), 1e-12);
+}
+
+TEST(EkfUpdate, ADenseBlockWithRunsGivesTheSameAnswer) {
+  // The other direction of the previous test: telling a dense block which columns
+  // it is nonzero in must not change the answer, only the work. This is the path
+  // an out-of-state block takes with `OOS.fast_sparse` on, and the tolerance is
+  // the reassociation of gemms cut on different boundaries -- not an
+  // approximation, since every column dropped is identically zero in `H`.
+  const int n_groups = 7, n_feats = 40, oos_rows = 12;
+  const MatX P0 = MakeP(n_groups, n_feats, 41);
+  Problem p = MakeProblem(n_groups, n_feats, oos_rows, 42);
+  const RunSet rs = OOSBlockRuns(n_groups);
+  // One run or two depending on whether the camera-intrinsics block exists at
+  // this build's compile-time options; `dim` is what the test is really about.
+  ASSERT_GE(rs.nruns, 1);
+  ASSERT_EQ(rs.dim, kMotionSize + kGroupSize * n_groups);
+
+  // The premise. If `MakeProblem` ever writes outside these columns the test
+  // below would be checking two different problems.
+  ASSERT_TRUE(ColsWithinRuns(p.H.bottomRows(oos_rows), rs));
+
+  std::vector<MeasBlock> with_runs = p.blocks;
+  ASSERT_FALSE(with_runs.back().sparse());
+  with_runs.back().runs = &rs;
+
+  MatX M_plain, M_runs;
+  MeasurementTimesCov(p.H, P0, p.blocks, Live(n_groups, n_feats), M_plain);
+  MeasurementTimesCov(p.H, P0, with_runs, Live(n_groups, n_feats), M_runs);
+  EXPECT_LT(RelDiff(M_runs, M_plain), 1e-14);
+
+  MatX P_plain = P0, P_runs = P0;
+  VecX err_plain = VecX::Zero(kFullSize), err_runs = VecX::Zero(kFullSize);
+  ASSERT_TRUE(EkfUpdateDowndate(P_plain, p.H, p.inn, p.diagR, p.blocks,
+                                Live(n_groups, n_feats), err_plain));
+  ASSERT_TRUE(EkfUpdateDowndate(P_runs, p.H, p.inn, p.diagR, with_runs,
+                                Live(n_groups, n_feats), err_runs));
+  EXPECT_LT(RelDiff(P_runs, P_plain), 1e-12);
+  EXPECT_LT((err_runs - err_plain).norm() / err_plain.norm(), 1e-12);
+}
+
+TEST(RunSetTest, AddKeepsRunsAscendingDisjointAndMaximal) {
+  RunSet rs;
+  EXPECT_EQ(rs.nruns, 0);
+  EXPECT_EQ(rs.dim, 0);
+
+  rs.Add(100, 6);
+  rs.Add(0, 6);
+  // Adjacent below: absorbed into one run, not appended as a second.
+  rs.Add(94, 6);
+  ASSERT_EQ(rs.nruns, 2);
+  EXPECT_EQ(rs.runs[0].start, 0);
+  EXPECT_EQ(rs.runs[0].len, 6);
+  EXPECT_EQ(rs.runs[1].start, 94);
+  EXPECT_EQ(rs.runs[1].len, 12);
+  EXPECT_EQ(rs.dim, 18);
+
+  // Idempotent: the same group observed twice costs nothing.
+  rs.Add(94, 6);
+  rs.Add(100, 6);
+  EXPECT_EQ(rs.nruns, 2);
+  EXPECT_EQ(rs.dim, 18);
+
+  // A run that bridges two existing ones absorbs both.
+  rs.Add(6, 88);
+  ASSERT_EQ(rs.nruns, 1);
+  EXPECT_EQ(rs.runs[0].start, 0);
+  EXPECT_EQ(rs.runs[0].len, 106);
+  EXPECT_EQ(rs.dim, 106);
+
+  // Zero and negative lengths are no-ops.
+  rs.Add(500, 0);
+  rs.Add(500, -3);
+  EXPECT_EQ(rs.nruns, 1);
+}
+
+TEST(RunSetTest, CompactGatherAndScatterRoundTrip) {
+  RunSet rs;
+  rs.Add(kGroupBegin + kGroupSize * 3, kGroupSize);
+  rs.Add(Index::Wbc, 6);
+  rs.Add(kGroupBegin + kGroupSize * 1, kGroupSize);
+  ASSERT_EQ(rs.nruns, 3);
+  EXPECT_EQ(rs.dim, 18);
+  // Ascending, so the extrinsics run comes first.
+  EXPECT_EQ(rs.runs[0].start, Index::Wbc);
+
+  EXPECT_EQ(rs.Compact(Index::Wbc), 0);
+  EXPECT_EQ(rs.Compact(Index::Tbc), 3);
+  EXPECT_EQ(rs.Compact(kGroupBegin + kGroupSize * 1), 6);
+  EXPECT_EQ(rs.Compact(kGroupBegin + kGroupSize * 3 + 5), 17);
+  EXPECT_EQ(rs.Compact(0), -1);
+  EXPECT_EQ(rs.Compact(kGroupBegin + kGroupSize * 2), -1);
+  EXPECT_EQ(rs.Compact(kFullSize - 1), -1);
+
+  MatX H = MatX::Zero(4, kFullSize);
+  for (int i = 0; i < rs.nruns; ++i)
+    for (int c = 0; c < rs.runs[i].len; ++c)
+      for (int r = 0; r < 4; ++r)
+        H(r, rs.runs[i].start + c) = 1 + r + 10 * (rs.runs[i].start + c);
+  ASSERT_TRUE(ColsWithinRuns(H, rs));
+
+  MatX Hc(4, rs.dim);
+  GatherRunCols(H, rs, Hc);
+  int c = 0;
+  for (int i = 0; i < rs.nruns; ++i) {
+    for (int k = 0; k < rs.runs[i].len; ++k)
+      EXPECT_EQ(Hc(2, c + k), H(2, rs.runs[i].start + k));
+    c += rs.runs[i].len;
+  }
+
+  MatX back = MatX::Zero(4, kFullSize);
+  ScatterRunCols(Hc, rs, back);
+  EXPECT_EQ((back - H).cwiseAbs().maxCoeff(), 0);
+
+  // The premise check has to actually fail when the premise does.
+  H(1, 0) = 1e-300;
+  EXPECT_FALSE(ColsWithinRuns(H, rs));
+}
+
+TEST(RunSetTest, GatheredProductEqualsTheDenseOne) {
+  // The identity every user of `RunSet` relies on: for an `H` that is zero outside
+  // `rs`, `H P H^T` equals the product formed on the gathered slice alone.
+  RunSet rs;
+  rs.Add(Index::Wbc, 6);
+  for (int g : {0, 2, 3, 9})
+    rs.Add(kGroupBegin + kGroupSize * g, kGroupSize);
+
+  std::default_random_engine gen(7);
+  std::normal_distribution<number_t> nrm(0.0, 1.0);
+  MatX A(kFullSize, kFullSize);
+  for (int i = 0; i < kFullSize; ++i)
+    for (int j = 0; j < kFullSize; ++j)
+      A(i, j) = nrm(gen);
+  const MatX P = A * A.transpose() / kFullSize;
+
+  const int rows = 9;
+  MatX H = MatX::Zero(rows, kFullSize);
+  for (int i = 0; i < rs.nruns; ++i)
+    for (int c = 0; c < rs.runs[i].len; ++c)
+      for (int r = 0; r < rows; ++r)
+        H(r, rs.runs[i].start + c) = 200.0 * nrm(gen);
+
+  MatX Hc(rows, rs.dim), Pc(rs.dim, rs.dim);
+  GatherRunCols(H, rs, Hc);
+  GatherRunCov(P, rs, Pc);
+  EXPECT_LT(RelDiff(MatX(Hc * Pc * Hc.transpose()), MatX(H * P * H.transpose())),
+            1e-14);
+  // And the half product `P H^T`, which is what the feature-init path needs.
+  MatX Pcols(kFullSize, rs.dim);
+  GatherRunCols(P, rs, Pcols);
+  EXPECT_LT(RelDiff(MatX(Pcols * Hc.transpose()), MatX(P * H.transpose())),
+            1e-14);
 }
 
 TEST(OccupiedState, RunsAgreeWithTheLiveIndexSet) {

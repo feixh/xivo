@@ -51,6 +51,22 @@ std::vector<Observation> ThinObservations(const std::vector<Observation> &obs,
 
 } // namespace
 
+RunSet Feature::OOSColumnRuns(const std::vector<Observation> &views,
+                              int extra_gsind) {
+  RunSet rs;
+  // `Wbc` and `Tbc` are adjacent, so the extrinsics are one run of 6.
+  rs.Add(Index::Wbc, 6);
+  for (const auto &obs : views) {
+    if (obs.g->sind() >= 0) {
+      rs.Add(kGroupBegin + kGroupSize * obs.g->sind(), kGroupSize);
+    }
+  }
+  if (extra_gsind >= 0) {
+    rs.Add(kGroupBegin + kGroupSize * extra_gsind, kGroupSize);
+  }
+  return rs;
+}
+
 std::vector<Observation>
 Feature::SelectOOSObservations(const std::vector<Observation> &vobs,
                               const OOSOptions &options) const {
@@ -250,6 +266,19 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
 
   cache_.Xs = this->Xs(SE3{SO3{Rbc}, Tbc});
   const int row_budget = static_cast<int>(oos_scratch().Hf.rows());
+
+  // The columns the rows below will write, known before any of them is written.
+  // Two uses: the per-observation clear of the scratch is restricted to them
+  // (`OOSJacobian::Hx` is 564 wide and column-major, so clearing it in full
+  // touched a cache line per column, ~36 kB per observation), and the update and
+  // the Mahalanobis gate get to skip the rest of the state.
+  oos_runs_.Clear();
+  const RunSet *runs = nullptr;
+  if (options.fast_sparse) {
+    oos_runs_ = OOSColumnRuns(views);
+    runs = &oos_runs_;
+  }
+
   int rows = 0;
   for (const auto &obs : views) {
     // A view writes 2 rows, or 4 when the right camera contributes. The view cap
@@ -263,12 +292,18 @@ int Feature::ComputeOOSJacobian(const std::vector<Observation> &vobs,
                    << " exhausted after " << oos_num_obs_ << " views";
       break;
     }
-    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options);
+    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options, runs);
     ++oos_num_obs_;
   }
   // From here on `oos_jac_counter_` holds the number of rows of the
   // marginalized measurement (see `ro()` / `Ho()`).
   oos_jac_counter_ = MarginalizeOOSPoint(rows);
+#ifndef NDEBUG
+  if (runs != nullptr && oos_jac_counter_ > 0) {
+    CHECK(ColsWithinRuns(oos_result_Hx(oos_jac_counter_), oos_runs_))
+        << "the marginalized OOS Jacobian is nonzero outside its recorded runs";
+  }
+#endif
 
   return oos_jac_counter_;
 }
@@ -277,7 +312,7 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
                                   const Mat3 &Rbc, const Vec3 &Tbc,
                                   const OOSOptions &options, Mat3 *Hl_out,
                                   Eigen::Matrix<number_t, 3, kFullSize> *Hx_out,
-                                  Vec3 *res_out) {
+                                  Vec3 *res_out, const RunSet *runs) {
   if (ref_ == nullptr || ref_->sind() < 0 || sind_ < 0) {
     return false;
   }
@@ -302,7 +337,7 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
     if (rows + need > row_budget) {
       break;
     }
-    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options);
+    rows += ComputeOOSJacobianInternal(obs, Rbc, Tbc, rows, options, runs);
     ++oos_num_obs_;
   }
   if (rows < 3) {
@@ -322,12 +357,6 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
   const Mat3 dXs_dTbc = Rsbr;
 
   const auto HfX = s.Hf.topRows(rows);
-  MatX Hx = s.Hx.topRows(rows);
-  const int roff = kGroupBegin + kGroupSize * ref_->sind();
-  Hx.block(0, roff, rows, 3) += HfX * dXs_dWsbr;
-  Hx.block(0, roff + 3, rows, 3) += HfX; // dXs_dTsbr = I
-  Hx.block(0, Index::Wbc, rows, 3) += HfX * dXs_dWbc;
-  Hx.block(0, Index::Tbc, rows, 3) += HfX * dXs_dTbc;
   const MatX Hl = HfX * dXs_dx;
 
   // Column pivoting, because the degenerate direction here is a specific one --
@@ -344,7 +373,36 @@ bool Feature::ComputeInitJacobian(const std::vector<Observation> &views,
   const auto Q1 = Q.leftCols(3);
 
   *Hl_out = R * perm.transpose();
-  *Hx_out = Q1.transpose() * Hx;
+
+  const int roff = kGroupBegin + kGroupSize * ref_->sind();
+  if (runs == nullptr) {
+    MatX Hx = s.Hx.topRows(rows);
+    Hx.block(0, roff, rows, 3) += HfX * dXs_dWsbr;
+    Hx.block(0, roff + 3, rows, 3) += HfX; // dXs_dTsbr = I
+    Hx.block(0, Index::Wbc, rows, 3) += HfX * dXs_dWbc;
+    Hx.block(0, Index::Tbc, rows, 3) += HfX * dXs_dTbc;
+    *Hx_out = Q1.transpose() * Hx;
+  } else {
+    // Same three steps -- copy the scratch, add the anchor's and the extrinsics'
+    // contribution through the point, project onto `Q1` -- on the `runs->dim`
+    // columns that can be nonzero instead of all `kFullSize`. The anchor's run is
+    // in `runs` by construction (`OOSColumnRuns(views, ref_->sind())`), so the
+    // three offsets below all resolve.
+    MatX Hc(rows, runs->dim);
+    GatherRunCols(s.Hx.topRows(rows), *runs, Hc);
+    const int croff = runs->Compact(roff);
+    const int cwbc = runs->Compact(Index::Wbc);
+    const int ctbc = runs->Compact(Index::Tbc);
+    CHECK(croff >= 0 && cwbc >= 0 && ctbc >= 0)
+        << "ComputeInitJacobian: the run set does not cover the anchor pose or "
+           "the extrinsics";
+    Hc.block(0, croff, rows, 3) += HfX * dXs_dWsbr;
+    Hc.block(0, croff + 3, rows, 3) += HfX; // dXs_dTsbr = I
+    Hc.block(0, cwbc, rows, 3) += HfX * dXs_dWbc;
+    Hc.block(0, ctbc, rows, 3) += HfX * dXs_dTbc;
+    Hx_out->setZero();
+    ScatterRunCols(Q1.transpose() * Hc, *runs, *Hx_out);
+  }
   *res_out = Q1.transpose() * s.inn.head(rows);
   return Hl_out->allFinite() && Hx_out->allFinite() && res_out->allFinite();
 }
@@ -373,22 +431,56 @@ int Feature::MarginalizeOOSPoint(int rows) {
   const int out_rows = rows - 3;
   auto A = Q.rightCols(out_rows);
 
-  // Straight into this feature's own storage, which Eigen sizes to exactly
-  // `out_rows`. Source and destination are now different objects, so the
-  // temporaries the previous in-place version needed are gone as well.
-  oos_.Hx = A.transpose() * s.Hx.topRows(rows);
-  oos_.inn = A.transpose() * s.inn.head(rows);
+  // Into the shared result buffer (`oos_result()`), whose top `out_rows` rows are
+  // this feature's until the next `ComputeOOSJacobian` call --
+  // `Estimator::ComputeOOSMeasurements` copies them out before then. Source and
+  // destination are different objects, so the temporaries the previous in-place
+  // version needed are gone as well.
+  //
+  // When the columns are known, only those are projected -- and the rest is
+  // explicitly zeroed, which is not an optimization but a requirement: the
+  // per-observation clear above was restricted to the same runs, so outside them
+  // the scratch still holds whatever the *previous* feature wrote. The result stays
+  // full width because `FilterUpdate` copies it into a full-width `H_`.
+  Eigen::Map<MatX> Hx = oos_result_Hx(out_rows);
+  if (oos_runs_.nruns > 0) {
+    Hx.setZero();
+    for (int i = 0; i < oos_runs_.nruns; ++i) {
+      const ColRun &r = oos_runs_.runs[i];
+      Hx.middleCols(r.start, r.len).noalias() =
+          A.transpose() * s.Hx.block(0, r.start, rows, r.len);
+    }
+  } else {
+    Hx.noalias() = A.transpose() * s.Hx.topRows(rows);
+  }
+  oos_result().inn.head(out_rows).noalias() =
+      A.transpose() * s.inn.head(rows);
 
   return out_rows;
 }
 
 int Feature::ComputeOOSJacobianInternal(const Observation &obs,
                                         const Mat3 &Rbc, const Vec3 &Tbc,
-                                        int row, const OOSOptions &options) {
+                                        int row, const OOSOptions &options,
+                                        const RunSet *runs) {
 
   auto g = obs.g;
   CHECK(g->sind() != -1);
   OOSJacobian &s = oos_scratch();
+
+  /** Clears the `nrows` scratch rows at `r` before they are written. The block
+   *  writes below only set four 2x3 blocks, so everything else in the row has to
+   *  be zeroed -- but only within the columns the *whole* measurement can reach,
+   *  when the caller knows them. */
+  const auto clear_rows = [&s, runs](int r, int nrows) {
+    if (runs == nullptr) {
+      s.Hx.block(r, 0, nrows, kFullSize).setZero();
+      return;
+    }
+    for (int i = 0; i < runs->nruns; ++i) {
+      s.Hx.block(r, runs->runs[i].start, nrows, runs->runs[i].len).setZero();
+    }
+  };
 
   int goff = kGroupBegin + 6 * obs.g->sind();
   Mat3 Rsb = g->Rsb().matrix();
@@ -462,7 +554,7 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   s.Hf.block<2, 3>(row, 0) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  s.Hx.block<2, kFullSize>(row, 0).setZero();
+  clear_rows(row, 2);
   s.Hx.block<2, 3>(row, goff) =
       cache_.dxp_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
   s.Hx.block<2, 3>(row, goff + 3) =
@@ -532,7 +624,7 @@ int Feature::ComputeOOSJacobianInternal(const Observation &obs,
   s.Hf.block<2, 3>(r1, 0) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dXs;
 
-  s.Hx.block<2, kFullSize>(r1, 0).setZero();
+  clear_rows(r1, 2);
   s.Hx.block<2, 3>(r1, goff) =
       dxp1_dXcn * cache_.dXcn_dXb * cache_.dXb_dWsb;
   s.Hx.block<2, 3>(r1, goff + 3) =
