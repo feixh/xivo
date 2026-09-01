@@ -80,6 +80,19 @@ struct OOSOptions {
    *  stacked measurement really is isotropic and the existing algebra holds
    *  unchanged. 1.0 leaves the right rows alone. */
   number_t stereo_R_scale;
+
+  /** Exploit the known column sparsity of an out-of-state / feature-init
+   *  Jacobian (`OOSJacobian::runs`) instead of forming the products against the
+   *  full `kFullSize`-wide state.
+   *
+   *  Purely an implementation choice: the columns it skips are structurally zero,
+   *  so the result is the same matrix. It is not *bit*-identical, because
+   *  compacting changes the shapes Eigen's gemm sees and therefore its rounding
+   *  -- the same caveat `InnovationCov` and `MeasurementTimesCov` carry. Off by
+   *  default so that a build without the config key reproduces the previous
+   *  numbers exactly; `unitTests_OOSUpdate` checks the two forms against each
+   *  other. Config: `oos_fast.enable`. */
+  bool fast_sparse{false};
 };
 
 // Options for adaptive initial depth estimation

@@ -25,6 +25,24 @@ struct MeasBlock {
   int rows;  ///< number of rows
   int gsind; ///< reference group slot, or -1 if the block is dense
   int fsind; ///< feature slot, unused when `gsind < 0`
+  /** For a block that is not `sparse()`: the column runs it is nonzero in, when
+   *  the caller knows them, else null. "Dense" above means *not of the fixed
+   *  in-state shape* -- an out-of-state block still reaches only `Wbc`/`Tbc` and
+   *  the pose blocks of the groups its track was observed from, typically 36
+   *  columns of 564, so the summation index of `H P` and of `M H^T` can be cut
+   *  down to those. Null keeps the previous fully dense treatment, which is what
+   *  a loop-closure block (whose sparsity nobody has worked out) gets.
+   *
+   *  What is skipped is exactly zero -- each run is its own `dst.noalias() += A *
+   *  B` and a skipped one has `A` identically zero -- but the runs that *are*
+   *  kept are cut differently from `live`'s (a group run, not the whole
+   *  group-plus-feature extent), so the gemms have different shapes and the
+   *  result is reassociated, not bit-identical. Same caveat as the batching in
+   *  `MeasurementTimesCov`; `unitTests_ekf_update` bounds the difference.
+   *
+   *  Non-owning: the set lives in the feature's `OOSJacobian` and must outlive
+   *  the update. */
+  const RunSet *runs{nullptr};
 
   bool sparse() const { return gsind >= 0; }
 };

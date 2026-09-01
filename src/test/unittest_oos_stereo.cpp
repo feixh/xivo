@@ -222,7 +222,7 @@ TEST_F(OOSStereoTest, MarginalizationKillsStereoRows) {
   // Those parked columns now hold A' * Hf, which must be exactly zero (up to
   // the rounding of the products) for the marginalization to have eliminated
   // the point.
-  MatX AtHf = f_->oos_.Hx.block(0, kFeatureBegin, out, 3);
+  MatX AtHf = Feature::oos_result_Hx(out).block(0, kFeatureBegin, out, 3);
   EXPECT_LT(AtHf.cwiseAbs().maxCoeff(), 1e-9 * Hf0_.cwiseAbs().maxCoeff())
       << "A' * Hf =\n" << AtHf;
 }

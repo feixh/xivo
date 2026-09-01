@@ -502,6 +502,10 @@ private:
   /** Mahalanobis gate on the marginalized out-of-state measurement of `f`. */
   bool OOSGating(FeaturePtr f);
 
+  /** Makes sure `oos_H_` / `oos_inn_` can hold `rows` rows, keeping the
+   *  `num_oos_rows_` already stacked. */
+  void ReserveOOSRows(int rows);
+
   /** Removes the out-of-state features used (or rejected) in this step from the
    *  graph and frees them. */
   void CleanupOOSFeatures();
@@ -854,6 +858,13 @@ private:
   number_t consistent_init_R_{1.0};
   number_t consistent_init_max_var_{1e4};
   int num_consistent_init_{0}, num_consistent_init_failed_{0};
+  /** Scratch for the compacted form of `InitializeFeatureCovariance`: the
+   *  `kFullSize x runs.dim` slice of `P_` whose columns the init Jacobian can
+   *  reach. A member, not a local, because that call happens ~6 times per frame
+   *  and this is the one allocation in it that is not small; grown monotonically
+   *  and never shrunk, so a run settles on one buffer of ~160 kB. Only meaningful
+   *  inside that function. */
+  MatX init_cov_Pcols_;
 
   // time
   timestamp_t last_imu_time_, curr_imu_time_; // time when the imu meas arrives
@@ -986,6 +997,27 @@ private:
    *  frame; k > 1 makes the same number of slots span k times as much time). */
   int oos_pose_window_{0};
   int oos_augment_every_{1};
+
+  /** One accepted out-of-state measurement, copied out of the shared
+   *  `Feature::oos_result()` as soon as it passes the gate.
+   *
+   *  The rows have to outlive the loop that computes them -- `FilterUpdate` stacks
+   *  them below the in-state ones, and the in-state row count is not known until
+   *  then -- but they do not have to outlive it inside the `Feature`. Holding them
+   *  here instead is what lets the marginalized Jacobian be one shared buffer
+   *  rather than one per pooled feature; see `Feature::oos_result()` and
+   *  notes-oosfast/m4-memory.md. */
+  struct OOSRowBlock {
+    int row;      ///< first row in `oos_H_` / `oos_inn_`
+    int rows;     ///< number of rows
+    RunSet runs;  ///< the columns they can be nonzero in (empty when `oos_fast` is off)
+  };
+  std::vector<OOSRowBlock> oos_blocks_;
+  /** The accepted rows, stacked. Grown geometrically and never shrunk; the row
+   *  capacity settles at the largest number of out-of-state rows any one update
+   *  produced, a few hundred kB. */
+  MatX oos_H_;
+  VecX oos_inn_;
 
   /** Out-of-state (MSCKF) update bookkeeping, per update step. */
   std::vector<FeaturePtr> oos_used_; ///< features actually used in the update

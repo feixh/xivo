@@ -32,6 +32,7 @@ void Estimator::UpdateStep(const timestamp_t &ts,
   // next one.
   oos_features_.clear();
   oos_used_.clear();
+  oos_blocks_.clear();
 
   // only used for data collection.
   just_dropped_feature_ids_.clear();

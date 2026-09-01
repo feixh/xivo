@@ -114,10 +114,17 @@ class EvalModeSaver(BaseSaver):
             pass
 
     def onResultsReady(self):
+        # `%f` is six decimals, i.e. 1 um on a trajectory of order 1 m -- fine for
+        # the TUM benchmark scripts, but it hides differences of the size that a
+        # change of arithmetic makes, so an md5 match on a `%f` dump proves
+        # agreement only to 1e-6 m and is NOT a bit-identity check.
+        # XIVO_DUMP_PRECISE=1 writes round-trippable values instead, so two builds
+        # can be compared exactly.
+        fmt = '%.17g' if os.environ.get('XIVO_DUMP_PRECISE') else '%f'
         np.savetxt(
             self.resultsPath,
             self.results,
-            fmt='%f %f %f %f %f %f %f %f')
+            fmt=' '.join([fmt] * 8))
 
 
 

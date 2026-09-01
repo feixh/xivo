@@ -173,7 +173,7 @@ TEST_F(OOSUpdateTest, MarginalizationAnnihilatesPointJacobian) {
   ASSERT_EQ(out, rows - 3);
 
   // These columns held a copy of Hf, so they now hold A' * Hf.
-  MatX AtHf = f_->oos_.Hx.block(0, kFeatureBegin, out, 3);
+  MatX AtHf = Feature::oos_result_Hx(out).block(0, kFeatureBegin, out, 3);
   EXPECT_LT(AtHf.norm(), 1e-9 * Hf0_.norm());
 }
 
@@ -182,8 +182,8 @@ TEST_F(OOSUpdateTest, MarginalizationBasisIsOrthonormal) {
   int out = f_->MarginalizeOOSPoint(rows);
   ASSERT_EQ(out, rows - 3);
 
-  MatX Hx1 = f_->oos_.Hx.topRows(out);
-  VecX inn1 = f_->oos_.inn.head(out);
+  MatX Hx1 = MatX(Feature::oos_result_Hx(out));
+  VecX inn1 = Feature::oos_result().inn.head(out);
   MatX Pi = NullspaceProjector();
 
   // For an orthonormal basis A of the left nullspace, A * A' is exactly the
@@ -222,7 +222,7 @@ TEST_F(OOSUpdateTest, PointErrorIsMarginalizedOut) {
   int out = f_->MarginalizeOOSPoint(rows);
   ASSERT_EQ(out, rows - 3);
   // Only second-order terms survive.
-  EXPECT_LT(f_->oos_.inn.head(out).lpNorm<Infinity>(), 1e-2 * raw_norm);
+  EXPECT_LT(Feature::oos_result().inn.head(out).lpNorm<Infinity>(), 1e-2 * raw_norm);
 }
 
 TEST_F(OOSUpdateTest, RefineRecoversPoint) {
@@ -303,6 +303,102 @@ TEST_F(OOSUpdateTest, SelectionThinsLongTracks) {
                                     Gbc().translation(), options_);
   EXPECT_EQ(f_->oos_num_obs(), 5);
   EXPECT_EQ(rows, 2 * 5 - 3);
+}
+
+// `OOSOptions::fast_sparse` records which error-state columns the stacked
+// Jacobian can be nonzero in and then forms the products over those alone. The
+// two forms are the same matrices up to gemm reassociation, so these tests are
+// what license the config key.
+TEST_F(OOSUpdateTest, ColumnRunsCoverExtrinsicsAndEveryObservedGroup) {
+  groups_[0]->SetSind(4);
+  groups_[1]->SetSind(5); // adjacent to 4: the two slots must merge into one run
+  groups_[2]->SetSind(9);
+  groups_[3]->SetSind(9); // a repeat costs nothing
+  groups_[4]->SetSind(-1); // not in the state; contributes no columns
+
+  const RunSet rs = Feature::OOSColumnRuns(obs_);
+  EXPECT_EQ(rs.nruns, 3);
+  EXPECT_EQ(rs.dim, 6 + 12 + 6);
+  EXPECT_EQ(rs.runs[0].start, xivo::Index::Wbc);
+  EXPECT_EQ(rs.runs[0].len, 6);
+  EXPECT_EQ(rs.runs[1].start, kGroupBegin + kGroupSize * 4);
+  EXPECT_EQ(rs.runs[1].len, 12);
+  EXPECT_EQ(rs.runs[2].start, kGroupBegin + kGroupSize * 9);
+
+  // The anchor group, which `ComputeInitJacobian` also writes, on request.
+  const RunSet with_anchor = Feature::OOSColumnRuns(obs_, 7);
+  EXPECT_EQ(with_anchor.nruns, 4);
+  EXPECT_EQ(with_anchor.dim, rs.dim + 6);
+}
+
+TEST_F(OOSUpdateTest, FastSparseOOSJacobianMatchesTheDenseForm) {
+  options_.fast_sparse = false;
+  ASSERT_GT(f_->ComputeOOSJacobian(obs_, Gbc().so3().matrix(),
+                                   Gbc().translation(), options_), 0);
+  const MatX Ho_dense = f_->Ho();
+  const VecX ro_dense = f_->ro();
+  EXPECT_EQ(f_->oos_runs().nruns, 0) << "no runs are recorded when the key is off";
+
+  options_.fast_sparse = true;
+  ASSERT_EQ(f_->ComputeOOSJacobian(obs_, Gbc().so3().matrix(),
+                                   Gbc().translation(), options_),
+            Ho_dense.rows());
+  const MatX Ho_fast = f_->Ho();
+  const VecX ro_fast = f_->ro();
+
+  // Same shape, and nonzero only where the run set says.
+  ASSERT_EQ(Ho_fast.rows(), Ho_dense.rows());
+  ASSERT_EQ(Ho_fast.cols(), kFullSize);
+  EXPECT_GT(f_->oos_runs().nruns, 0);
+  EXPECT_TRUE(ColsWithinRuns(Ho_fast, f_->oos_runs()));
+  // And the dense form is too -- which is the premise, not a consequence.
+  EXPECT_TRUE(ColsWithinRuns(Ho_dense, f_->oos_runs()));
+
+  EXPECT_LT((Ho_fast - Ho_dense).norm() / Ho_dense.norm(), 1e-14);
+  EXPECT_LT((ro_fast - ro_dense).norm() / std::max(ro_dense.norm(), 1e-30), 1e-14);
+}
+
+TEST_F(OOSUpdateTest, FastSparseLeavesNoStaleScratchBehind) {
+  // The trap the restricted clear opens: the scratch is only cleared inside the
+  // *current* feature's runs, so a feature whose runs differ from the previous
+  // one's would read its leftovers if anything ever looked outside them. Run two
+  // features with disjoint group slots back to back and check the second.
+  options_.fast_sparse = true;
+  ASSERT_GT(f_->ComputeOOSJacobian(obs_, Gbc().so3().matrix(),
+                                   Gbc().translation(), options_), 0);
+
+  for (size_t i = 0; i < groups_.size(); ++i) {
+    groups_[i]->SetSind(static_cast<int>(i) + 20);
+  }
+  ASSERT_GT(f_->ComputeOOSJacobian(obs_, Gbc().so3().matrix(),
+                                   Gbc().translation(), options_), 0);
+  EXPECT_TRUE(ColsWithinRuns(f_->Ho(), f_->oos_runs()))
+      << "the second feature's Jacobian kept the first one's columns";
+}
+
+TEST_F(OOSUpdateTest, FastSparseInitJacobianMatchesTheDenseForm) {
+  // `ComputeInitJacobian` is the `consistent_init` path: same stack, but the
+  // anchor's and the extrinsics' contribution *through* the point is added back
+  // and only the three invertible rows are kept.
+  Mat3 Hl_dense, Hl_fast;
+  Eigen::Matrix<number_t, 3, kFullSize> Hx_dense, Hx_fast;
+  Vec3 res_dense, res_fast;
+
+  const RunSet rs = Feature::OOSColumnRuns(obs_, f_->ref()->sind());
+  ASSERT_TRUE(f_->ComputeInitJacobian(obs_, Gbc().so3().matrix(),
+                                      Gbc().translation(), options_, &Hl_dense,
+                                      &Hx_dense, &res_dense, nullptr));
+  ASSERT_TRUE(f_->ComputeInitJacobian(obs_, Gbc().so3().matrix(),
+                                      Gbc().translation(), options_, &Hl_fast,
+                                      &Hx_fast, &res_fast, &rs));
+
+  EXPECT_TRUE(ColsWithinRuns(Hx_dense, rs));
+  EXPECT_TRUE(ColsWithinRuns(Hx_fast, rs));
+  EXPECT_LT((Hl_fast - Hl_dense).norm() / Hl_dense.norm(), 1e-14);
+  EXPECT_LT((Hx_fast - Hx_dense).norm() / Hx_dense.norm(), 1e-14);
+  EXPECT_LT((res_fast - res_dense).norm() /
+                std::max(res_dense.norm(), number_t(1e-30)),
+            1e-12);
 }
 
 // Regression test for the in-state Jacobian copy: every block of J_ must reach
