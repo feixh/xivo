@@ -464,12 +464,46 @@ inline bool ColsWithinRuns(const Eigen::MatrixBase<Derived> &H,
  *
  *  Runs are ascending and disjoint; `MirrorLowerTriangle` relies on the order to
  *  know which block of a pair is below the diagonal. */
-constexpr int kMaxStateRuns = 2;
+/** Two runs are what the *high-water-mark* cover needs. The exact cover
+ *  (`OccupiedStateRunsExact`) needs one run per maximal stretch of occupied
+ *  slots, so in the worst case -- every other slot vacant -- one per two slots on
+ *  each side, plus the motion block. Nothing here is sized per update, so the
+ *  headroom is 8 ints. */
+constexpr int kMaxStateRuns = 1 + (kMaxGroup + 1) / 2 + (kMaxFeature + 1) / 2;
 
 struct StateRuns {
   ColRun runs[kMaxStateRuns];
-  int nruns; ///< 1 or 2
+  int nruns; ///< at least 1
   int dim;   ///< total length of the runs
+
+  /** Appends `[start, start+len)`, coalescing with the previous run when they
+   *  touch or when the gap between them is at most `min_gap`.
+   *
+   *  Absorbing a small gap is what keeps the run count near 2 in practice: it
+   *  trades a few provably-zero columns of arithmetic for not splitting the
+   *  update's gemms in two. Legal because a run may contain vacant slots (see
+   *  above) -- the cover only has to be a superset of the occupied set. Calls
+   *  must be in ascending order and must not overlap. */
+  void Append(int start, int len, int min_gap) {
+    if (len <= 0) {
+      return;
+    }
+    if (nruns > 0) {
+      ColRun &p = runs[nruns - 1];
+      const int end = p.start + p.len;
+      // Out of run slots is not a failure: absorbing the gap keeps the cover a
+      // superset, which is all correctness needs. `kMaxStateRuns` is sized so
+      // this cannot trigger, and it is here so that a future capacity change
+      // cannot turn into a buffer overrun.
+      if (start - end <= min_gap || nruns == kMaxStateRuns) {
+        dim += start + len - end; // the gap is absorbed too
+        p.len = start + len - p.start;
+        return;
+      }
+    }
+    runs[nruns++] = {start, len};
+    dim += len;
+  }
 };
 
 /** The occupied extent, given one past the highest occupied group slot and one
@@ -492,6 +526,48 @@ inline StateRuns OccupiedStateRuns(int groups_used, int features_used) {
   s.dim = 0;
   for (int i = 0; i < s.nruns; ++i) {
     s.dim += s.runs[i].len;
+  }
+  return s;
+}
+
+/** The occupied extent as the *exact* set of occupied slots rather than as two
+ *  high-water marks, coalescing runs whose gap is at most `min_gap`.
+ *
+ *  `OccupiedStateRuns` above covers every slot below the highest occupied one, and
+ *  on TUM-VI that is 491.5 of 564 dimensions while only 466 are occupied: ~2.6
+ *  group and ~3.2 feature slots inside the marks are vacant at any moment, because
+ *  slots are freed in whatever order tracks die and refilled lowest-first. Since
+ *  the downdate is quadratic in the extent and the triangular solve linear in it,
+ *  dropping those 25 dimensions is worth ~5% of the update's dimension and ~10% of
+ *  its dominant term.
+ *
+ *  The gap coalescing is what makes that a win rather than a wash. Splitting the
+ *  extent into k runs turns the downdate into k(k+1)/2 gemms and the mirror into
+ *  the same, and at 3-dimensional feature slots an uncoalesced cover would issue
+ *  hundreds of 3-column gemms whose per-call cost exceeds the arithmetic they
+ *  skip. `min_gap` of one feature slot's worth keeps the run count near 4-8.
+ *
+ *  Exactly as sound as the coarse cover, and for the same reason: this is still a
+ *  *superset* of the occupied set, and `CheckLiveExtent` verifies the two premises
+ *  (`H` zero outside, `P` uncorrelated outside) against the real matrices. */
+inline StateRuns OccupiedStateRunsExact(const bool *gsel, int ngroups,
+                                        const bool *fsel, int nfeatures,
+                                        int min_gap) {
+  StateRuns s{};
+  // The motion block is always live and abuts the group region, so it opens the
+  // first run and every occupied group slot either extends it or starts a new one.
+  s.runs[0] = {0, kGroupBegin};
+  s.nruns = 1;
+  s.dim = kGroupBegin;
+  for (int i = 0; i < ngroups; ++i) {
+    if (gsel[i]) {
+      s.Append(kGroupBegin + kGroupSize * i, kGroupSize, min_gap);
+    }
+  }
+  for (int i = 0; i < nfeatures; ++i) {
+    if (fsel[i]) {
+      s.Append(kFeatureBegin + kFeatureSize * i, kFeatureSize, min_gap);
+    }
   }
   return s;
 }

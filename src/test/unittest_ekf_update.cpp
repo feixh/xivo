@@ -483,6 +483,196 @@ TEST(EkfUpdate, OversizedRunsGiveTheSameAnswer) {
   EXPECT_LT((err_tight - err_loose).norm() / err_loose.norm(), 1e-13);
 }
 
+TEST(EkfUpdate, ChunkedEqualsTheBatchUpdate) {
+  // `ekf_update.chunks`. Applying the rows in C consecutive groups, each against
+  // the covariance the previous ones left and with its innovation re-predicted,
+  // is the same update as applying them all at once -- that is the claim the key
+  // rests on, and it is the one thing here that a subtle error would not show up
+  // as a divergence, so it is checked against *both* references at the real size
+  // and over a range of C, including C larger than any real update would use.
+  //
+  // Not bit-identical, and not expected to be: it is a different factorization
+  // (C factorizations of m/C rows in place of one of m), so the rounding differs.
+  // It differs in the *good* direction -- each S_c is better conditioned than the
+  // whole S -- but the test only claims agreement, not improvement.
+  const int n_groups = 7, n_feats = 76, oos_rows = 12;
+  const MatX P0 = MakeP(n_groups, n_feats, 71);
+  Problem p = MakeProblem(n_groups, n_feats, oos_rows, 72);
+  const StateRuns live = Live(n_groups, n_feats);
+
+  MatX P_batch = P0;
+  VecX err_batch = VecX::Zero(kFullSize);
+  ASSERT_TRUE(EkfUpdateDowndate(P_batch, p.H, p.inn, p.diagR, p.blocks, live,
+                                err_batch, false, 1));
+
+  MatX P_ref = P0;
+  VecX err_ref = VecX::Zero(kFullSize);
+  EkfUpdateJoseph(P_ref, p.H, p.inn, p.diagR, err_ref);
+
+  for (int chunks : {2, 3, 4, 8, 16}) {
+    for (bool fuse : {false, true}) {
+      MatX P_c = P0;
+      VecX err_c = VecX::Zero(kFullSize);
+      ASSERT_TRUE(EkfUpdateDowndate(P_c, p.H, p.inn, p.diagR, p.blocks, live,
+                                    err_c, fuse, chunks))
+          << chunks << " chunks, fuse=" << fuse;
+      EXPECT_LT(RelDiff(P_c, P_batch), 1e-9) << chunks << " chunks vs batch";
+      EXPECT_LT((err_c - err_batch).norm() / err_batch.norm(), 1e-9)
+          << chunks << " chunks vs batch, error state";
+      EXPECT_LT(RelDiff(P_c, P_ref), 1e-9) << chunks << " chunks vs Joseph";
+      EXPECT_LT((err_c - err_ref).norm() / err_ref.norm(), 1e-9)
+          << chunks << " chunks vs Joseph, error state";
+
+      // The invariants the filter downstream relies on survive every chunk, not
+      // just the last: exact symmetry, positive variances, and a vacant tail that
+      // no chunk touched.
+      for (int i = 0; i < kFullSize; ++i)
+        for (int j = 0; j < i; ++j)
+          ASSERT_EQ(P_c(i, j), P_c(j, i))
+              << chunks << " chunks, at (" << i << "," << j << ")";
+      for (int i : LiveIndices(n_groups, n_feats))
+        EXPECT_GT(P_c(i, i), 0.0) << chunks << " chunks, variance of " << i;
+      for (int i = kFeatureBegin + kFeatureSize * n_feats; i < kFullSize; ++i) {
+        ASSERT_EQ(P_c(i, i), kVacant) << chunks << " chunks, row " << i;
+        ASSERT_EQ(P_c.row(i).cwiseAbs().maxCoeff(), kVacant)
+            << chunks << " chunks, row " << i;
+        ASSERT_EQ(err_c(i), 0.0) << chunks << " chunks, err " << i;
+      }
+    }
+  }
+}
+
+TEST(EkfUpdate, ChunkingASingleBlockIsTheBatchUpdate) {
+  // The degenerate cases: a chunk count above the block count, and an update
+  // whose rows are one indivisible block, must both fall back to one chunk rather
+  // than produce an empty range.
+  const MatX P0 = MakeP(2, 4, 81);
+  Problem p = MakeProblem(2, 4, 0, 82);
+  std::vector<MeasBlock> one{{0, static_cast<int>(p.H.rows()), -1, -1}};
+
+  MatX P_1 = P0, P_16 = P0;
+  VecX err_1 = VecX::Zero(kFullSize), err_16 = VecX::Zero(kFullSize);
+  ASSERT_TRUE(EkfUpdateDowndate(P_1, p.H, p.inn, p.diagR, one, Live(2, 4), err_1,
+                                false, 1));
+  ASSERT_TRUE(EkfUpdateDowndate(P_16, p.H, p.inn, p.diagR, one, Live(2, 4),
+                                err_16, false, 16));
+  // Bit-identical here, because there was nothing to split.
+  EXPECT_EQ(RelDiff(P_16, P_1), 0.0);
+  EXPECT_EQ((err_16 - err_1).norm(), 0.0);
+}
+
+TEST(EkfUpdate, ChunkedRefusesAnIndefiniteInnovationCovariance) {
+  // The first chunk's failure has to leave `P` untouched, because that is what
+  // lets the caller still fall back to the Joseph form over the whole batch. A
+  // negative definite `P` fails on the first chunk whatever the split.
+  MatX P = -MakeP(7, 10, 91);
+  Problem p = MakeProblem(7, 10, 0, 92);
+  VecX err = VecX::Zero(kFullSize);
+  const MatX P_in = P;
+  EXPECT_FALSE(EkfUpdateDowndate(P, p.H, p.inn, p.diagR, p.blocks, Live(7, 10),
+                                 err, false, 4));
+  EXPECT_EQ(RelDiff(P, P_in), 0.0);
+  EXPECT_EQ(err.norm(), 0.0);
+}
+
+TEST(OccupiedState, ExactRunsCoverEveryOccupiedSlot) {
+  // `ekf_update.exact_runs`. What the update needs of the runs is that they be a
+  // *superset* of the occupied slots, ascending and disjoint -- a vacant slot
+  // inside a run costs arithmetic and nothing else (`OversizedRunsGiveTheSameAnswer`
+  // is what pins that). So this checks coverage rather than equality, over
+  // occupancy patterns with holes in them, which is what a run of the filter
+  // produces and what `OccupiedStateRuns`'s high-water marks cannot express.
+  std::default_random_engine gen(5);
+  std::bernoulli_distribution coin(0.6);
+  for (int trial = 0; trial < 40; ++trial) {
+    std::array<bool, kMaxGroup> gsel{};
+    std::array<bool, kMaxFeature> fsel{};
+    for (int i = 0; i < kMaxGroup; ++i)
+      gsel[i] = coin(gen);
+    for (int i = 0; i < kMaxFeature; ++i)
+      fsel[i] = coin(gen);
+
+    for (int gap : {0, 1, 3, 6}) {
+      const StateRuns s = OccupiedStateRunsExact(gsel.data(), kMaxGroup,
+                                                 fsel.data(), kMaxFeature, gap);
+      ASSERT_GE(s.nruns, 1);
+      ASSERT_LE(s.nruns, kMaxStateRuns);
+
+      std::vector<bool> covered(kFullSize, false);
+      int dim = 0;
+      for (int i = 0; i < s.nruns; ++i) {
+        if (i > 0)
+          ASSERT_GT(s.runs[i].start, s.runs[i - 1].start + s.runs[i - 1].len)
+              << "trial " << trial << " gap " << gap << " run " << i;
+        ASSERT_GE(s.runs[i].start, 0);
+        ASSERT_LE(s.runs[i].start + s.runs[i].len, kFullSize);
+        for (int k = 0; k < s.runs[i].len; ++k)
+          covered[s.runs[i].start + k] = true;
+        dim += s.runs[i].len;
+      }
+      EXPECT_EQ(s.dim, dim) << "trial " << trial << " gap " << gap;
+
+      // Every motion state, and every slot of every occupied group and feature.
+      for (int i = 0; i < kMotionSize + kMaxCameraIntrinsics; ++i)
+        ASSERT_TRUE(covered[i]) << "motion state " << i;
+      for (int g = 0; g < kMaxGroup; ++g)
+        if (gsel[g])
+          for (int k = 0; k < kGroupSize; ++k)
+            ASSERT_TRUE(covered[kGroupBegin + kGroupSize * g + k])
+                << "trial " << trial << " gap " << gap << " group " << g;
+      for (int f = 0; f < kMaxFeature; ++f)
+        if (fsel[f])
+          for (int k = 0; k < kFeatureSize; ++k)
+            ASSERT_TRUE(covered[kFeatureBegin + kFeatureSize * f + k])
+                << "trial " << trial << " gap " << gap << " feature " << f;
+
+      // And it is worth having: a wider gap tolerance can only merge runs, never
+      // split them, so the dimension is monotone in `gap` and never worse than the
+      // high-water-mark cover of the same occupancy.
+      int last_g = -1, last_f = -1;
+      for (int g = 0; g < kMaxGroup; ++g)
+        if (gsel[g])
+          last_g = g;
+      for (int f = 0; f < kMaxFeature; ++f)
+        if (fsel[f])
+          last_f = f;
+      EXPECT_LE(s.dim, OccupiedStateRuns(last_g + 1, last_f + 1).dim)
+          << "trial " << trial << " gap " << gap;
+    }
+  }
+}
+
+TEST(EkfUpdate, ExactRunsGiveTheSameAnswerAsTheHighWaterCover) {
+  // The two descriptions of the same occupied set, through the update. All the
+  // groups and features `MakeProblem` uses are occupied here, so the exact runs
+  // are the tight cover and the high-water runs are the same set -- the answers
+  // must agree to the reassociation the different gemm shapes cause, no more.
+  const int n_groups = 7, n_feats = 40;
+  const MatX P0 = MakeP(n_groups, n_feats, 101);
+  Problem p = MakeProblem(n_groups, n_feats, 0, 102);
+
+  std::array<bool, kMaxGroup> gsel{};
+  std::array<bool, kMaxFeature> fsel{};
+  for (int g = 0; g < n_groups; ++g)
+    gsel[g] = true;
+  for (int f = 0; f < n_feats; ++f)
+    fsel[f] = true;
+
+  for (int gap : {0, 3, 6}) {
+    MatX P_hw = P0, P_ex = P0;
+    VecX err_hw = VecX::Zero(kFullSize), err_ex = VecX::Zero(kFullSize);
+    ASSERT_TRUE(EkfUpdateDowndate(P_hw, p.H, p.inn, p.diagR, p.blocks,
+                                  Live(n_groups, n_feats), err_hw));
+    ASSERT_TRUE(EkfUpdateDowndate(
+        P_ex, p.H, p.inn, p.diagR, p.blocks,
+        OccupiedStateRunsExact(gsel.data(), kMaxGroup, fsel.data(), kMaxFeature,
+                               gap),
+        err_ex));
+    EXPECT_LT(RelDiff(P_ex, P_hw), 1e-13) << "gap " << gap;
+    EXPECT_LT((err_ex - err_hw).norm() / err_hw.norm(), 1e-13) << "gap " << gap;
+  }
+}
+
 TEST(EkfUpdate, RefusesAnIndefiniteInnovationCovariance) {
   // The fallback path exists because a `P` that has already gone indefinite has
   // no Cholesky factor to downdate through. Forced here by making `P` negative
