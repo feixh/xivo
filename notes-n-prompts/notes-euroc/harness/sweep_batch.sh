@@ -6,7 +6,13 @@
 #
 # Each argument is one variant: a name, then whitespace-separated patches, each
 # forwarded as `--patch`. The common patches every variant in the batch shares go
-# in $COMMON (also whitespace-separated), and the screen set in $SEQS.
+# in $COMMON (also whitespace-separated), the screen set in $SEQS, the worktree
+# to run against in $WORKTREE, and the members per variant in $MEMBERS.
+#
+# $WORKTREE matters more than it looks: a batch that patches a config key the
+# target worktree's binary does not read will run happily and report the control
+# twice. sweep_xivo.sh catches the typo case (it refuses a key absent from the
+# config) but not the wrong-build case, so set it deliberately.
 #
 # This exists because the interactive shell here is zsh, which does not
 # word-split unquoted parameters and has no `read -ra`. Writing the loop inline
@@ -18,7 +24,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${SEQS:=MH_04_difficult V1_03_difficult V2_01_easy V1_01_easy MH_01_easy}"
 : "${COMMON:=}"
+: "${WORKTREE:=xivo-euroc}"
+: "${MEMBERS:=3}"
 export CPU_BASE="${CPU_BASE:-0}" CPU_SPAN="${CPU_SPAN:-60}"
+echo "batch: worktree=$WORKTREE members=$MEMBERS common='$COMMON'"
 
 rc=0
 for spec in "$@"; do
@@ -27,7 +36,8 @@ for spec in "$@"; do
   args=()
   for p in "$@"; do args+=(--patch "$p"); done
   for p in $COMMON; do args+=(--patch "$p"); done
-  if "$HERE/sweep_xivo.sh" --name "$name" --seqs "$SEQS" "${args[@]}"; then
+  if "$HERE/sweep_xivo.sh" --name "$name" --seqs "$SEQS" \
+       --worktree "$WORKTREE" --members "$MEMBERS" "${args[@]}"; then
     :
   else
     echo "!!! variant $name FAILED"; rc=1

@@ -79,12 +79,26 @@ protected:
    * seconds -- both given in the final body frame. Sample k therefore measures
    * R_kN * (a_final + lin(t_k)).
    */
-  Vec3 RunInit(int n, bool derotate, const Vec3 &omega,
-               const Vec3 &lin_amp = Vec3::Zero(), number_t lin_period = 1.0) {
+  /** Put the gravity-initialization state back to where a fresh estimator has
+   * it. The running gyro integration in particular *must* be reset: it now
+   * spans every sample seen rather than only the buffered ones, so a leftover
+   * `gravity_init_R_run_` from a previous arm would rotate the next one's
+   * samples by a stale attitude. */
+  void ResetInit() {
     est->gravity_initialized_ = false;
     est->gravity_init_buf_.clear();
-    est->gravity_init_gyro_buf_.clear();
-    est->gravity_init_time_buf_.clear();
+    est->gravity_init_R_buf_.clear();
+    est->gravity_init_R_run_.setIdentity();
+    est->gravity_init_last_gyro_.setZero();
+    est->gravity_init_seen_ = 0;
+    est->gravity_init_skipped_ = 0;
+    est->gravity_init_max_accel_dev_ = 0.0;
+    est->gravity_init_max_skip_ = 2000; // the valve, back to its default
+  }
+
+  Vec3 RunInit(int n, bool derotate, const Vec3 &omega,
+               const Vec3 &lin_amp = Vec3::Zero(), number_t lin_period = 1.0) {
+    ResetInit();
     est->gravity_init_counter_ = n;
     est->gravity_init_derotate_ = derotate;
     est->X_.Rsg = SO3();
@@ -165,10 +179,7 @@ TEST_F(GravityInitTest, LongWindowAveragesAwayLinearAcceleration) {
 TEST_F(GravityInitTest, GravityStaysUninitializedBelowTheSampleCount) {
   // The counter is what gates the whole thing; a fencepost error here would
   // silently shorten every window by one sample.
-  est->gravity_initialized_ = false;
-  est->gravity_init_buf_.clear();
-  est->gravity_init_gyro_buf_.clear();
-  est->gravity_init_time_buf_.clear();
+  ResetInit();
   est->gravity_init_counter_ = 100;
   est->gravity_init_derotate_ = true;
 
@@ -185,6 +196,125 @@ TEST_F(GravityInitTest, GravityStaysUninitializedBelowTheSampleCount) {
   EXPECT_TRUE(est->gravity_initialized_);
   // And the buffers are released, not left holding a window's worth of samples.
   EXPECT_TRUE(est->gravity_init_buf_.empty());
-  EXPECT_TRUE(est->gravity_init_gyro_buf_.empty());
-  EXPECT_TRUE(est->gravity_init_time_buf_.empty());
+  EXPECT_TRUE(est->gravity_init_R_buf_.empty());
+}
+
+// ---------------------------------------------------------------------------
+// The |a| gate, M4 of the EuRoC round.
+//
+// EuRoC's MH_01_easy is already being carried when its first IMU sample lands:
+// over the 20-sample window its mean specific force is 8.347 m/s^2 against a
+// gravity of 9.810, so the initial attitude absorbs 1.5 m/s^2 of somebody's arm.
+// The gate refuses samples whose magnitude cannot be gravity alone, which makes
+// initialization wait for a quiet stretch instead of averaging over a noisy one.
+// ---------------------------------------------------------------------------
+
+/** Replay a burst of `bad` contaminated samples followed by clean ones, and
+ * return what the filter believed. `dev` is the gate; 0 disables it. */
+class GravityGateTest : public GravityInitTest {
+protected:
+  Vec3 RunGated(number_t dev, int n_bad, int n_good, const Vec3 &bad_accel) {
+    ResetInit();
+    est->gravity_init_max_accel_dev_ = dev;
+    est->gravity_init_counter_ = n_good;
+    est->gravity_init_derotate_ = false;
+    est->X_.Rsg = SO3();
+
+    const number_t dt = 1.0 / kRate;
+    int k = 0;
+    for (; k < n_bad; ++k) {
+      est->InertialMeasInternal(
+          timestamp_t(static_cast<int64_t>((ts_base + k * dt) * 1e9)),
+          Vec3::Zero(), bad_accel);
+    }
+    for (; k < n_bad + n_good; ++k) {
+      est->InertialMeasInternal(
+          timestamp_t(static_cast<int64_t>((ts_base + k * dt) * 1e9)),
+          Vec3::Zero(), a_final);
+    }
+    ts_base += (n_bad + n_good) * dt + 1.0;
+    return -(est->X_.Rsg * est->g_);
+  }
+};
+
+TEST_F(GravityGateTest, GateRejectsContaminatedSamplesAndRecoversTheTruth) {
+  // 1.5 m/s^2 short of gravity, the size of MH_01's actual contamination, tilted
+  // so that averaging it in moves the direction and not just the magnitude.
+  const Vec3 carried{1.2, -0.9, 8.3};
+  ASSERT_GT(std::abs(a_final.norm() - carried.norm()), 1.0);
+
+  const number_t ungated = AngleDeg(RunGated(0.0, 20, 20, carried), a_final);
+  const number_t gated = AngleDeg(RunGated(0.1, 20, 20, carried), a_final);
+
+  EXPECT_GT(ungated, 2.0) << "the contaminated half should tilt the average";
+  EXPECT_LT(gated, 1e-9) << "the gate should have dropped all 20 bad samples";
+  EXPECT_EQ(est->gravity_init_skipped_, 20);
+}
+
+TEST_F(GravityGateTest, GateIsANoOpWhenEverySampleIsAlreadyQuiet) {
+  // The property that lets the gate ship as a single shared config value: on a
+  // sequence that does hold still it must change nothing at all, so it cannot
+  // regress the ten EuRoC sequences that were already fine.
+  const Vec3 gated = RunGated(0.1, 0, 30, a_final);
+  const Vec3 ungated = RunGated(0.0, 0, 30, a_final);
+  EXPECT_LT((gated - ungated).norm(), 1e-15);
+  EXPECT_EQ(est->gravity_init_skipped_, 0);
+}
+
+TEST_F(GravityGateTest, GateGivesUpRatherThanNeverInitializing) {
+  // If the accelerometer scale is wrong, no sample ever reads |g| and a gate
+  // without a valve would hang forever. Better a bad attitude and a warning
+  // than a system that silently never starts.
+  ResetInit();
+  est->gravity_init_max_accel_dev_ = 0.1;
+  est->gravity_init_max_skip_ = 10;
+  est->gravity_init_counter_ = 5;
+  est->gravity_init_derotate_ = false;
+
+  const Vec3 wrong_scale = a_final * 0.5; // half-scale: never within 0.1 of |g|
+  const number_t dt = 1.0 / kRate;
+  for (int k = 0; k < 20 && !est->gravity_initialized_; ++k) {
+    est->InertialMeasInternal(
+        timestamp_t(static_cast<int64_t>((ts_base + k * dt) * 1e9)),
+        Vec3::Zero(), wrong_scale);
+  }
+  ts_base += 20 * dt + 1.0;
+  EXPECT_TRUE(est->gravity_initialized_)
+      << "the valve should have released the gate after "
+      << est->gravity_init_max_skip_ << " rejections";
+  EXPECT_EQ(est->gravity_init_skipped_, 10);
+}
+
+TEST_F(GravityGateTest, DerotationStaysExactAcrossASkippedStretch) {
+  // The gate and de-rotation have to be correct *together*. The gyro is
+  // integrated over every sample rather than only the buffered ones, so the
+  // attitudes of the accepted samples remain exact even though the rejected run
+  // in the middle contributes a 0.27 rad/s turn that nothing else records.
+  const Vec3 omega{0.1, -0.2, 0.15};
+  const Vec3 carried{1.2, -0.9, 8.3};
+  const int n_bad = 40, n_good = 200;
+
+  ResetInit();
+  est->gravity_init_max_accel_dev_ = 0.1;
+  est->gravity_init_counter_ = n_good;
+  est->gravity_init_derotate_ = true;
+  est->X_.Rsg = SO3();
+
+  const number_t dt = 1.0 / kRate;
+  // R_0N over the *accepted* samples only -- the frame the state starts in is
+  // the body frame of the last buffered sample, as ever.
+  const SO3 R_0N = SO3::exp(omega * (n_bad + n_good - 1) * dt);
+  for (int k = 0; k < n_bad + n_good; ++k) {
+    const number_t t = k * dt;
+    const SO3 R_0k = SO3::exp(omega * t);
+    const Vec3 truth = (k < n_bad) ? carried : a_final;
+    est->InertialMeasInternal(
+        timestamp_t(static_cast<int64_t>((ts_base + t) * 1e9)), omega,
+        R_0k.inverse() * (R_0N * truth));
+  }
+  ts_base += (n_bad + n_good) * dt + 1.0;
+
+  ASSERT_TRUE(est->gravity_initialized_);
+  EXPECT_EQ(est->gravity_init_skipped_, n_bad);
+  EXPECT_LT(AngleDeg(-(est->X_.Rsg * est->g_), a_final), 1e-6);
 }

@@ -119,7 +119,7 @@
     "ba": 0.25,
     "Wbc": 0.0001,
     "Tbc": 0.001,
-    "Wsg": 3.01,
+    "Wsg": 0.002,
     "td": 1e-05,
     "Cg": 1e-05,
     "Ca": 1e-05,
@@ -172,7 +172,7 @@
   "max_subfilter_outlier": 0.01,
   "strict_criteria_timesteps": 5,
   "comparison_score_type": "DepthUncertainty",
-  "visual_meas_std": 0.75,
+  "visual_meas_std": 1.2,
   "outlier_thresh": 1.1,
   "oos_meas_std": 1.0,
   "max_depth": 60.0,
@@ -452,5 +452,16 @@
         1.0
       ]
     ]
-  }
+  },
+  "visual_meas_adapt": {
+    "comment": "estimate visual_meas_std online from the median Mahalanobis distance; see notes-euroc/m4-xivo-accuracy-tuning.md",
+    "enable": true,
+    "alpha": 0.15,
+    "min_std": 0.6,
+    "max_std": 4.0,
+    "warmup_updates": 20,
+    "min_samples": 10
+  },
+  "MH_max_strikes": 1,
+  "gravity_init_max_accel_dev": 0.1
 }

@@ -869,6 +869,78 @@ private:
    *  rows to this update, but their state slots are still occupied. */
   int num_mh_deferred_{0};
 
+  // -------------------------------------------------------------------------
+  // Online estimation of the visual measurement noise; see
+  // `AdaptVisualMeasNoise` and notes-euroc/m4-xivo-accuracy-tuning.md.
+  //
+  // `R_` is a single number that has to cover every sequence a config is used
+  // on, and on EuRoC no single number is defensible: with `R_` fixed, the five
+  // Machine Hall sequences want a pixel std of 0.75 and the six Vicon room ones
+  // want 2.4, and the two choices cost each other about 40% of the ATE. That is
+  // not a tuning accident -- Machine Hall is slow and sharp, the Vicon room is
+  // fast and motion-blurred, so the *true* tracking noise really does differ by
+  // a factor of three. The filter can measure it: the Mahalanobis distances
+  // `MHGating` already computes are chi-square(2) distributed exactly when the
+  // assumed noise matches the real one, so their median says which way `R_` is
+  // wrong and by how much.
+  // -------------------------------------------------------------------------
+  /** Whether to re-estimate `R_` online. Off by default, so every existing
+   *  config keeps its fixed, configured value. */
+  bool adapt_R_{false};
+  /** Step size of the geometric EMA on `R_`, per update. 0.05 moves `R_` by 5%
+   *  of the log-distance to the current evidence each frame, i.e. a time
+   *  constant of ~20 updates (1 s at EuRoC's 20 Hz). Small enough that a couple
+   *  of bad frames cannot move it, large enough to converge within the first few
+   *  seconds of a sequence. */
+  number_t adapt_R_alpha_{0.05};
+  /** Hard bounds on the estimate, as variances. These are what make the loop
+   *  safe rather than merely damped: the gate radius grows with `R_`, so a
+   *  runaway would admit worse and worse measurements. */
+  number_t adapt_R_min_{0.25};
+  number_t adapt_R_max_{16.0};
+  /** Updates to let pass before adapting. The state is still settling right
+   *  after initialization -- the covariance is dominated by the priors, not by
+   *  the measurements -- so early Mahalanobis distances say more about `P` than
+   *  about the tracker. */
+  int adapt_R_warmup_{20};
+  /** Fewest in-state features that must have a finite Mahalanobis distance for
+   *  the median to mean anything. */
+  int adapt_R_min_samples_{10};
+  /** The value `MHGating` will adopt at the *start* of the next update. The
+   *  estimate is formed from the residuals of update k and applied from update
+   *  k+1 onward, so the gate and the update within one frame always whiten with
+   *  the same `R_`, and no frame's residual helps choose the covariance it is
+   *  itself whitened by. */
+  number_t R_pending_;
+  int adapt_R_updates_{0};
+  /** Running extremes of sqrt(`R_`), for the census line: the whole claim is
+   *  that the estimate walks to a different place on Machine Hall than in the
+   *  Vicon room, and this is what makes that visible in a run log. */
+  number_t adapt_R_std_min_{0.0}, adapt_R_std_max_{0.0};
+
+  /** Re-estimate `R_` from this update's Mahalanobis distances.
+   *
+   * `dist` is one distance per in-state feature, r' (H P H' + R)^-1 r, as
+   * computed by `MHGating`. If the filter is consistent each is a chi-square
+   * with 2 degrees of freedom, whose median is 2 ln 2 = 1.386. The observed
+   * median over the ratio to that is therefore a direct measure of how far off
+   * the assumed noise is, and `R_` is moved along it in log space.
+   *
+   * The median, and over *all* in-state features rather than the gated inliers:
+   * a mean would be dominated by the few features whose depth is still wrong,
+   * and restricting to inliers would measure the noise only over the residuals
+   * the current `R_` already considers small, which biases the estimate toward
+   * whatever it started at.
+   *
+   * Attributing the whole discrepancy to `R_` is an approximation -- an
+   * inconsistent `P` shows up in the same statistic -- so this is really a
+   * consistency correction that happens to be applied at the measurement
+   * covariance. That is the standard residual-based adaptation and it is the
+   * right place for it here, since `P`'s inconsistency on this filter comes
+   * mostly from linearizing about an estimate that vision then has to fight.
+   */
+  void AdaptVisualMeasNoise(const std::vector<number_t> &dist);
+
   /** Consistent feature initialization; see `InitializeFeatureCovariance`. */
   bool consistent_init_{false};
   int consistent_init_min_views_{2};
@@ -915,10 +987,40 @@ private:
   int gravity_init_counter_;
   std::vector<Vec3> gravity_init_buf_; // buffer of accel measurements for
                                        // gravity initialization
-  /** Gyro and timestamps alongside `gravity_init_buf_`, used only when
-   *  `gravity_init_derotate_` is on. */
-  std::vector<Vec3> gravity_init_gyro_buf_;
-  std::vector<timestamp_t> gravity_init_time_buf_;
+  /** R_0k for each sample in `gravity_init_buf_`, i.e. its attitude relative to
+   *  the first sample seen, used only when `gravity_init_derotate_` is on. The
+   *  gyro is integrated over *every* incoming sample rather than only over the
+   *  buffered ones, so these stay exact even when
+   *  `gravity_init_max_accel_dev_` skips a stretch. */
+  std::vector<Mat3> gravity_init_R_buf_;
+  Mat3 gravity_init_R_run_{Mat3::Identity()};
+  Vec3 gravity_init_last_gyro_{Vec3::Zero()};
+  timestamp_t gravity_init_last_time_{};
+  int gravity_init_seen_{0};
+  /** Reject an accel sample from gravity initialization when
+   *  | |a| - |g| | exceeds this, in m/s^2. A stationary accelerometer reads
+   *  |a| = |g|, so a magnitude that far off carries linear acceleration, and
+   *  averaging it in tilts the initial gravity direction -- which on a filter
+   *  that starts with Rsb = I is an error nothing downstream can distinguish
+   *  from a real one.
+   *
+   * Default 0 disables the gate, so every pre-existing config keeps its exact
+   * initial attitude. It is worth the flag on EuRoC because one sequence in
+   * eleven is badly contaminated and the rest are clean: over the 20-sample
+   * window, MH_01_easy's mean specific force is off by -1.463 m/s^2, while the
+   * next worst (MH_02) is +0.300 and the remaining nine are within 0.08. With
+   * the gate at 0.1 m/s^2, MH_01 collects 20 clean samples by t = 2.10 s and
+   * its error drops to -0.026, MH_02's to -0.008, while V1_01 and the other
+   * already-quiet sequences accept their first 20 samples unchanged and
+   * initialise bit-identically.
+   * See notes-euroc/m4-xivo-accuracy-tuning.md. */
+  number_t gravity_init_max_accel_dev_{0.0};
+  /** Safety valve for the gate: after this many consecutive rejections, accept
+   *  everything. Without it an accelerometer whose scale factor is wrong (so no
+   *  sample ever reads |g|) would never initialise, turning a calibration
+   *  mistake into a silent hang instead of a bad number plus a warning. */
+  int gravity_init_max_skip_{2000};
+  int gravity_init_skipped_{0};
   /** Rotate each buffered accel sample into the body frame of the *last* sample
    *  before averaging, integrating the gyro to get the relative attitude.
    *

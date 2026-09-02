@@ -260,6 +260,14 @@ target_link_libraries(unitTests_gravity_init ${libxivo} ${deps} jsoncpp gtest gt
 add_test(NAME GravityInit COMMAND unitTests_gravity_init
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Drives Estimator::AdaptVisualMeasNoise on a real system, so same linking story
+# as unitTests_gravity_init.
+add_executable(unitTests_adapt_meas_noise
+               test/unittest_adapt_meas_noise.cpp)
+target_link_libraries(unitTests_adapt_meas_noise ${libxivo} ${deps} jsoncpp gtest gtest_main)
+add_test(NAME AdaptMeasNoise COMMAND unitTests_adapt_meas_noise
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # Death tests, so each case forks a fresh CreateSystem singleton. Same linking
 # story as unitTests_gravity_init.
 add_executable(unitTests_memory_pools

@@ -605,6 +605,44 @@ Estimator::Estimator(const Json::Value &cfg)
   MH_thresh_ = cfg_.get("MH_thresh", 5.991).asDouble();
   MH_thresh_multipler_ = cfg_.get("MH_adjust_factor", 1.1).asDouble();
   MH_max_strikes_ = std::max(1, cfg_.get("MH_max_strikes", 1).asInt());
+
+  // Online estimation of the visual measurement noise. Read after
+  // `use_MH_gating_` because it needs it, and after `R_` because it seeds from
+  // it.
+  auto adapt_cfg = cfg_["visual_meas_adapt"];
+  adapt_R_ = adapt_cfg.get("enable", false).asBool();
+  adapt_R_alpha_ = adapt_cfg.get("alpha", 0.05).asDouble();
+  const number_t adapt_min_std = adapt_cfg.get("min_std", 0.5).asDouble();
+  const number_t adapt_max_std = adapt_cfg.get("max_std", 4.0).asDouble();
+  adapt_R_min_ = adapt_min_std * adapt_min_std;
+  adapt_R_max_ = adapt_max_std * adapt_max_std;
+  adapt_R_warmup_ = adapt_cfg.get("warmup_updates", 20).asInt();
+  adapt_R_min_samples_ = adapt_cfg.get("min_samples", 10).asInt();
+  R_pending_ = R_;
+  adapt_R_updates_ = 0;
+  adapt_R_std_min_ = adapt_R_std_max_ = std::sqrt(R_);
+  if (adapt_R_) {
+    // The estimate is formed from the Mahalanobis distances `MHGating` computes,
+    // so with gating off there is nothing to form it from. Fail loudly: silently
+    // ignoring the option would leave a config that looks adaptive running with
+    // a fixed R.
+    if (!use_MH_gating_) {
+      LOG(FATAL) << "visual_meas_adapt.enable requires use_MH_gating";
+    }
+    if (!(adapt_min_std > 0) || !(adapt_max_std >= adapt_min_std)) {
+      LOG(FATAL) << "visual_meas_adapt: need 0 < min_std <= max_std, got "
+                 << adapt_min_std << " and " << adapt_max_std;
+    }
+    if (!(adapt_R_alpha_ > 0) || !(adapt_R_alpha_ <= 1)) {
+      LOG(FATAL) << "visual_meas_adapt.alpha must be in (0, 1], got "
+                 << adapt_R_alpha_;
+    }
+    // Start inside the bounds, or the first update would jump.
+    R_ = R_pending_ = std::min(adapt_R_max_, std::max(adapt_R_min_, R_));
+    LOG(INFO) << "visual_meas_std adapts online from " << std::sqrt(R_)
+              << " px within [" << adapt_min_std << ", " << adapt_max_std
+              << "], alpha=" << adapt_R_alpha_;
+  }
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
   // The key is `feature_owner_change_cov_factor` everywhere else -- in every
@@ -641,9 +679,15 @@ Estimator::Estimator(const Json::Value &cfg)
   // tuning choice, and it costs 0.8-3.0 deg of reported attitude error on
   // TUM-VI. Off restores the old convention exactly.
   gravity_align_output_ = cfg_.get("gravity_align_output", true).asBool();
+  // Default 0 = off, so every existing config keeps its exact initial attitude.
+  gravity_init_max_accel_dev_ =
+      cfg_.get("gravity_init_max_accel_dev", 0.0).asDouble();
+  gravity_init_max_skip_ = cfg_.get("gravity_init_max_skip", 2000).asInt();
+  gravity_init_skipped_ = 0;
   gravity_init_buf_.clear();
-  gravity_init_gyro_buf_.clear();
-  gravity_init_time_buf_.clear();
+  gravity_init_R_buf_.clear();
+  gravity_init_R_run_.setIdentity();
+  gravity_init_seen_ = 0;
   vision_initialized_ = false;
   // reset measurement counter
   imu_counter_ = 0;
@@ -703,30 +747,19 @@ bool Estimator::InitializeGravity() {
 
     // got enough stationary samples, estimate gravity
     Vec3 mean_accel = Vec3::Zero();
-    if (gravity_init_derotate_ && gravity_init_gyro_buf_.size() ==
-                                      gravity_init_buf_.size()) {
+    if (gravity_init_derotate_ &&
+        gravity_init_R_buf_.size() == gravity_init_buf_.size()) {
       // The state starts propagating with Rsb = I in the body frame of the last
       // buffered sample, so that is the frame gravity has to be expressed in.
-      // Integrate the gyro forward to get R_0k for every sample, then map each
-      // one to the final frame with R_Nk = R_0N^T R_0k.
+      // `gravity_init_R_buf_[k]` is R_0k, integrated in InertialMeasInternal
+      // with the midpoint rule over every sample seen (the gyro bias is still
+      // whatever the config seeded -- zero, on every shipped config -- since
+      // there is no stationary stretch to estimate it from yet). Map each
+      // sample to the final frame with R_Nk = R_0N^T R_0k.
       const size_t n = gravity_init_buf_.size();
-      std::vector<Mat3> R_0k(n, Mat3::Identity());
-      for (size_t k = 1; k < n; ++k) {
-        const number_t dt = std::max<number_t>(
-            0.0, std::chrono::duration<number_t>(gravity_init_time_buf_[k] -
-                                                 gravity_init_time_buf_[k - 1])
-                     .count());
-        // Midpoint rule, and the gyro bias is still whatever the config seeded
-        // (zero, on every shipped config) -- there is no stationary stretch to
-        // estimate it from on these sequences.
-        const Vec3 dW =
-            0.5 * (gravity_init_gyro_buf_[k] + gravity_init_gyro_buf_[k - 1]) *
-            dt;
-        R_0k[k] = R_0k[k - 1] * SO3::exp(dW).matrix();
-      }
-      const Mat3 R_N0 = R_0k[n - 1].transpose();
+      const Mat3 R_N0 = gravity_init_R_buf_[n - 1].transpose();
       for (size_t k = 0; k < n; ++k) {
-        mean_accel += R_N0 * R_0k[k] * gravity_init_buf_[k];
+        mean_accel += R_N0 * gravity_init_R_buf_[k] * gravity_init_buf_[k];
       }
       mean_accel /= n;
     } else {
@@ -749,7 +782,8 @@ bool Estimator::InitializeGravity() {
 
     LOG(INFO) << "===== Wsg initialization =====";
     LOG(INFO) << "accel samples=" << gravity_init_buf_.size()
-              << " derotated=" << gravity_init_derotate_;
+              << " derotated=" << gravity_init_derotate_
+              << " skipped=" << gravity_init_skipped_;
     LOG(INFO) << "accel " << accel_calib.transpose();
     LOG(INFO) << "Wsg=" << Wsg.transpose();
     LOG(INFO) << "g=" << g_.transpose();
@@ -795,9 +829,43 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
 
   // initialize imu -- basically gravity
   if (!gravity_initialized_) {
+    // Integrate the gyro across *every* sample, accepted or not, so the
+    // relative attitude of the accepted ones stays exact even when the gate
+    // below skips a stretch. With the gate off nothing is skipped and this
+    // reproduces the previous per-buffered-sample integration exactly.
+    if (gravity_init_seen_ > 0) {
+      const number_t dt = std::max<number_t>(
+          0.0, std::chrono::duration<number_t>(ts - gravity_init_last_time_)
+                   .count());
+      const Vec3 dW = 0.5 * (gyro_new + gravity_init_last_gyro_) * dt;
+      gravity_init_R_run_ = gravity_init_R_run_ * SO3::exp(dW).matrix();
+    }
+    gravity_init_last_gyro_ = gyro_new;
+    gravity_init_last_time_ = ts;
+    ++gravity_init_seen_;
+
+    // Reject samples that cannot be gravity alone. A stationary accelerometer
+    // reads |a| = |g|; a sample whose magnitude is off by more than the
+    // tolerance carries linear acceleration, and averaging it in tilts the
+    // initial gravity direction. The buffer is only allowed to grow with
+    // samples that pass, so init waits for a quiet stretch instead of averaging
+    // over a noisy one. `gravity_init_max_skip_` is the safety valve: if the
+    // accelerometer is miscalibrated in scale, no sample would ever pass and
+    // the filter would never start, so after that many rejections the gate
+    // gives up and accepts everything.
+    if (gravity_init_max_accel_dev_ > 0 &&
+        gravity_init_skipped_ < gravity_init_max_skip_ &&
+        std::abs(accel_new.norm() - g_.norm()) > gravity_init_max_accel_dev_) {
+      ++gravity_init_skipped_;
+      if (gravity_init_skipped_ == gravity_init_max_skip_) {
+        LOG(WARNING) << "gravity init: rejected " << gravity_init_skipped_
+                     << " samples on |a| deviation; giving up on the gate. "
+                     << "Check the accelerometer scale and `gravity`.";
+      }
+      return;
+    }
     gravity_init_buf_.emplace_back(accel_new);
-    gravity_init_gyro_buf_.emplace_back(gyro_new);
-    gravity_init_time_buf_.emplace_back(ts);
+    gravity_init_R_buf_.emplace_back(gravity_init_R_run_);
 
     if (InitializeGravity()) {
       curr_imu_time_ = last_time_ = ts;
@@ -807,8 +875,7 @@ void Estimator::InertialMeasInternal(const timestamp_t &ts, const Vec3 &gyro,
 
       gravity_initialized_ = true;
       gravity_init_buf_.clear();
-      gravity_init_gyro_buf_.clear();
-      gravity_init_time_buf_.clear();
+      gravity_init_R_buf_.clear();
       LOG(INFO) << "IMU initialized";
     }
   } else {

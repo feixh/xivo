@@ -45,3 +45,8 @@ cfg/_ens/
 # scratch variants from the OOS knob sweeps; the tuned results are shipped as
 # cfg/tumvi_{stereo,mono_ctl}_oos.json
 cfg/_oos/
+# Scratch configs written by experiments/openvins/sweep_xivo.sh, one per
+# tuning variant. The measured outcomes live in notes-euroc/, and the winning
+# values are baked into scripts/make_euroc_cfg.py; these are just the temporary
+# patched copies the sweep hands to pyxivo.
+cfg/tune_*.json
