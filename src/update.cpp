@@ -57,6 +57,14 @@ std::vector<FeaturePtr> Estimator::MHGating() {
   num_mh_rejected_ = 0;
   std::vector<FeaturePtr> to_destroy;
 
+  // Adopt the noise estimate formed from the previous update, before anything in
+  // this one reads `R_`. Everything downstream -- this gate, `diagR_`, and the
+  // right-camera variance, which is a multiple of `R_` -- then sees one value for
+  // the whole frame.
+  if (adapt_R_) {
+    R_ = R_pending_;
+  }
+
   // Compute Mahalanobis distance
   for (auto f: instate_features_) {
     const auto &res = f->inn();
@@ -137,6 +145,10 @@ std::vector<FeaturePtr> Estimator::MHGating() {
   CHECK(inliers.size() + to_destroy.size() + num_mh_deferred_ ==
         instate_features_.size());
 #endif
+
+  if (adapt_R_) {
+    AdaptVisualMeasNoise(dist);
+  }
 
   timer_.Tock("MH-gating");
   LOG(INFO) << "MH rejected " << num_mh_rejected_ << " features";
@@ -370,6 +382,61 @@ void Estimator::CleanupOOSFeatures() {
   oos_used_.clear();
 }
 
+void Estimator::AdaptVisualMeasNoise(const std::vector<number_t> &dist) {
+  // The median of a chi-square with 2 degrees of freedom. `dist` is
+  // r' (H P H' + R)^-1 r, which is exactly that when the assumed noise is right,
+  // so the ratio of the observed median to this is how far off R is -- and it is
+  // the *right* fixed point whether or not H P H' is small next to R, because at
+  // the fixed point the whole innovation covariance is consistent.
+  constexpr number_t kChi2TwoDofMedian = 1.3862943611198906; // 2 ln 2
+
+  ++adapt_R_updates_;
+  if (adapt_R_updates_ <= adapt_R_warmup_) {
+    return;
+  }
+
+  // A non-finite distance means a singular innovation covariance or a NaN in the
+  // Jacobian; including it would poison the sort order, and `MHGating` already
+  // treats such a feature as an outlier.
+  std::vector<number_t> nis;
+  nis.reserve(dist.size());
+  for (number_t d : dist) {
+    if (std::isfinite(d) && d >= 0) {
+      nis.push_back(d);
+    }
+  }
+  if (static_cast<int>(nis.size()) < adapt_R_min_samples_) {
+    return;
+  }
+
+  const size_t mid = nis.size() / 2;
+  std::nth_element(nis.begin(), nis.begin() + mid, nis.end());
+  number_t median = nis[mid];
+  if (nis.size() % 2 == 0) {
+    // nth_element leaves everything below `mid` no greater than nis[mid], so the
+    // lower of the two middle values is the largest of that prefix.
+    median = 0.5 * (median +
+                    *std::max_element(nis.begin(), nis.begin() + mid));
+  }
+  if (!(median > 0)) {
+    return;
+  }
+
+  // Geometric EMA: log R <- log R + alpha * log(ratio). A scale parameter should
+  // move multiplicatively -- an additive step that is a sensible fraction of
+  // 4 px^2 is a huge one at 0.25 px^2.
+  const number_t ratio = median / kChi2TwoDofMedian;
+  const number_t R_new = R_ * std::pow(ratio, adapt_R_alpha_);
+  if (!std::isfinite(R_new)) {
+    return;
+  }
+  R_pending_ = std::min(adapt_R_max_, std::max(adapt_R_min_, R_new));
+
+  const number_t std_px = std::sqrt(R_pending_);
+  adapt_R_std_min_ = std::min(adapt_R_std_min_, std_px);
+  adapt_R_std_max_ = std::max(adapt_R_std_max_, std_px);
+}
+
 void Estimator::PrintCensus(std::ostream &os) const {
   const auto &c = census_;
   const auto per = [](long n, long d) { return d ? n / double(d) : 0.0; };
@@ -392,6 +459,14 @@ void Estimator::PrintCensus(std::ostream &os) const {
   if (consistent_init_) {
     os << " consistent-init:" << num_consistent_init_ << "/"
        << (num_consistent_init_ + num_consistent_init_failed_);
+  }
+  if (adapt_R_) {
+    // Current value plus the range walked so far. The claim this option rests on
+    // is that the estimate settles somewhere different on a slow, sharp sequence
+    // than on a fast, blurred one, so print enough to check that rather than just
+    // enough to see that something moved.
+    os << " visual-std:" << std::sqrt(R_) << " (" << adapt_R_std_min_ << ".."
+       << adapt_R_std_max_ << ")";
   }
   os << "\n";
 }

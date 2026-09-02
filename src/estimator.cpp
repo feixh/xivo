@@ -605,6 +605,44 @@ Estimator::Estimator(const Json::Value &cfg)
   MH_thresh_ = cfg_.get("MH_thresh", 5.991).asDouble();
   MH_thresh_multipler_ = cfg_.get("MH_adjust_factor", 1.1).asDouble();
   MH_max_strikes_ = std::max(1, cfg_.get("MH_max_strikes", 1).asInt());
+
+  // Online estimation of the visual measurement noise. Read after
+  // `use_MH_gating_` because it needs it, and after `R_` because it seeds from
+  // it.
+  auto adapt_cfg = cfg_["visual_meas_adapt"];
+  adapt_R_ = adapt_cfg.get("enable", false).asBool();
+  adapt_R_alpha_ = adapt_cfg.get("alpha", 0.05).asDouble();
+  const number_t adapt_min_std = adapt_cfg.get("min_std", 0.5).asDouble();
+  const number_t adapt_max_std = adapt_cfg.get("max_std", 4.0).asDouble();
+  adapt_R_min_ = adapt_min_std * adapt_min_std;
+  adapt_R_max_ = adapt_max_std * adapt_max_std;
+  adapt_R_warmup_ = adapt_cfg.get("warmup_updates", 20).asInt();
+  adapt_R_min_samples_ = adapt_cfg.get("min_samples", 10).asInt();
+  R_pending_ = R_;
+  adapt_R_updates_ = 0;
+  adapt_R_std_min_ = adapt_R_std_max_ = std::sqrt(R_);
+  if (adapt_R_) {
+    // The estimate is formed from the Mahalanobis distances `MHGating` computes,
+    // so with gating off there is nothing to form it from. Fail loudly: silently
+    // ignoring the option would leave a config that looks adaptive running with
+    // a fixed R.
+    if (!use_MH_gating_) {
+      LOG(FATAL) << "visual_meas_adapt.enable requires use_MH_gating";
+    }
+    if (!(adapt_min_std > 0) || !(adapt_max_std >= adapt_min_std)) {
+      LOG(FATAL) << "visual_meas_adapt: need 0 < min_std <= max_std, got "
+                 << adapt_min_std << " and " << adapt_max_std;
+    }
+    if (!(adapt_R_alpha_ > 0) || !(adapt_R_alpha_ <= 1)) {
+      LOG(FATAL) << "visual_meas_adapt.alpha must be in (0, 1], got "
+                 << adapt_R_alpha_;
+    }
+    // Start inside the bounds, or the first update would jump.
+    R_ = R_pending_ = std::min(adapt_R_max_, std::max(adapt_R_min_, R_));
+    LOG(INFO) << "visual_meas_std adapts online from " << std::sqrt(R_)
+              << " px within [" << adapt_min_std << ", " << adapt_max_std
+              << "], alpha=" << adapt_R_alpha_;
+  }
   // FIXME (xfei): used in HuberOnInnovation, but kinda overlaps with MH gating
   outlier_thresh_ = cfg_.get("outlier_thresh", 1.1).asDouble();
   // The key is `feature_owner_change_cov_factor` everywhere else -- in every
