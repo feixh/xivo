@@ -101,6 +101,13 @@ single shared configuration is a genuine constraint rather than a formality.
 * Merge all EuRoC branches back into `auto`, re-verify on the merged tree
   (branch numbers do not compose -- that was the lesson from the TUM-VI round).
 * Update `README.md` with what was done and the outcome.
+* Done. The three branches are a linear chain, so they went in as three
+  `--no-ff` merges (`faa494e`, `4c683bd`, `b562164`) and
+  `git diff --stat auto-eurocfps HEAD` is empty. Re-verified on the merged tree
+  rather than assumed: `make -j32` clean, `ctest` 23/23, and an n=3 stereo pass
+  over all 11 sequences (`results/euroc_m7_merged`) matched members 0-2 of
+  `euroc_m6_final/fast` in all 165 metric cells to the last printed digit
+  (33-run `ate_002` mean 0.097856 on both sides). Report and README written.
 
 ## Protocol carried over from the TUM-VI round
 

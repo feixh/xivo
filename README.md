@@ -415,6 +415,115 @@ per-branch notes are in `notes-n-prompts/notes-{orient,position,speed,oosfast,fr
 OpenVINS baseline itself is in `notes-n-prompts/notes-openvins-baseline/` and
 [`report-openvins-baseline.md`](notes-n-prompts/report-openvins-baseline.md).
 
+Everything above is TUM-VI room1–room6, six sequences in one mocap room. The next
+subsection repeats the exercise on a second, harder dataset.
+
+
+### EuRoC MAV: eleven sequences, one shared configuration
+
+The brief: run the same head-to-head on the [EuRoC MAV dataset](https://docs.openvins.com/gs-datasets.html#gs-data-euroc)
+in **stereo + IMU**, with **one XIVO configuration shared by all eleven sequences**
+rather than one per sequence, benchmark accuracy *and* runtime, and tune XIVO to
+match or beat OpenVINS. Same reference (OpenVINS v2.7 built ROS-free, run on this
+machine), same evaluation code, same core. Three branches on isolated `git
+worktree`s, merged into `auto`; `ctest` is 23/23 on the merged tree.
+
+XIVO is n=10, OpenVINS n=6, all eleven sequences, stereo. `±` is the standard error
+of the eleven-sequence mean; bold is best of three:
+
+| metric | XIVO `acc` | **XIVO shipped** | OpenVINS |
+| --- | --- | --- | --- |
+| ATE@0.02 [m] | 0.0950 ± 0.0009 | 0.1028 ± 0.0016 | **0.0941** ± 0.0006 |
+| ATE position, `posyaw` [m] | 0.1035 ± 0.0009 | 0.1102 ± 0.0016 | **0.0972** ± 0.0006 |
+| ATE orientation [deg] | 1.709 ± 0.009 | **1.706** ± 0.010 | 1.773 ± 0.010 |
+| RPE 8 m, position [m] | **0.1093** ± 0.0003 | 0.1109 ± 0.0005 | 0.1168 ± 0.0007 |
+| RPE 8 m, orientation [deg] | **0.852** ± 0.002 | 0.867 ± 0.003 | 0.902 ± 0.005 |
+
+**XIVO wins three of the five metrics** — both orientation metrics and the position
+drift rate — each by 4.6–9.9 combined standard errors, **ties ATE@0.02** at the
+accurate operating point (0.8 σ) and **loses absolute ATE position**. Across the 55
+per-sequence-per-metric cells XIVO takes 32, OpenVINS 23. Divergences, stereo: 0 of
+110, 0 of 110, 0 of 66 — the XIVO baseline this round started from diverged on 15 of
+66.
+
+Efficiency, one core, same protocol as above, whole-process wall clock including PNG
+decode, `-mode runOnly`:
+
+| | ms/frame | FPS | peak RSS | vs OpenVINS |
+| --- | --- | --- | --- | --- |
+| XIVO after accuracy tuning (M4) | 14.756 | 67.8 | 95.3 MB | +37.4% |
+| XIVO `acc` | 13.921 | 71.8 | 96.2 MB | +29.7% |
+| **XIVO shipped** | **11.593** | **86.3** | **97.1 MB** | **+8.0%** |
+| OpenVINS | 10.737 | 93.1 | 99.2 MB | — |
+
+So 8.0% behind end-to-end at 4.3× real time on one core, using 3.0 MB less peak
+RSS. XIVO's decode (2.972 vs 3.197 ms) and its front end are both *faster*; the
+whole residual gap is the EKF path — 90 in-state features and a 20-pose OOS window
+against OpenVINS' 50 SLAM features and 11 clones — which is state size, not
+implementation slack. Estimator-only, the gap is +14.3%.
+
+**The eleven-sequence near-tie is two large opposite effects cancelling**, and that
+is the most substantive result of the round:
+
+| ATE@0.02 | XIVO `acc` | XIVO shipped | OpenVINS |
+| --- | --- | --- | --- |
+| Machine Hall (5 sequences) | **0.0848** | 0.0883 | 0.1351 |
+| Vicon Room (6 sequences) | 0.1036 | 0.1148 | **0.0599** |
+
+XIVO is **37% better on Machine Hall** (large, dim, distant structure, slow flight;
+OpenVINS' two worst sequences on the dataset are both here) and OpenVINS is **42%
+better on Vicon Room** (small, bright, fast, high feature churn). On the two
+sequences XIVO loses worst, RPE-8 disagrees with ATE — V2_03 is 1.8× worse on ATE
+and *equal* on RPE-8 — so those losses are a few transient excursions that ATE
+integrates and RPE-8 averages out, not a uniformly worse motion estimate.
+
+Run it like any other dataset; `cfg/euroc_*.json` are generated from the dataset's
+own per-sensor calibration, which is byte-identical across all eleven sequences, so
+one shared config is what EuRoC itself says rather than a concession to the brief:
+
+    python scripts/make_euroc_cfg.py --base cfg/eff_stereo.json \
+      --seqdir /path/to/euroc/MH_01_easy --out cfg/euroc_stereo.json
+    python scripts/pyxivo.py -root /path/to/euroc -dataset euroc \
+      -seq MH_01_easy -cfg cfg/euroc_stereo.json -mode eval -dump /tmp/out
+
+What each branch did:
+
+| | branch | what | effect |
+| --- | --- | --- | --- |
+| 1 | `auto-euroc` | dataset support — a `euroc` loader branch, per-dataset ground-truth paths, and `scripts/make_euroc_cfg.py` generating the shared config from `sensor.yaml` — plus both baselines | XIVO runs all 11; 15 of 66 stereo runs diverge, and it already wins MH_02/03/05 |
+| 2 | `auto-eurocacc` | `P.Wsg` 3.01 → 0.002 (a 1.73 rad prior on which way is down); a `gravity_init_max_accel_dev` stationarity gate; and `Estimator::AdaptVisualMeasNoise`, a χ²(2)-median consistency loop on the visual measurement noise | ATE 0.138 → **0.095**, and **0 of 66 divergences** in each mode |
+| 3 | `auto-eurocfps` | per-stage front-end instrumentation, then substituting `FAST.threshold 7` on the raw image for CLAHE at 20 — matched candidate supply (6357 vs 6913 per detecting frame) for 0.36 ms instead of 2.06 | 14.756 → **11.593** ms/frame, +0.008 m; the final evaluation |
+
+Four qualifications:
+
+- **The one-configuration constraint is the whole gap, and it is structural.**
+  `visual_meas_std` wants 0.75 px on all five Machine Hall sequences and 1.8–2.4 px
+  on five of six Vicon Room ones — the scenes really do differ ~3× in tracking
+  noise. A per-sequence oracle (which the brief forbids) scores 0.098, level with
+  OpenVINS; one fixed value costs ~40%. That is what motivated measuring the noise
+  online instead of choosing it, which is worth 40% against its own control.
+- **OpenVINS was fixed, not handicapped.** With its shipped config it diverges on
+  MH_04 in 6 of 6 members (~9349 m): its initializer uses feature disparity < 10 px
+  as a proxy for stillness, and MH_04 takes off at 0.47 m/s in a scene tens of
+  metres deep, so it asserts zero velocity on a moving platform. It was given its
+  own dynamic initializer (`--init_dyn_use 1`) uniformly on all eleven — all five
+  Machine Hall sequences improve and **all six Vicon Room sequences are
+  bit-identical**. Every OpenVINS number here is the fixed baseline.
+- **Two operating points, and the shipped one is not the more accurate one.**
+  `acc` (CLAHE + `FAST.threshold 20`, two flags away) is ≥ shipped on all five
+  metrics for 2.328 ms/frame more. Shipped wins on three grounds: it is the only
+  one of the three configs that keeps *monocular* MH_01 alive (`acc` diverges there
+  in 10 of 10 members), it closes the throughput gap to 8%, and it is what the
+  generator emits.
+- **Monocular is reported but not tuned, and OpenVINS wins it 4 metrics to 1**
+  (0.185 vs 0.145 m ATE@0.02). Losing the stereo baseline's scale observability
+  amplifies exactly the Vicon Room weakness above.
+
+The full write-up — every measurement, every negative result, the protocol, the
+methodological findings, and the commands to reproduce each table — is
+[`notes-n-prompts/report-xivo-vs-openvins-euroc.md`](notes-n-prompts/report-xivo-vs-openvins-euroc.md);
+per-milestone notes are in `notes-n-prompts/notes-euroc/`.
+
 ---
 ## [LICENSE AND DISCLAIMER ARE COPIED FROM THE ORIGINAL REPO]
 
