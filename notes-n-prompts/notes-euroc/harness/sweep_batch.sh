@@ -7,7 +7,8 @@
 # Each argument is one variant: a name, then whitespace-separated patches, each
 # forwarded as `--patch`. The common patches every variant in the batch shares go
 # in $COMMON (also whitespace-separated), the screen set in $SEQS, the worktree
-# to run against in $WORKTREE, and the members per variant in $MEMBERS.
+# to run against in $WORKTREE, the members per variant in $MEMBERS, and the
+# results root in $OUT.
 #
 # $WORKTREE matters more than it looks: a batch that patches a config key the
 # target worktree's binary does not read will run happily and report the control
@@ -26,8 +27,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${COMMON:=}"
 : "${WORKTREE:=xivo-euroc}"
 : "${MEMBERS:=3}"
+# $OUT keeps one batch's variants out of another's namespace. It matters because
+# the variant name is the only thing distinguishing two runs in a shared root, so
+# a batch that reuses a name from an earlier milestone silently overwrites it --
+# and the overwrite is invisible once the log has scrolled.
+: "${OUT:=../results/euroc_tune}"
 export CPU_BASE="${CPU_BASE:-0}" CPU_SPAN="${CPU_SPAN:-60}"
-echo "batch: worktree=$WORKTREE members=$MEMBERS common='$COMMON'"
+echo "batch: worktree=$WORKTREE members=$MEMBERS out=$OUT common='$COMMON'"
 
 rc=0
 for spec in "$@"; do
@@ -36,7 +42,7 @@ for spec in "$@"; do
   args=()
   for p in "$@"; do args+=(--patch "$p"); done
   for p in $COMMON; do args+=(--patch "$p"); done
-  if "$HERE/sweep_xivo.sh" --name "$name" --seqs "$SEQS" \
+  if "$HERE/sweep_xivo.sh" --name "$name" --seqs "$SEQS" --out "$OUT" \
        --worktree "$WORKTREE" --members "$MEMBERS" "${args[@]}"; then
     :
   else
