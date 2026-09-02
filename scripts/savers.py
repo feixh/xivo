@@ -41,7 +41,13 @@ class TUMVISaver:
                     if (len(v) >= 8):
                         ts = int(v[0])
                         t = [float(x) for x in v[1:4]]
-                        q = [float(x) for x in v[4:]]  # [w, x, y, z]
+                        # Columns 4..7 are the quaternion. Sliced explicitly
+                        # rather than as v[4:]: TUM-VI's mocap0 rows are exactly
+                        # 8 columns, but EuRoC's state_groundtruth_estimate0 has
+                        # 17 (velocity and the two biases follow the pose), and
+                        # the old open-ended slice only picked the right four
+                        # there by accident of q[0..3] being read afterwards.
+                        q = [float(x) for x in v[4:8]]  # [w, x, y, z]
                         gt.append(
                             [ts * 1e-9, t[0], t[1], t[2], q[1], q[2], q[3], q[0]])
 
@@ -49,6 +55,24 @@ class TUMVISaver:
             groundtruthPath,
             gt,
             fmt='%f %f %f %f %f %f %f %f')
+
+
+class EuRoCSaver(TUMVISaver):
+    """EuRoC MAV groundtruth.
+
+    Same row layout as TUM-VI's mocap0 in its leading columns (ts, p_xyz,
+    q_wxyz), so saveMocapAs is reused verbatim; only the path differs. EuRoC's
+    file is `state_groundtruth_estimate0`, the Leica/Vicon + IMU fusion, which
+    unlike TUM-VI's mocap0 covers the whole trajectory rather than a mocap
+    volume. Its pose is that of the body frame, and EuRoC defines body = imu0
+    (T_BS is identity in imu0/sensor.yaml), which is the frame XIVO's gsb
+    reports -- so no frame conversion belongs here.
+    """
+    def __init__(self, args):
+        mocapPath = os.path.join(args.root, args.seq, 'mav0',
+                                 'state_groundtruth_estimate0', 'data.csv')
+        groundtruthPath = get_xivo_gt_filename(args.dump, "euroc", args.seq)
+        self.saveMocapAs(mocapPath, groundtruthPath)
 
 
 class CarlaSaver(TUMVISaver):
@@ -342,6 +366,30 @@ class TUMVITrackerDumpModeSaver(TrackerDumpModeSaver, TUMVISaver):
     def __init__(self, args):
         TrackerDumpModeSaver.__init__(self, args)
         TUMVISaver.__init__(self, args)
+
+
+class EuRoCEvalModeSaver(EvalModeSaver, EuRoCSaver):
+    def __init__(self, args):
+        EvalModeSaver.__init__(self, args)
+        EuRoCSaver.__init__(self, args)
+
+
+class EuRoCDumpModeSaver(DumpModeSaver, EuRoCSaver):
+    def __init__(self, args):
+        DumpModeSaver.__init__(self, args)
+        EuRoCSaver.__init__(self, args)
+
+
+class EuRoCCovDumpModeSaver(CovDumpModeSaver, EuRoCSaver):
+    def __init__(self, args):
+        CovDumpModeSaver.__init__(self, args)
+        EuRoCSaver.__init__(self, args)
+
+
+class EuRoCTrackerDumpModeSaver(TrackerDumpModeSaver, EuRoCSaver):
+    def __init__(self, args):
+        TrackerDumpModeSaver.__init__(self, args)
+        EuRoCSaver.__init__(self, args)
 
 
 class CarlaEvalModeSaver(EvalModeSaver, CarlaSaver):

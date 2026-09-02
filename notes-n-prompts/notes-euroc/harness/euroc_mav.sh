@@ -35,3 +35,11 @@ seq_config() {
 
 # No per-sequence overrides: one configuration for all 11 sequences.
 seq_extra() { echo ""; }
+
+# --- XIVO side ------------------------------------------------------------
+# EuRoC needs its own loader in scripts/pyxivo.py (the ASL folder sits directly
+# under the sequence name) and its own config, generated from the dataset's
+# sensor.yaml files by scripts/make_euroc_cfg.py. One config for all 11
+# sequences, matching what OpenVINS does here.
+PROFILE_XIVO_DATASET="euroc"
+PROFILE_XIVO_CFG_PREFIX="euroc"

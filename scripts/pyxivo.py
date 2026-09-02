@@ -37,7 +37,7 @@ parser.add_argument("-root", default="/media/data1/Data/tumvi/exported/euroc/512
 parser.add_argument("-dump", default=".",
     help="location of xivo's output data from a dataset")
 parser.add_argument("-dataset", default="tumvi",
-    help="name of a (supported) VIO dataset [tumvi|cosyvio|alphred|xivo|void]")
+    help="name of a (supported) VIO dataset [tumvi|euroc|cosyvio|alphred|xivo|void]")
 parser.add_argument("-seq", default="room1",
     help="short tag for sequence name")
 parser.add_argument("-cam_id", default=0, type=int,
@@ -66,6 +66,8 @@ def main(args):
     if args.mode == 'eval':
         if args.dataset == 'tumvi':
             saver = savers.TUMVIEvalModeSaver(args)
+        elif args.dataset == 'euroc':
+            saver = savers.EuRoCEvalModeSaver(args)
         elif args.dataset == 'cosyvio':
             saver = savers.COSYVIOEvalModeSaver(args)
         elif args.dataset == "xivo":
@@ -77,6 +79,8 @@ def main(args):
     elif args.mode == 'dump':
         if args.dataset == 'tumvi':
             saver = savers.TUMVIDumpModeSaver(args)
+        elif args.dataset == 'euroc':
+            saver = savers.EuRoCDumpModeSaver(args)
         elif args.dataset == 'cosyvio':
             saver = savers.COSYVIODumpModeSaver(args)
         elif args.dataset == "xivo":
@@ -88,6 +92,8 @@ def main(args):
     elif args.mode == 'dumpCov':
         if args.dataset == 'tumvi':
             saver = savers.TUMVICovDumpModeSaver(args)
+        elif args.dataset == 'euroc':
+            saver = savers.EuRoCCovDumpModeSaver(args)
         elif args.dataset == 'cosyvio':
             saver = savers.COSYVIOCovDumpModeSaver(args)
         elif args.dataset == "xivo":
@@ -116,6 +122,16 @@ def main(args):
             img_dir_r = os.path.join(
                 args.root, 'dataset-{}_512_16'.format(args.seq), 'mav0',
                 'cam{}'.format(1 - args.cam_id), 'data')
+    elif args.dataset == 'euroc':
+        # EuRoC ships the ASL folder directly under the sequence name, with no
+        # dataset-*_512_16 wrapper, and cam0/cam1 are a hardware-triggered pair
+        # named after the shared timestamp exactly as in TUM-VI.
+        img_dir = os.path.join(args.root, args.seq, 'mav0',
+                               'cam{}'.format(args.cam_id), 'data')
+        imu_path = os.path.join(args.root, args.seq, 'mav0', 'imu0', 'data.csv')
+        if stereo:
+            img_dir_r = os.path.join(args.root, args.seq, 'mav0',
+                                     'cam{}'.format(1 - args.cam_id), 'data')
     elif args.dataset == 'cosyvio':
         img_dir = os.path.join(args.root, 'data', args.sen, args.seq, 'frames')
         imu_path = os.path.join(args.root, 'data', args.sen, args.seq, 'data.csv')
@@ -126,7 +142,7 @@ def main(args):
         img_dir = os.path.join(args.root, args.seq, 'rgb')
         imu_path = os.path.join(args.root, args.seq, 'imu', 'data.csv')
     else:
-        raise ValueError('unknown dataset argument; choose from tumvi, xivo, cosyvio, carla')
+        raise ValueError('unknown dataset argument; choose from tumvi, euroc, xivo, cosyvio, carla')
 
     if stereo and img_dir_r is None:
         raise ValueError(
@@ -160,7 +176,7 @@ def main(args):
         right_ts = {int(os.path.basename(p)[:-4]): p
                     for p in glob.glob(os.path.join(img_dir_r, '*.png'))}
 
-    if args.dataset in ['tumvi', 'xivo', 'carla', 'void']:
+    if args.dataset in ['tumvi', 'euroc', 'xivo', 'carla', 'void']:
         for p in glob.glob(os.path.join(img_dir, '*.png')):
             ts = int(os.path.basename(p)[:-4])
             if stereo:
@@ -225,7 +241,7 @@ def main(args):
     ########################################
     viewer_cfg = ''
     if args.use_viewer:
-        if args.dataset == 'tumvi':
+        if args.dataset in ('tumvi', 'euroc'):
             viewer_cfg = os.path.join('cfg', 'viewer.json')
         elif args.dataset == "xivo":
             viewer_cfg = os.path.join('cfg', 'phab_viewer.json')
