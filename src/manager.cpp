@@ -224,6 +224,18 @@ void Estimator::UpdateStep(const timestamp_t &ts,
   if (print_timing_ && ++print_counter % 50 == 0) {
     std::cout << print_counter << std::endl;
     std::cout << timer_;
+    // The front end is the majority of `track`, so print its own breakdown here
+    // rather than leaving one opaque number. Careful with the `detect-*` events:
+    // they run only on a frame that fell below `num_features_min`, so the Timer
+    // divides by that count and their figures are per *detecting* frame -- scale
+    // by detect-frames/frames before comparing them with the rest.
+    if (auto tracker = Tracker::instance()) {
+      std::cout << tracker->timer();
+      std::cout << "[tracker]detect-frames:" << tracker->num_detect_frames()
+                << " of " << census_.frames
+                << ", raw FAST detections per detecting frame:"
+                << tracker->mean_raw_detections() << std::endl;
+    }
     PrintCensus(std::cout);
   }
 

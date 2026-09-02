@@ -303,6 +303,11 @@ def main(args):
     finally:
         if stereo and estimator is not None:
             print_stereo_stats(estimator)
+        if estimator is not None:
+            # Image read+decode, which the estimator's own timers do not cover
+            # and which is a quarter of the measured frame on EuRoC stereo. Also
+            # says whether the fast PNG path was taken -- it declines silently.
+            estimator.ReportDecode()
         if args.mode != 'runOnly':
             saver.onResultsReady()
 
