@@ -245,6 +245,83 @@ def main():
     ap.add_argument('--bias_scale', type=float, default=1.0,
                     help='multiply the two random-walk densities by this. The '
                          'shipped TUM-VI config uses ~0.3x (%(default)s).')
+
+    # --- front end: the knobs the efficiency pass moves ------------------------
+    # These are written out explicitly even when left at their default. Two
+    # reasons. Reading a shipped config should not require reading tracker.cpp to
+    # find out what `clahe_grid_size` actually is; and sweep_xivo.sh deliberately
+    # refuses to patch a key that is absent from the config, because inventing one
+    # is how a sweep silently measures the control eleven times -- so a knob that
+    # is not spelled out here cannot be screened at all.
+    ap.add_argument('--histogram_method', default='NONE',
+                    choices=['NONE', 'HISTOGRAM', 'CLAHE', 'GAINMAP'],
+                    help='pre-equalization. CLAHE is the single most expensive '
+                         'front-end stage on EuRoC -- 2.06 of the 6.26 ms/frame '
+                         'front end, all of it the bilinear interpolation pass, '
+                         'so no grid size makes it cheap -- and what it buys is '
+                         'not supply or match quality but the *distribution* of '
+                         'corners, by lifting dark regions over --fast_threshold. '
+                         'NONE plus --fast_threshold 7 buys that back for 0.36 '
+                         'ms/frame instead of 2.06. See '
+                         'notes-euroc/m5-xivo-efficiency-tuning.md sec 5 and 8.2. '
+                         '(default: %(default)s)')
+    ap.add_argument('--fast_threshold', type=int, default=7,
+                    help='FAST detector threshold. Tuned jointly with '
+                         '--histogram_method, not independently: 20 on a CLAHE\'d '
+                         'image and 7 on the raw one yield near-identical '
+                         'candidate supply (6913 vs 6357 per detecting frame). '
+                         'Leaving this at 20 with NONE gives 1615, which is '
+                         'still ample for --num_features_max but costs 0.007 m '
+                         'of ATE and, together with --klt_max_level 2, makes '
+                         'V2_02_medium intermittently diverge. '
+                         '(default: %(default)s)')
+    ap.add_argument('--equalize_for', default='ALL', choices=['ALL', 'DETECT'],
+                    help='whether equalization feeds everything or only the '
+                         'detector. DETECT with CLAHE is actively unsafe on '
+                         'EuRoC -- V2_03_difficult reaches ATE 1.53 -- because '
+                         'CLAHE is local and non-monotonic, so the corners it '
+                         'finds do not sit on gradients of the raw image the KLT '
+                         'then tracks. (default: %(default)s)')
+    ap.add_argument('--clahe_clip_limit', type=float, default=10.0,
+                    help='CLAHE contrast clip; the tracker.cpp default '
+                         '(%(default)s)')
+    ap.add_argument('--clahe_grid_size', type=int, default=8,
+                    help='CLAHE tile grid, per side; the tracker.cpp default '
+                         '(%(default)s)')
+    ap.add_argument('--klt_win_size', type=int, default=15,
+                    help='KLT window, per side (default: %(default)s)')
+    ap.add_argument('--klt_max_level', type=int, default=2,
+                    help='KLT pyramid levels minus one. 2 is accuracy-neutral '
+                         'on all 11 sequences and saves 0.56 ms/frame plus 4.7 '
+                         'MB of pyramid. (default: %(default)s)')
+    ap.add_argument('--klt_max_iter', type=int, default=30,
+                    help='KLT iterations per level. Do not lower this without '
+                         'remeasuring: 15 costs +0.001 m of ATE with CLAHE on '
+                         'and +0.006 with it off, because a lower-contrast image '
+                         'needs more iterations to converge. Knob prices on this '
+                         'front end are not independent of each other. '
+                         '(default: %(default)s)')
+    ap.add_argument('--num_features_max', type=int, default=180,
+                    help='feature supply target (default: %(default)s)')
+    ap.add_argument('--num_features_min', type=int, default=135,
+                    help='detect when the live count falls below this '
+                         '(default: %(default)s)')
+    ap.add_argument('--stereo_max_level', type=int, default=2,
+                    help='pyramid levels minus one for the left->right match. '
+                         'Kept <= --klt_max_level so MatchStereo can reuse the '
+                         'temporal pyramid instead of building its own. '
+                         '(default: %(default)s)')
+    ap.add_argument('--seed_prev_disparity', action='store_true',
+                    help='seed the left->right KLT from the previous frame\'s '
+                         'disparity. Raises the stereo match rate 79.2 -> 82.0%% '
+                         'and saves 0.21 ms/frame, at +0.002 m ATE.')
+    ap.add_argument('--fast_png_decode', action='store_true', default=False,
+                    help='use XIVO\'s own PNG decoder instead of cv::imdecode. '
+                         'Off by default here, unlike TUM-VI: the fast path wins '
+                         'when there is a 16->8 bit strip to fuse into the '
+                         'unfilter, and EuRoC is 8-bit and near-incompressible, '
+                         'so it is a 0.30 ms/frame *loss*. Output is '
+                         'bit-identical either way (results/euroc_pngcheck).')
     args = ap.parse_args()
 
     cfg = load_jsonc(args.base)
@@ -308,6 +385,27 @@ def main():
     cfg['MH_max_strikes'] = args.MH_max_strikes
     cfg['gravity_init_max_accel_dev'] = args.gravity_init_max_accel_dev
 
+    tc = cfg['tracker_cfg']
+    tc['histogram_method'] = args.histogram_method
+    tc['equalize_for'] = args.equalize_for
+    tc['clahe_clip_limit'] = args.clahe_clip_limit
+    tc['clahe_grid_size'] = args.clahe_grid_size
+    tc['num_features_max'] = args.num_features_max
+    tc['num_features_min'] = args.num_features_min
+    tc['FAST']['threshold'] = args.fast_threshold
+    tc['KLT']['win_size'] = args.klt_win_size
+    tc['KLT']['max_level'] = args.klt_max_level
+    tc['KLT']['max_iter'] = args.klt_max_iter
+    cfg['fast_png_decode'] = args.fast_png_decode
+    if args.stereo_max_level > args.klt_max_level:
+        # MatchStereo reuses the temporal pyramid when the stereo match needs no
+        # more levels and no larger window than the KLT already built; violating
+        # that silently doubles the pyramid work instead of erroring.
+        raise SystemExit(
+            f'--stereo_max_level {args.stereo_max_level} exceeds --klt_max_level '
+            f'{args.klt_max_level}, which forces MatchStereo to build a second '
+            'pyramid')
+
     if args.mono:
         cfg['stereo'] = False
         for k in ('camera1_cfg', 'stereo_cfg', 'stereo_init', 'stereo_update'):
@@ -321,6 +419,8 @@ def main():
             "comment": "T_BS(cam1)^-1 T_BS(cam0) from sensor.yaml: cam0 -> cam1",
             "T_c1c0": [[float(x) for x in row] for row in T_c1_c0],
         }
+        tc['stereo_matching']['max_level'] = args.stereo_max_level
+        tc['stereo_matching']['seed_prev_disparity'] = args.seed_prev_disparity
 
     with open(args.out, 'w') as f:
         json.dump(cfg, f, indent=2)

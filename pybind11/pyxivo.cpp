@@ -6,6 +6,7 @@
 #include "estimator.h"
 #include "camera_manager.h"
 #include "pngfast.h"
+#include "timer.h"
 #include "stereo.h"
 #include "opencv2/core/eigen.hpp"
 #include "opencv2/highgui/highgui.hpp"
@@ -164,7 +165,9 @@ public:
 
   void VisualMeas(uint64_t ts, std::string &image_path) {
 
+    decode_timer_.Tick("decode");
     auto image = ReadImage(image_path);
+    decode_timer_.Tock("decode");
 
     estimator_->VisualMeas(timestamp_t{ts}, image);
 
@@ -199,8 +202,10 @@ public:
   void VisualMeasStereo(uint64_t ts, std::string &image_path,
                         std::string &image_path_r) {
 
+    decode_timer_.Tick("decode");
     auto image = ReadImage(image_path);
     auto image_r = ReadImage(image_path_r);
+    decode_timer_.Tock("decode");
     if (image.empty()) {
       LOG(FATAL) << "failed to read left image " << image_path;
     }
@@ -222,7 +227,9 @@ public:
 
   void VisualMeasTrackerOnly(uint64_t ts, std::string &image_path) {
 
+    decode_timer_.Tick("decode");
     auto image = ReadImage(image_path);
+    decode_timer_.Tock("decode");
 
     estimator_->VisualMeasTrackerOnly(timestamp_t{ts}, image);
 
@@ -468,6 +475,27 @@ public:
       viewer_->Refresh();
   }
 
+  /** Image read + decode, and whether the fast PNG path was actually taken.
+   *
+   *  Both exist because the estimator's own timers do not add up to the wall
+   *  clock and the difference was being attributed by guesswork: on EuRoC stereo
+   *  they total 11.0 ms against a 14.9 ms frame, and 4 ms is a quarter of the
+   *  measured throughput. Decode is the bulk of it, and it is a cost OpenVINS
+   *  pays too (`run_euroc_folder` reports `wall_imread_s`), so having it as a
+   *  number on both sides is what makes the estimator-only comparison possible.
+   *
+   *  The fast/fallback split is the other half: `SetFastPngDecode` silently
+   *  declines any PNG `DecodeGrayPng` does not handle, so a config with
+   *  `fast_png_decode: true` and a dataset it refuses looks exactly like a
+   *  config without it. Nothing checked that until now. */
+  void ReportDecode() const {
+    std::cout << decode_timer_;
+    std::cout << "[decode]fast:" << NumFastPngDecoded()
+              << " fallback:" << NumFastPngFallback()
+              << " enabled:" << (FastPngDecodeEnabled() ? "yes" : "no")
+              << std::endl;
+  }
+
 private:
   EstimatorPtr estimator_;
   CameraPtr camera_;
@@ -476,6 +504,7 @@ private:
   std::string name_;
   int imu_calls_, visual_calls_;
   bool tracker_only_;
+  Timer decode_timer_{"decode"};
 };
 
 bool EstimatorWrapper::glog_init_{false};
@@ -559,6 +588,7 @@ PYBIND11_MODULE(pyxivo, m) {
       .def("VisionInitialized", &EstimatorWrapper::VisionInitialized)
       .def("now", &EstimatorWrapper::now)
       .def("Visualize", &EstimatorWrapper::Visualize)
+      .def("ReportDecode", &EstimatorWrapper::ReportDecode)
       .def("gauge_group", &EstimatorWrapper::gauge_group)
       .def("CameraIntrinsics", &EstimatorWrapper::CameraIntrinsics)
       .def("CameraDistortionType", &EstimatorWrapper::CameraDistortionType)

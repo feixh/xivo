@@ -4,7 +4,7 @@
   "use_canvas": true,
   "use_debug_view": false,
   "async_run": false,
-  "fast_png_decode": true,
+  "fast_png_decode": false,
   "print_bias_info": true,
   "draw_OOS": true,
   "integration_method": "PrinceDormand",
@@ -287,13 +287,13 @@
     "max_pixel_displacement": 64,
     "normalize": false,
     "grayscale": true,
-    "histogram_method": "CLAHE",
+    "histogram_method": "NONE",
     "subpix_refine": true,
     "match_dropped_tracks": false,
     "do_outlier_rejection": false,
     "KLT": {
       "win_size": 15,
-      "max_level": 4,
+      "max_level": 2,
       "max_iter": 30,
       "eps": 0.01
     },
@@ -310,7 +310,7 @@
     "tracker_type": "LK",
     "detector": "FAST",
     "FAST": {
-      "threshold": 20,
+      "threshold": 7,
       "nonmaxSuppression": true
     },
     "BRISK": {
@@ -370,7 +370,10 @@
       "circular_thresh": 1.0,
       "min_disparity": 1.0,
       "max_disparity": 150.0
-    }
+    },
+    "equalize_for": "ALL",
+    "clahe_clip_limit": 10.0,
+    "clahe_grid_size": 8
   },
   "mapper_cfg": {
     "detectLoopClosures": false,

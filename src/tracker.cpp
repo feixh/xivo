@@ -552,12 +552,18 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
                        bool check_homography, cv::Mat H)
 {
   std::vector<cv::KeyPoint> kps;
+  timer_.Tick("detect-fast");
   detector_->detect(img, kps, mask_);
+  timer_.Tock("detect-fast");
+  num_raw_detections_ += static_cast<long>(kps.size());
+  ++num_detect_frames_;
   // sort
+  timer_.Tick("detect-sort");
   std::sort(kps.begin(), kps.end(),
             [](const cv::KeyPoint &kp1, const cv::KeyPoint &kp2) {
               return kp1.response > kp2.response;
             });
+  timer_.Tock("detect-sort");
 
   cv::Mat descriptors;
   if (extract_descriptor_) {
@@ -681,7 +687,9 @@ void Tracker::DetectLK(const cv::Mat &img, int num_to_add,
   for (const auto &s : selected) {
     pts.push_back(kps[s.kp_index].pt);
   }
+  timer_.Tick("detect-subpix");
   RefineSubPix(img, pts);
+  timer_.Tock("detect-subpix");
 
   for (size_t j = 0; j < selected.size(); ++j) {
     const int i = selected[j].kp_index;
@@ -735,10 +743,12 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
   // `DETECT` neither is equalized -- detection only ever happens on the left --
   // so the pair stays consistent and the right image's equalization, which no
   // detector ever reads, is not computed at all.
+  timer_.Tick("equalize-right");
   const cv::Mat &gray_r = ToGray(image_r, img_r_gray_);
   img_r_ = equalize_scope_ == EqualizeScope::DETECT
                ? gray_r
                : Equalize(gray_r, img_r_eq_, /*cam=*/1);
+  timer_.Tock("equalize-right");
   ++num_stereo_frames_;
 
   // Left-image temporal tracking is exactly the monocular path: the stereo run
@@ -746,7 +756,9 @@ void Tracker::UpdateStereo(const cv::Mat &image, const cv::Mat &image_r) {
   Update(image);
 
   // Then attach a right observation to whichever left features survived.
+  timer_.Tick("stereo-match");
   MatchStereo();
+  timer_.Tock("stereo-match");
 }
 
 
@@ -801,6 +813,7 @@ void Tracker::MatchStereo() {
   const bool reuse_left = pyramid_is_current_ &&
                           stereo_win_size_ == win_size_ &&
                           stereo_max_level_ <= max_level_;
+  timer_.Tick("stereo-pyramid");
   std::vector<cv::Mat> pyr_l_own, pyr_r;
   if (!reuse_left) {
     cv::buildOpticalFlowPyramid(img_, pyr_l_own,
@@ -811,6 +824,7 @@ void Tracker::MatchStereo() {
   cv::buildOpticalFlowPyramid(img_r_, pyr_r,
                               cv::Size(stereo_win_size_, stereo_win_size_),
                               stereo_max_level_);
+  timer_.Tock("stereo-pyramid");
 
   cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
                             max_iter_, eps_);
@@ -847,9 +861,11 @@ void Tracker::MatchStereo() {
   // OpenCV run an extra full-window photometric pass per point at level 0. It is
   // not merely unused -- see the note in `UpdateLK` for why dropping it leaves
   // `status` unchanged for every point this function can accept.
+  timer_.Tick("stereo-klt");
   cv::calcOpticalFlowPyrLK(pyr_l, pyr_r, pts_l, pts_r, status_lr, cv::noArray(),
                            cv::Size(stereo_win_size_, stereo_win_size_),
                            stereo_max_level_, criteria, lr_flags);
+  timer_.Tock("stereo-klt");
 
   // Right -> left, for the circular-consistency check. Running it on the whole
   // batch is cheaper than filtering first and re-entering OpenCV, and the
@@ -1101,6 +1117,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   // same pixels. Under `DETECT` it is deferred to `DetectionImage()`, so that
   // tracking runs on the raw frame and the equalization is not computed at all on
   // a frame that does not detect.
+  timer_.Tick("equalize-left");
   const cv::Mat &gray = ToGray(image, img_gray_);
   const cv::Mat &src = equalize_scope_ == EqualizeScope::DETECT
                            ? gray
@@ -1110,6 +1127,7 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   } else {
     img_ = src;
   }
+  timer_.Tock("equalize-left");
   pyramid_is_current_ = false;
 
   if (!initialized_) {
@@ -1135,7 +1153,9 @@ void Tracker::UpdateLK(const cv::Mat &image) {
 
   // build new pyramid
   std::vector<cv::Mat> pyramid;
+  timer_.Tick("pyramid");
   BuildOwnedPyramid(img_, pyramid, win_size_, max_level_);
+  timer_.Tock("pyramid");
 
   // prepare for optical flow
   cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER | cv::TermCriteria::EPS,
@@ -1182,10 +1202,12 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   // tighter bound: `MaskValid` below rejects anything outside [0, cols), and
   // `MatchStereo` rejects `pts_r` outside the right image and `pts_l_back`
   // farther than `circular_thresh` (1 px) from where it started.
+  timer_.Tick("klt");
   cv::calcOpticalFlowPyrLK(pyramid_, pyramid, pts0, pts1, status,
                            cv::noArray(),
                            cv::Size(win_size_, win_size_), max_level_, criteria,
                            cv::OPTFLOW_USE_INITIAL_FLOW);
+  timer_.Tock("klt");
 
   std::vector<cv::KeyPoint> kps;
   cv::Mat descriptors;
@@ -1289,8 +1311,10 @@ void Tracker::UpdateLK(const cv::Mat &image) {
   // this can rescue dropped featuers by matching them to newly detected ones
   if (num_valid_features < num_features_min_) {
     bool check_homography = do_outlier_rejection_ && outlier_rejection_success;
+    timer_.Tick("detect-total");
     DetectLK(DetectionImage(), num_features_max_ - num_valid_features,
              newly_dropped_tracks, check_homography, H);
+    timer_.Tock("detect-total");
   }
 
   // Mark every track that DetectLK did not rescue (rescued slots were set to

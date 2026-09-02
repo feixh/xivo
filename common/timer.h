@@ -23,10 +23,18 @@ public:
     os << "....." << std::endl;
     for (const auto &p : t.data_) {
       const auto &e{p.second};
-      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(e.duration);
-      os << "[" << t.name_ << "]" 
-        << p.first 
-        << ":" << ms.count() / (float)e.occurrence << " ms\n";
+      // Average in nanoseconds, not milliseconds. Casting the *total* to integer
+      // ms first quantized the per-call mean to 1/occurrence ms and biased it
+      // low by up to that much -- which is how two unrelated stages whose totals
+      // landed in the same integer-ms bin came to print the bit-identical
+      // 0.240924 ms (73 ms / 303 calls) and cost an afternoon to explain.
+      const double ms = e.duration.count() / 1e6 / (double)e.occurrence;
+      os << "[" << t.name_ << "]"
+        << p.first
+        // The occurrence count is printed because a per-call mean is not a
+        // per-frame cost: detection runs on ~8% of frames, so its 1.9 ms/call is
+        // 0.16 ms/frame, and every reader has to do that division.
+        << ":" << ms << " ms x" << e.occurrence << "\n";
     }
     return os;
   }

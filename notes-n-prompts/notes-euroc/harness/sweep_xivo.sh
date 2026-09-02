@@ -81,6 +81,10 @@ PY
 done
 
 echo "=== variant $NAME: ${PATCHES[*]-<none>}"
+# The log redirect below is evaluated before run_xivo_reference.sh gets a chance
+# to create anything, so a fresh --out root fails at the redirect -- with the
+# variant reported as FAILED and no log to explain why.
+mkdir -p "$OUT"
 CPU_BASE="${CPU_BASE:-0}" CPU_SPAN="${CPU_SPAN:-48}" \
   "$HERE/run_xivo_reference.sh" --profile euroc_mav --mode "$MODE" \
   --jitter "$MEMBERS" --worktree "$WT" --cfg-prefix "$PREFIX" \

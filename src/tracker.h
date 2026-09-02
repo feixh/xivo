@@ -14,6 +14,7 @@
 #include "mapper.h"
 
 #include "core.h"
+#include "timer.h"
 
 namespace xivo {
 
@@ -98,6 +99,26 @@ public:
 
   int num_new_detections() const { return num_new_detections_; };
 
+  /** Per-stage timings for the front end, printed alongside the estimator's own
+   *  under `print_timing`. The estimator's `track` event covers this whole file
+   *  in one number, which is not enough to tune against: on EuRoC stereo it is
+   *  57% of the frame, split across equalization, two pyramids, two KLTs, FAST
+   *  and the sub-pixel refinement, and those have very different prices and
+   *  very different accuracy costs to give up. A Tick/Tock pair is two
+   *  `high_resolution_clock::now()` calls and a string hash, ~0.1 us against a
+   *  15 ms frame, so this is left in permanently rather than being a debug
+   *  build. */
+  const Timer &timer() const { return timer_; }
+
+  /** Mean number of raw FAST detections per detecting frame, and the number of
+   *  frames that detected. `detect-sort` is O(n log n) in the former, so the
+   *  two together say whether the sort is worth attacking. */
+  double mean_raw_detections() const {
+    return num_detect_frames_ ? double(num_raw_detections_) / num_detect_frames_
+                              : 0.0;
+  }
+  long num_detect_frames() const { return num_detect_frames_; }
+
 public:
   std::list<FeaturePtr> features_;
 
@@ -124,6 +145,10 @@ private:
   number_t outlier_rejection_confidence_;
   number_t outlier_rejection_reproj_thresh_;
   int num_outliers_rejected_ = 0;
+  /** See `timer()` and `mean_raw_detections()`. */
+  Timer timer_{"tracker"};
+  long num_raw_detections_ = 0;
+  long num_detect_frames_ = 0;
   /** Fundamental-matrix RANSAC on normalized bearings; see
    * `OutlierRejectionEpipolar`. Independent of `do_outlier_rejection_`. */
   bool epipolar_rejection_;
