@@ -14,9 +14,41 @@ sequences. It also ended with XIVO **31% slower**: one core, stereo+IMU, full 11
 so M5's target is a **4.03 ms/frame** gap. Both figures are n=3 aggregates
 (total wall / total frames) under the one-core protocol of §1.
 
-**Outcome: 14.764 -> 11.588 ms/frame, 67.7 -> 86.3 FPS, for +0.003 m of ATE.**
+**Outcome: 14.764 -> 11.588 ms/frame, 67.7 -> 86.3 FPS, for +0.008 m of ATE.**
 XIVO ends M5 7.9% slower than OpenVINS instead of 37.5%, still winning 3 of the
 5 accuracy metrics.
+
+> ### Correction, made in M6: every accuracy number in this milestone is n=3
+>
+> The accuracy figures below are three-member jitter ensembles, and three members
+> is not enough on EuRoC. M6 re-ran the shipped configuration at n=6 and then
+> n=10 -- with the first three members bit-identical to the ones here, so this is
+> the *same* configuration, not a different one -- and the eleven-sequence
+> `ate_002` mean moved **0.098 -> 0.102 -> 0.103**. The n=3 value was three lucky
+> draws. `V2_03_difficult` alone carries +-0.040 m of member spread, which puts
+> ~0.0016 m of standard error on the eleven-sequence mean at n=10 and roughly
+> three times that at n=3.
+>
+> What this changes:
+>
+> * The shipped configuration's honest accuracy is **0.103 / 0.110 / 1.71 / 0.111
+>   / 0.867**, not the 0.098 / 0.106 / 1.68 / 0.110 / 0.86 quoted in §8.2 and §9.2.
+> * The front-end substitution therefore costs **+0.008 m**, not +0.003, so its
+>   exchange rate is **0.31 ms per 0.001 m**, not 1.01. It is still the best
+>   equalization trade measured -- the arms it beat were scored at the same n=3
+>   and are inflated the same way -- but the claim that it beat everything else by
+>   "a factor of two and a half" is not supported and is withdrawn.
+> * The **relative** conclusions that do survive are the ones whose margins are an
+>   order of magnitude outside this noise: the two disqualifications in §6
+>   (`eqdet` 0.222, `noos` 0.219 against a 0.095 baseline), the composition hazard
+>   in §8.2 (`B0` at 0.307), and `nofast`, which is bit-identical rather than
+>   merely close.
+> * Nothing in §2, §3, §7 or §8.1 is affected: those are timing and
+>   keypoint-count measurements, whose reproducibility is 0.013% (§1).
+>
+> M6's protocol rule, replacing §1's rule 2: **screen at n=3, ship at n=10.**
+> Measured numbers live in `results/euroc_m6_final/`; see
+> `m6-final-evaluation.md`.
 
 Getting there needed one idea that was not on the list of knobs. Instrumenting
 both estimators (§2) shows the gap is not where a "XIVO is unoptimised" story
@@ -33,7 +65,9 @@ What remains is structural and is quantified in §9.3: ~1.8 ms is a covariance
 update over a deliberately larger state, which every front-end knob leaves
 untouched. §4 gives the measured exchange rate for the dozen knobs that were
 rejected -- they cluster between **0.11 and 0.46 ms/frame per 0.001 m of ATE**,
-against the shipped substitution's 1.01.
+against the shipped substitution's 0.31 at n=10 (1.01 as first measured at n=3;
+see the correction above -- all of §4's rates share the same inflation, so the
+ordering is more trustworthy than the values).
 
 
 ## 1. Protocol
@@ -266,6 +300,14 @@ Each surviving arm was then run on all eleven sequences, n=3, and scored against
 the M4 reference (`results/euroc_fps_acc/`). The last column is the exchange
 rate -- ms/frame saved per 0.001 m of `ate_002` given up -- so **higher is a
 better deal**.
+
+**Read this table as an ordering, not as measurements.** n=3 understates the
+eleven-sequence mean by ~0.005 m here (see the correction at the top of this
+file), and every `ate_002` cell below carries that. The two arms that were carried
+forward were re-measured at n=10 in M6 and moved 0.095 -> 0.095 (`klt2`, in
+stereo) and 0.098 -> 0.103 (the composed `B7`); a `delta ATE` of +0.001 or +0.002
+in this table is inside the noise of the estimate and should be treated as
+"unmeasured", not as "small".
 
 | arm | delta ms | ate_002 | delta ATE | ms per 0.001 | verdict |
 | --- | --- | --- | --- | --- | --- |
@@ -598,6 +640,9 @@ valid at the configuration where it was measured.** `C7` also confirms that
 
 Two configurations survive everything above, and neither dominates the other:
 
+Accuracy in this table is as first measured, at n=3. The n=10 re-measurement from
+M6 is in the second table below, and it is the one to quote.
+
 | | patches vs M4 | ms/frame (screen) | ate_002 | ov ATE pos | ov ATE ori | RPE8 pos | RPE8 ori |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | M4 reference | -- | 14.882 | 0.095 | 0.103 | 1.72 | 0.111 | 0.85 |
@@ -605,20 +650,35 @@ Two configurations survive everything above, and neither dominates the other:
 | **B** (`B7`) | + `eqnone`, `FAST.threshold=7` | **11.550** | 0.098 | 0.106 | **1.68** | **0.110** | 0.86 |
 | OpenVINS | -- | 10.664 | 0.094 | 0.097 | 1.77 | 0.117 | 0.90 |
 
-**A is free**: -0.875 ms/frame and -5.9 MB RSS at accuracy identical to M4's on
-all five metrics to three decimals. It is not a trade and there is no argument
-for not taking it.
+At n=10 on all eleven (`results/euroc_m6_final/`), which is what M6 reports:
 
-**B costs 0.003 m of ATE for a further -2.457 ms/frame.** At a rate of 1.01 it is
-the best trade available by a factor of two and a half, and it is the only thing
-in this milestone that makes the throughput comparison close.
+| | ate_002 | ov ATE pos | ov ATE ori | RPE8 pos | RPE8 ori |
+| --- | --- | --- | --- | --- | --- |
+| **A** (`acc`) | 0.095 +- 0.001 | 0.103 +- 0.001 | 1.709 +- 0.009 | **0.109** +- 0.000 | **0.852** +- 0.002 |
+| **B** (`fast`, shipped) | 0.103 +- 0.002 | 0.110 +- 0.002 | **1.706** +- 0.010 | 0.111 +- 0.001 | 0.867 +- 0.003 |
+| OpenVINS (n=6) | **0.094** +- 0.001 | **0.097** +- 0.001 | 1.773 +- 0.010 | 0.117 +- 0.001 | 0.902 +- 0.005 |
 
-**B is the shipped configuration.** Against OpenVINS it wins 3 of the 5 accuracy
-metrics (ATE ori 1.68 vs 1.77, RPE8 pos 0.110 vs 0.117, RPE8 ori 0.86 vs 0.90),
-loses the two position ATEs (0.098 vs 0.094, 0.106 vs 0.097), and closes the
-throughput gap from 31% to roughly 8%. A is kept documented, and reachable in one
-flag (`--histogram_method CLAHE --fast_threshold 20`), for anyone who wants M4's
-position accuracy back at 23% slower.
+**A is free in stereo, and is not free in mono.** In stereo it is -0.875 ms/frame
+and -5.9 MB RSS at an accuracy that is still 0.095 / 0.103 at n=10 -- i.e. the two
+knobs really are free there, and that survived the resampling. In mono it is not:
+`klt_max_level 2` on top of CLAHE takes `MH_01_easy` from M4's already-bad
+1.357 +- 0.548 m to **divergent in 10 of 10 members** (270 m to 28 km). B, which
+also has `klt_max_level 2` but no CLAHE, scores 0.115 m there. That interaction was
+invisible in this milestone because §4 screened accuracy in stereo only.
+
+**B costs 0.008 m of ATE for a further -2.457 ms/frame**, a rate of 0.31 -- the
+best of the equalization arms screened here, and the only thing in this milestone
+that makes the throughput comparison close.
+
+**B is the shipped configuration**, on three grounds: it is the only one of the
+three that keeps mono `MH_01_easy` alive, it closes the throughput gap from 31% to
+7.9% where A leaves 29%, and against OpenVINS it wins the same 3 of 5 accuracy
+metrics that A does (ATE ori 1.71 vs 1.77, RPE8 pos 0.111 vs 0.117, RPE8 ori 0.867
+vs 0.902). What A buys is the *size* of the position-ATE loss: A ties `ate_002`
+(0.095 +- 0.001 against 0.094 +- 0.001, a 0.8-sigma difference) where B loses it by
+5 sigma. A is kept documented and reachable in two flags
+(`--histogram_method CLAHE --fast_threshold 20`) for anyone who wants that tie back
+at 29% slower and no mono `MH_01`.
 
 Both are regenerated by `make_euroc_cfg.py` from the dataset's own `sensor.yaml`,
 and both are **one configuration for all eleven sequences** -- no per-sequence
@@ -639,6 +699,12 @@ metric:
 | --- | --- | --- | --- | --- | --- |
 | `B7`, hand-patched | 0.098 | 0.106 | 1.68 | 0.110 | 0.86 |
 | shipped `cfg/euroc_stereo.json` | 0.098 | 0.106 | 1.68 | 0.110 | 0.86 |
+
+The *equivalence* this table was built to check holds -- the two code paths produce
+the same numbers. The numbers themselves are the n=3 draw that M6 corrected to
+0.103 / 0.110 / 1.71 / 0.111 / 0.867; see the correction at the top. Both halves of
+this check being wrong by the same amount is exactly what an under-sampled mean
+does, and it is why an agreement test cannot double as a measurement.
 
 **The screen's 11.550 ms holds on the full eleven.** One core, n=3,
 `results/euroc_fps_ship11/`:
@@ -684,7 +750,7 @@ accounted for, and none of it is reachable by tuning:
   it; `ekf_update.chunks` is now inert or negative (§3).
 * **~0.4 ms is the unseeded stereo search** (§7.3), which needs the estimator's
   propagated pose threaded into the `Tracker` singleton to fix properly.
-* **The remaining 0.003 m of ATE** between B and M4 is CLAHE's spatial
+* **The remaining 0.008 m of ATE** between B and M4 is CLAHE's spatial
   distribution of corners, which a global threshold cannot reproduce (§8.2). A
   spatially-adaptive detector threshold -- one bucket per tile, targeting a
   per-tile candidate count -- would plausibly recover it at a fraction of CLAHE's

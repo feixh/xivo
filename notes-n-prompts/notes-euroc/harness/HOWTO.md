@@ -123,6 +123,29 @@ Metric choices, and the traps behind them, are in
   Compare 6-room means (sd 0.001), not single sequences.
 * Quote `fps_wall` (end-to-end) across systems, not `fps_mean` (estimator only) —
   PNG decode is a third of the wall clock here. Both are in `summary.csv`.
+* **Never quote `fps_wall` or `peak_rss_mb` from an accuracy pass.** The accuracy
+  pass launches every run at once (220 processes for an n=10 × 11-sequence ×
+  2-mode sweep); `CPU_SPAN` chooses which cpu each run is *pinned* to, it does not
+  cap concurrency. The same config read 27.9 and 65.7 FPS in two such passes.
+  Timing comes only from `--timing`, and is aggregated by `report_onecore.py`.
+
+## Aggregating results
+
+Three scripts, and they are not interchangeable:
+
+* `agg_ensemble.py --mode {mono,stereo} --arm NAME DIR [--arm ...]` — the accuracy
+  tables. `--mode` is **mandatory** (the XIVO runner writes mono and stereo rows
+  into one `summary.csv`), and member globs must be **unquoted** so the shell
+  expands them — a quoted `'…/stereo_m*'` reports "(not all arms have all
+  sequences)" for every metric rather than failing.
+* `report_fps.py DIR [DIR ...]` — `sweep_fps.sh` variants, frame-weighted. Reads
+  the `time.txt` that only the XIVO path writes, so it prints a nonzero-exit
+  warning for every OpenVINS run.
+* `report_onecore.py NAME=GLOB [NAME=GLOB ...]` — the cross-system timing table.
+  Reads `stats.txt`, which both paths write, and accepts both directory layouts
+  (`<arm>/r0/stereo/<SEQ>_r0` from `sweep_fps.sh`, and
+  `<arm>/stereo/<SEQ>_r{0,1,2}` from `run_xivo_reference.sh --jitter`). Use this
+  one whenever XIVO and OpenVINS appear in the same table.
 
 ## Comparing against XIVO
 

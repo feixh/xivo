@@ -87,7 +87,13 @@ single shared configuration is a genuine constraint rather than a formality.
 ### M6 -- final evaluation
 * One config, 11 sequences, stereo+IMU, n>=3 replicates for both accuracy and
   efficiency, XIVO and OpenVINS measured in the same session.
+  * **Revised during M6 to n=10.** n=3 is not enough on EuRoC: the shipped
+    configuration re-run at n=6 and n=10, with members 0-2 bit-identical, moved
+    from 0.098 to 0.102 to 0.103 m of `ate_002`. `V2_03_difficult` alone carries
+    +-0.040 m of member spread. **Screen at n=3, ship at n=10** -- and M5's
+    accuracy tables, all n=3, were corrected accordingly.
 * Full metric table with error bars, plus a per-sequence breakdown.
+* Done: `notes-euroc/m6-final-evaluation.md`.
 
 ### M7 -- documentation and merge
 * `notes-n-prompts/report-xivo-vs-openvins-euroc.md`: what was done, every
