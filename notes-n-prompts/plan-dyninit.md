@@ -222,18 +222,32 @@ experiment that could have failed. `ctest` stays green throughout.
   not at risk).
 * **Commit:** the diagnosis and the script.
 
-### M1 -- the static/dynamic detector, observation only
-* `src/initializer.{h,cpp}`: min-over-windows accel sd, and gyro-de-rotated
-  residual optical flow.
-* Wired to *log* its classification and nothing else. Config key
-  `dynamic_init` absent => entire feature off => not one instruction changes.
-* Unit test on synthetic IMU + camera: a stationary-but-rotating rig classifies
-  static (this is the case raw disparity gets wrong); a constant-velocity rig
-  classifies dynamic (this is the case accel magnitude *and* accel variance both
-  get wrong).
-* **Confirms before commit:** 17 of 17 sequences classified correctly
-  (2 dynamic, 15 static), and an n=3 EuRoC stereo pass is **bit-identical** to
-  `euroc_m6_final/fast` members 0-2 in all 165 metric cells.
+### M1 -- the static/dynamic detector, observation only  **[DONE]**
+* `src/init_detect.{h,cpp}` (named `initializer.{h,cpp}` when this was written;
+  renamed because M2/M3's solver is the initializer and this only decides):
+  min-over-windows accel sd, and the residual of a rotation fitted **from the
+  images** rather than from the gyro.
+* The gyro-de-rotated statistic planned here was measured and rejected: it
+  assumes an unbiased gyro, and EuRoC's turn-on gyro bias is 1.8 px/frame of
+  predicted motion that never happened -- larger than the signal, and circular,
+  since the bias is one of the unknowns. Margins measured over all 17 sequences:
+  image-fitted rotation **6.8x**, raw disparity (OpenVINS' cue) 5.0x, accel sd
+  1.93x, gyro de-rotation 1.37x.
+* Not called from `Estimator` at all, rather than called-and-logged: nothing to
+  gate, so nothing can leak.
+* `src/app/init_probe.cpp` runs it over a sequence and prints the verdict and its
+  statistics -- the tool the classification claim is made with, and the first
+  thing to reach for when initialization misbehaves.
+* Unit test on synthetic IMU + rendered camera: a stationary-but-rotating rig
+  classifies static (raw disparity gets this wrong; so does accel sd, which
+  reads 0.42 m/s^2 from gravity sweeping through the body frame); a
+  constant-velocity rig classifies dynamic (accel magnitude *and* accel variance
+  both get this wrong).
+* **Confirmed:** 17 of 17 classified correctly, with a **20.9x** margin at the
+  1 s horizon the detector actually decides at. `ctest` 24/24. n=3 EuRoC stereo
+  byte-identical to `euroc_m6_final/fast` members 0-2.
+* Full results and the three things measured along the way that changed the
+  design: `notes-n-prompts/notes-dyninit/m1-detector.md`.
 * **Commit:** the detector.
 
 ### M2 -- preintegration and the linear initializer
