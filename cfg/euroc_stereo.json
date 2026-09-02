@@ -252,6 +252,10 @@
     ]
   },
   "gravity_init_counter": 20,
+  // Reject accel samples whose |a| is more than this many m/s^2 off
+  // |g| when initializing gravity; 0 disables. See notes-euroc/m4.
+  "gravity_init_max_accel_dev": 0.0,
+  "gravity_init_derotate": false,
   "camera_cfg": {
     "comment": "EuRoC cam0 (from mav0/cam0/sensor.yaml)",
     "model": "radtan",

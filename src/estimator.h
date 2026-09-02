@@ -915,10 +915,40 @@ private:
   int gravity_init_counter_;
   std::vector<Vec3> gravity_init_buf_; // buffer of accel measurements for
                                        // gravity initialization
-  /** Gyro and timestamps alongside `gravity_init_buf_`, used only when
-   *  `gravity_init_derotate_` is on. */
-  std::vector<Vec3> gravity_init_gyro_buf_;
-  std::vector<timestamp_t> gravity_init_time_buf_;
+  /** R_0k for each sample in `gravity_init_buf_`, i.e. its attitude relative to
+   *  the first sample seen, used only when `gravity_init_derotate_` is on. The
+   *  gyro is integrated over *every* incoming sample rather than only over the
+   *  buffered ones, so these stay exact even when
+   *  `gravity_init_max_accel_dev_` skips a stretch. */
+  std::vector<Mat3> gravity_init_R_buf_;
+  Mat3 gravity_init_R_run_{Mat3::Identity()};
+  Vec3 gravity_init_last_gyro_{Vec3::Zero()};
+  timestamp_t gravity_init_last_time_{};
+  int gravity_init_seen_{0};
+  /** Reject an accel sample from gravity initialization when
+   *  | |a| - |g| | exceeds this, in m/s^2. A stationary accelerometer reads
+   *  |a| = |g|, so a magnitude that far off carries linear acceleration, and
+   *  averaging it in tilts the initial gravity direction -- which on a filter
+   *  that starts with Rsb = I is an error nothing downstream can distinguish
+   *  from a real one.
+   *
+   * Default 0 disables the gate, so every pre-existing config keeps its exact
+   * initial attitude. It is worth the flag on EuRoC because one sequence in
+   * eleven is badly contaminated and the rest are clean: over the 20-sample
+   * window, MH_01_easy's mean specific force is off by -1.463 m/s^2, while the
+   * next worst (MH_02) is +0.300 and the remaining nine are within 0.08. With
+   * the gate at 0.1 m/s^2, MH_01 collects 20 clean samples by t = 2.10 s and
+   * its error drops to -0.026, MH_02's to -0.008, while V1_01 and the other
+   * already-quiet sequences accept their first 20 samples unchanged and
+   * initialise bit-identically.
+   * See notes-euroc/m4-xivo-accuracy-tuning.md. */
+  number_t gravity_init_max_accel_dev_{0.0};
+  /** Safety valve for the gate: after this many consecutive rejections, accept
+   *  everything. Without it an accelerometer whose scale factor is wrong (so no
+   *  sample ever reads |g|) would never initialise, turning a calibration
+   *  mistake into a silent hang instead of a bad number plus a warning. */
+  int gravity_init_max_skip_{2000};
+  int gravity_init_skipped_{0};
   /** Rotate each buffered accel sample into the body frame of the *last* sample
    *  before averaging, integrating the gyro to get the relative attitude.
    *
