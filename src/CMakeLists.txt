@@ -127,6 +127,9 @@ add_library(xest STATIC
         stereo.cpp
         pngfast.cpp
         init_detect.cpp
+        init_preint.cpp
+        init_linear.cpp
+        init_window.cpp
         imu.cpp)
 if (IS_MAC)
   target_link_libraries(xest INTERFACE ${deps} "-Wl, -framework OpenGL")
@@ -158,6 +161,9 @@ target_link_libraries(feature_tracker_only ${libxivo} gflags::gflags)
 # statistics behind it. Diagnostic only -- it never builds an Estimator.
 add_executable(init_probe app/init_probe.cpp)
 target_link_libraries(init_probe ${libxivo} gflags::gflags)
+
+add_executable(linear_probe app/linear_probe.cpp)
+target_link_libraries(linear_probe ${libxivo} gflags::gflags)
 
 # add_executable(eval app/evaluate.cpp)
 # target_link_libraries(eval estimator application gflags::gflags)
@@ -321,6 +327,12 @@ add_executable(unitTests_init_detect
                test/unittest_init_detect.cpp)
 target_link_libraries(unitTests_init_detect xest ${deps} gtest gtest_main)
 add_test(NAME InitDetect COMMAND unitTests_init_detect
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(unitTests_init_linear
+               test/unittest_init_linear.cpp)
+target_link_libraries(unitTests_init_linear xest ${deps} gtest gtest_main)
+add_test(NAME InitLinear COMMAND unitTests_init_linear
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_determinism

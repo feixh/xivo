@@ -261,6 +261,35 @@ experiment that could have failed. `ctest` stays green throughout.
 * **Confirms before commit:** Stage A alone recovers MH_01's and MH_02's true
   initial velocity from real data to within a tolerance set by the bias error it
   cannot see (predicted ~0.1-0.2 m/s -- Stage B's job is to remove that).
+* **Confirmed:** 17 of 17 unit tests, `ctest` 25/25. On real data the prediction
+  holds: MH_01 **0.144 m/s** and MH_02 **0.109 m/s**, and 0.11-0.23 across all 11
+  sequences. Handing the probe EuRoC's own solved biases collapses that to
+  0.02-0.09 m/s and the gravity tilt from 4.15 deg to 0.42 deg while cutting the
+  residual 5x, which pins the bias -- specifically the **gyro** bias, since
+  `bg_z = 0.0785 rad/s` over the window is 6.7 deg of rotation error against
+  `|ba|`'s 0.92 deg of tilt -- as the whole of Stage A's error, exactly as
+  predicted.
+* Two changes this milestone forced. **The window is 1.5 s** (31 frames), where
+  the tracker's first-cut default was 11 frames / 0.5 s: under 0.3 px of tracking
+  noise the shorter window costs 1.14 m/s against 0.060, a 19x penalty from one
+  knob, and real data puts the plateau at 1.0-1.5 s. **The
+  depth-scaled linear cost is bimodal** -- with the accel bias held at zero a
+  second minimum appears up to 40 deg away in gravity whose cost is *lower* than
+  the truth's by one part in 1e4, so the sphere solve correctly returns a >10 m/s
+  answer. Fixed with `LinearInitOptions::PriorMode::Check`, which uses the
+  rotated accelerometer mean as a discriminator (not an estimate: forcing the
+  prior is 25x worse when the solve has not flipped). It fires on all 4 synthetic
+  flips, on none of the other 20 rows, and never on real EuRoC.
+* Also settled for M4: Stage A's 4.15 deg of tilt is *worse* than the static
+  initializer manages on a static rig, so Stage B is mandatory rather than a
+  refinement; and Stage A claims 0.15-0.23 m/s on the nine sequences whose true
+  initial speed is ~0.01, so the M1 detector's routing is load-bearing. The
+  premise the task rests on also checks out from ground truth -- `|v|` at the
+  first GT sample is 0.80 (MH_01), 0.44 (MH_02), and <=0.034 for the other nine.
+* Full results, the rejected alternatives (dropping the `||g||` constraint,
+  depth-reweighting the rows, gating on `g_cond`), and the correction of an
+  intermediate synthetic estimate that made the plan's prediction look wrong:
+  `notes-n-prompts/notes-dyninit/m2-linear.md`.
 * **Commit:** the linear initializer.
 
 ### M3 -- the bundle adjustment
