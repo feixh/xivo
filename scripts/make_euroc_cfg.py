@@ -160,18 +160,74 @@ def main():
                          'velocity jitter: 15 of 66 stereo runs, and 5 of 6 on '
                          'V1_03. Tightening it removes every divergence. '
                          '(default: %(default)s, a prior std of 0.045 rad)')
-    ap.add_argument('--visual_meas_std', type=float, default=2.4,
+    ap.add_argument('--visual_meas_std', type=float, default=1.2,
                     help='pixel measurement std for the in-state feature '
-                         'update. The shipped TUM-VI value is 0.75 px, which is '
-                         'far too confident for EuRoC: raising it collapses '
-                         'V1_03 from 0.818 +- 0.625 to 0.140 and V2_01 from '
-                         '0.225 to 0.040 m. Note this knob does two things at '
-                         'once -- it sets the weight of a measurement AND, '
-                         'through MH_thresh, the radius of the Mahalanobis '
-                         'gate. The response is a broad plateau from 2.4 to '
-                         '3.5 (screen mean 0.117/0.119/0.121) with only 2.0 '
-                         'diverging, so this is a shelf rather than a peak. '
+                         'update -- with --adapt_visual_meas (the default), '
+                         'only the value the online estimate STARTS from. '
+                         'Fixed, no value works for all 11 sequences: the five '
+                         'Machine Hall ones want 0.75 px and the six Vicon room '
+                         'ones want 2.4, and each choice costs the other about '
+                         '40%% of its ATE (full-11 means 0.322 at 0.75, 0.138 '
+                         'at 2.4, against 0.098 for a per-sequence oracle). '
+                         'Machine Hall is slow and sharp, the Vicon room is '
+                         'fast and motion-blurred, so the real tracking noise '
+                         'differs by about 3x and one number cannot describe '
+                         'both. 1.2 is a neutral place to start the estimate '
+                         'from, roughly the geometric mean of the two. '
                          '(default: %(default)s)')
+    ap.add_argument('--adapt_visual_meas', action='store_true', default=True,
+                    help='estimate visual_meas_std online from the Mahalanobis '
+                         'distances, which are chi-square(2) exactly when the '
+                         'assumed noise is right. On by default here; see '
+                         '--no_adapt_visual_meas.')
+    ap.add_argument('--no_adapt_visual_meas', dest='adapt_visual_meas',
+                    action='store_false',
+                    help='pin visual_meas_std to the value given, the way every '
+                         'shipped config does.')
+    ap.add_argument('--adapt_alpha', type=float, default=0.15,
+                    help='step size of the geometric EMA on the estimate, per '
+                         'update: a time constant of ~1/alpha updates, so 0.15 '
+                         'is 0.33 s at EuRoC\'s 20 Hz. THIS IS THE LOAD-BEARING '
+                         'ONE, and only because it has to be fast enough. The '
+                         'Vicon room\'s motion blur comes in sub-second bursts, '
+                         'so at the 1 s time constant this first used the '
+                         'estimate was still climbing when a burst ended and '
+                         'still falling when the next began -- it never reached '
+                         'the value it was heading for (V2_01 excursed to 2.11 '
+                         'px and ended back on the 0.6 floor). Full-11 means: '
+                         '0.163 at 0.02, 0.144 at 0.05, 0.095 at 0.15, 0.097 at '
+                         '0.30, 0.099 at 0.50 -- a knee between 0.05 and 0.15 '
+                         'and flat above it, so pick the flat region rather than '
+                         'the exact minimum. (default: %(default)s)')
+    ap.add_argument('--adapt_min_std', type=float, default=0.6,
+                    help='floor on the estimate, in px. (default: %(default)s)')
+    ap.add_argument('--adapt_max_std', type=float, default=4.0,
+                    help='ceiling on the estimate, in px. The ceiling is the '
+                         'load-bearing bound: the Mahalanobis gate radius grows '
+                         'with the estimate, so an unbounded upward walk would '
+                         'admit progressively worse measurements. '
+                         '(default: %(default)s)')
+    ap.add_argument('--MH_thresh', type=float, default=5.991,
+                    help='Mahalanobis gate threshold, a chi-square(2) quantile; '
+                         '5.991 is the 95%% one. Worth stating explicitly '
+                         'because this and --visual_meas_std are not '
+                         'independent: the gate is on r\' (H P H\' + R)^-1 r, so '
+                         'the measurement std sets the gate radius as well as '
+                         'the weight, and at a fixed std the two halves of '
+                         'EuRoC want different thresholds for the same reason '
+                         'they want different stds (full-11 means at '
+                         'std = 0.75: 0.322 at 5.991, 0.125 at 30, 0.154 at '
+                         '80). Adapting the std moves the gate with it, so this '
+                         'can stay at the textbook value -- and measurably '
+                         'should: opening it to 12 *on top of* the adaptation '
+                         'costs 0.095 -> 0.099, because both knobs widen the '
+                         'same effective gate and doing both over-widens it on '
+                         'the sharp Machine Hall sequences (MH_02 0.038 -> '
+                         '0.069, MH_04 0.095 -> 0.128). (default: %(default)s)')
+    ap.add_argument('--MH_max_strikes', type=int, default=1,
+                    help='how many CONSECUTIVE gate failures destroy an in-state '
+                         'feature. 1 is the original policy. (default: '
+                         '%(default)s)')
     ap.add_argument('--gravity_init_max_accel_dev', type=float, default=0.1,
                     help='reject an accel sample from gravity initialization '
                          'when | |a| - |g| | exceeds this, in m/s^2; 0 '
@@ -237,6 +293,19 @@ def main():
     cfg['P']['ba'] = args.P_ba
     cfg['P']['Wsg'] = args.P_Wsg
     cfg['visual_meas_std'] = args.visual_meas_std
+    cfg['visual_meas_adapt'] = {
+        "comment": ("estimate visual_meas_std online from the median "
+                    "Mahalanobis distance; see notes-euroc/"
+                    "m4-xivo-accuracy-tuning.md"),
+        "enable": args.adapt_visual_meas,
+        "alpha": args.adapt_alpha,
+        "min_std": args.adapt_min_std,
+        "max_std": args.adapt_max_std,
+        "warmup_updates": 20,
+        "min_samples": 10,
+    }
+    cfg['MH_thresh'] = args.MH_thresh
+    cfg['MH_max_strikes'] = args.MH_max_strikes
     cfg['gravity_init_max_accel_dev'] = args.gravity_init_max_accel_dev
 
     if args.mono:
@@ -270,7 +339,14 @@ def main():
     print(f"  P.bg = {args.P_bg} (std {args.P_bg ** 0.5:.4g} rad/s), "
           f"P.ba = {args.P_ba} (std {args.P_ba ** 0.5:.4g} m/s^2), "
           f"P.Wsg = {args.P_Wsg} (std {args.P_Wsg ** 0.5:.4g} rad)")
-    print(f"  visual_meas_std = {args.visual_meas_std} px, "
+    if args.adapt_visual_meas:
+        print(f"  visual_meas_std = {args.visual_meas_std} px, adapting online "
+              f"in [{args.adapt_min_std}, {args.adapt_max_std}] "
+              f"at alpha = {args.adapt_alpha}")
+    else:
+        print(f"  visual_meas_std = {args.visual_meas_std} px, fixed")
+    print(f"  MH_thresh = {args.MH_thresh}, "
+          f"MH_max_strikes = {args.MH_max_strikes}, "
           f"gravity_init_max_accel_dev = "
           f"{args.gravity_init_max_accel_dev} m/s^2")
 
