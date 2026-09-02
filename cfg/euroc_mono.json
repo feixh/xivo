@@ -119,7 +119,7 @@
     "ba": 0.25,
     "Wbc": 0.0001,
     "Tbc": 0.001,
-    "Wsg": 3.01,
+    "Wsg": 0.002,
     "td": 1e-05,
     "Cg": 1e-05,
     "Ca": 1e-05,
@@ -172,7 +172,7 @@
   "max_subfilter_outlier": 0.01,
   "strict_criteria_timesteps": 5,
   "comparison_score_type": "DepthUncertainty",
-  "visual_meas_std": 0.75,
+  "visual_meas_std": 2.4,
   "outlier_thresh": 1.1,
   "oos_meas_std": 1.0,
   "max_depth": 60.0,
@@ -252,10 +252,6 @@
     ]
   },
   "gravity_init_counter": 20,
-  // Reject accel samples whose |a| is more than this many m/s^2 off
-  // |g| when initializing gravity; 0 disables. See notes-euroc/m4.
-  "gravity_init_max_accel_dev": 0.0,
-  "gravity_init_derotate": false,
   "camera_cfg": {
     "comment": "EuRoC cam0 (from mav0/cam0/sensor.yaml)",
     "model": "radtan",
@@ -393,5 +389,6 @@
       "early_exit_inlier_ratio": 0.85
     }
   },
-  "stereo": false
+  "stereo": false,
+  "gravity_init_max_accel_dev": 0.1
 }

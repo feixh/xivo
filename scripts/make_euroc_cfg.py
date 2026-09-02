@@ -147,6 +147,41 @@ def main():
                          'The default here is a prior std of 0.5 m/s^2. Worth '
                          '0.071 -> 0.069 m on V1_01 on top of --P_bg. '
                          '(default: %(default)s)')
+    ap.add_argument('--P_Wsg', type=float, default=0.002,
+                    help='initial variance of the two-degree-of-freedom gravity '
+                         'direction state. The shipped TUM-VI value is 3.01, a '
+                         'prior std of 1.73 rad, which lets the filter absorb '
+                         'early vision residuals by rotating its estimate of '
+                         'which way is down rather than by correcting the pose '
+                         '-- and a wrong gravity direction then feeds straight '
+                         'back into the acceleration estimate, so it is a '
+                         'positive feedback loop. That is what made the M3 '
+                         'baseline diverge intermittently under a 1e-6 m/s '
+                         'velocity jitter: 15 of 66 stereo runs, and 5 of 6 on '
+                         'V1_03. Tightening it removes every divergence. '
+                         '(default: %(default)s, a prior std of 0.045 rad)')
+    ap.add_argument('--visual_meas_std', type=float, default=2.4,
+                    help='pixel measurement std for the in-state feature '
+                         'update. The shipped TUM-VI value is 0.75 px, which is '
+                         'far too confident for EuRoC: raising it collapses '
+                         'V1_03 from 0.818 +- 0.625 to 0.140 and V2_01 from '
+                         '0.225 to 0.040 m. Note this knob does two things at '
+                         'once -- it sets the weight of a measurement AND, '
+                         'through MH_thresh, the radius of the Mahalanobis '
+                         'gate. The response is a broad plateau from 2.4 to '
+                         '3.5 (screen mean 0.117/0.119/0.121) with only 2.0 '
+                         'diverging, so this is a shelf rather than a peak. '
+                         '(default: %(default)s)')
+    ap.add_argument('--gravity_init_max_accel_dev', type=float, default=0.1,
+                    help='reject an accel sample from gravity initialization '
+                         'when | |a| - |g| | exceeds this, in m/s^2; 0 '
+                         'disables. MH_01_easy is already being carried when '
+                         'its first IMU sample lands, so its 20-sample window '
+                         'averages to 8.347 m/s^2 against a gravity of 9.810; '
+                         'the other ten sequences are within 0.30. At 0.1 the '
+                         'gate moves MH_01 (0.145 -> 0.118) and leaves the '
+                         'others identical to four decimals. '
+                         '(default: %(default)s)')
     ap.add_argument('--noise_scale', type=float, default=1.0,
                     help='multiply the gyro/accel noise densities by this. The '
                          'shipped TUM-VI config uses 1.5x its datasheet values; '
@@ -200,6 +235,9 @@ def main():
     cfg['initial_z'] = args.initial_z
     cfg['P']['bg'] = args.P_bg
     cfg['P']['ba'] = args.P_ba
+    cfg['P']['Wsg'] = args.P_Wsg
+    cfg['visual_meas_std'] = args.visual_meas_std
+    cfg['gravity_init_max_accel_dev'] = args.gravity_init_max_accel_dev
 
     if args.mono:
         cfg['stereo'] = False
@@ -230,7 +268,11 @@ def main():
     print(f"  Qimu gyro={g_n:.6g} accel={a_n:.6g} "
           f"gyro_bias={g_w:.6g} accel_bias={a_w:.6g}")
     print(f"  P.bg = {args.P_bg} (std {args.P_bg ** 0.5:.4g} rad/s), "
-          f"P.ba = {args.P_ba} (std {args.P_ba ** 0.5:.4g} m/s^2)")
+          f"P.ba = {args.P_ba} (std {args.P_ba ** 0.5:.4g} m/s^2), "
+          f"P.Wsg = {args.P_Wsg} (std {args.P_Wsg ** 0.5:.4g} rad)")
+    print(f"  visual_meas_std = {args.visual_meas_std} px, "
+          f"gravity_init_max_accel_dev = "
+          f"{args.gravity_init_max_accel_dev} m/s^2")
 
 
 if __name__ == '__main__':
