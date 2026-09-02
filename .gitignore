@@ -50,3 +50,5 @@ cfg/_oos/
 # values are baked into scripts/make_euroc_cfg.py; these are just the temporary
 # patched copies the sweep hands to pyxivo.
 cfg/tune_*.json
+# Same, from sweep_fps.sh -- the throughput screen's counterpart.
+cfg/fps_*.json
