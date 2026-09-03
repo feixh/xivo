@@ -129,6 +129,7 @@ add_library(xest STATIC
         init_detect.cpp
         init_preint.cpp
         init_linear.cpp
+        init_ba.cpp
         init_window.cpp
         imu.cpp)
 if (IS_MAC)
@@ -333,6 +334,12 @@ add_executable(unitTests_init_linear
                test/unittest_init_linear.cpp)
 target_link_libraries(unitTests_init_linear xest ${deps} gtest gtest_main)
 add_test(NAME InitLinear COMMAND unitTests_init_linear
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(unitTests_init_ba
+               test/unittest_init_ba.cpp)
+target_link_libraries(unitTests_init_ba xest ${deps} gtest gtest_main)
+add_test(NAME InitBA COMMAND unitTests_init_ba
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(unitTests_determinism

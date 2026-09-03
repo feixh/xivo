@@ -56,6 +56,15 @@ struct InitImu {
 /** The right Jacobian of SO(3): `exp(w + dw) ~= exp(w) * exp(Jr(w) * dw)`. */
 Mat3 SO3RightJacobian(const Vec3 &w);
 
+/** Its inverse: `Log(exp(w) * exp(dw)) ~= w + Jr(w)^-1 * dw`.
+ *
+ *  Stage B needs this and not `SO3RightJacobian`, because its rotation residual
+ *  *is* a logarithm: `r = Log(...)` differentiates through `Jr(r)^-1`, not
+ *  through `Jr(r)`. The two are numerically very close for the small residuals a
+ *  converged solve produces, which is exactly why the difference has to be got
+ *  right by derivation rather than by watching the solver converge anyway. */
+Mat3 SO3RightJacobianInverse(const Vec3 &w);
+
 /** IMU preintegral over one interval, at a fixed linearization bias.
  *
  *  `R` is `R_{i<-j}` (the later frame expressed in the earlier one), `beta` the

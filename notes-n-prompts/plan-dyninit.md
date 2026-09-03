@@ -296,15 +296,33 @@ experiment that could have failed. `ctest` stays green throughout.
 * Analytic Jacobians for both residual families; LM with Schur complement.
 * `unittest_init_ba`: (a) every analytic Jacobian matches central differences to
   1e-6; (b) noiseless synthetic problem seeded away from the answer converges to
-  `v` within 1e-6 m/s and `bg`/`ba` within 1e-5; (c) with realistic noise and a
-  planted bias of EuRoC's magnitude (0.08 rad/s gyro), the recovered bias is
-  within a stated tolerance of the planted one; (d) cost decreases monotonically
-  and the solver terminates.
+  ~~`v` within 1e-6 m/s and `bg`/`ba` within 1e-5~~ **see the correction below**;
+  (c) with realistic noise and a planted bias of EuRoC's magnitude (0.08 rad/s
+  gyro), the recovered bias is within a stated tolerance of the planted one;
+  (d) cost decreases monotonically and the solver terminates.
 * **Confirms before commit:** on MH_01/MH_02 real data, Stage B improves on
   Stage A's velocity, and the recovered gyro bias agrees with EuRoC's own
   solved-for bias (`state_groundtruth_estimate0` columns 11-13) -- an external
   check, not a self-consistency check.
 * **Commit:** the BA.
+
+**Correction to gate (b), made after measuring it (M3, 2026-09-03).** The 1e-6
+velocity target is not attainable and should not have been written. On the
+noiseless fixture the solver reaches a cost of 1.41e-22 -- *below* the 1.76e-22
+the exact truth scores -- with a reprojection RMS of 1.6e-13 px, and still sits
+0.0094 m/s from the true velocity. Both facts hold at once because a 1 s window
+has a nearly flat direction: a global scale on `(p, v, f)` trades against an
+accelerometer bias along the mean acceleration. The recovered scale is 1.00686,
+and dividing it out leaves 5.2e-4 m/s. So the state found fits the data at least
+as well as the state that generated it, to the last bit of double precision, and
+no solver improvement can close the gap -- more excitation makes it worse (4x the
+angular rate: 0.034; 8x the acceleration: 0.036), only a longer span helps
+(0.0056 at 2 s). The gate is replaced by: the *identifiable* parts to machine
+precision (`bg` measured at 1.4e-16), the scale-corrected velocity to 2e-3, the
+recovered scale within 2% of 1, and the cost no worse than the truth's. Recorded
+rather than quietly loosened, because the flat direction is a real property of
+short-window visual-inertial initialization and is the reason `sigma_ba_prior`
+exists at all -- see notes-dyninit/m3-ba.md.
 
 ### M4 -- wire it into the estimator
 * Init-window buffering (IMU triples + incremental tracking), dispatch on the M1

@@ -25,12 +25,25 @@ namespace xivo {
 struct InitCamera {
   Mat3 Rbc{Mat3::Identity()};
   Vec3 Tbc{Vec3::Zero()};
+  /** Focal length in pixels, used *only* to turn a pixel sigma into a sigma on
+   *  the normalized coordinates Stage B's residual lives in. Not a camera model
+   *  -- keeping the projection out of this header is what lets the tests build
+   *  problems with exact answers. */
+  number_t focal{1};
 };
 
 struct InitFrame {
   number_t t{0};
   /** Preintegral from `frames[0].t` to `t`. Identity for frame 0. */
   Preintegral pre;
+  /** Preintegral from `frames[k-1].t` to `t`. Identity for frame 0.
+   *
+   *  Stage A wants the chain from frame 0, because that is what makes its rows
+   *  linear in one velocity and one gravity. Stage B wants consecutive edges,
+   *  because that is what makes its Hessian banded and its bias observable from
+   *  K-1 independent constraints rather than K-1 nested ones. Both are cheap, so
+   *  the window carries both rather than one stage re-deriving the other's. */
+  Preintegral pre_prev;
 };
 
 /** One image measurement: feature `track` seen in frame `frame` by camera `cam`

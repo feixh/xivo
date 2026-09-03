@@ -21,6 +21,23 @@ Mat3 SO3RightJacobian(const Vec3 &w) {
          (th - std::sin(th)) / (th2 * th) * W * W;
 }
 
+Mat3 SO3RightJacobianInverse(const Vec3 &w) {
+  const number_t th2 = w.squaredNorm();
+  const Mat3 W = hat(w);
+  if (th2 < 1e-8)
+    return Mat3::Identity() + 0.5 * W + W * W / 12.0;
+  const number_t th = std::sqrt(th2);
+  const number_t s = std::sin(th), c = std::cos(th);
+  // The quadratic coefficient is 1/th^2 - (1 + cos th) / (2 th sin th). Near
+  // th = pi both parts of that fraction vanish -- (1 + cos th) as (pi - th)^2/2
+  // and sin th as (pi - th) -- so the quotient tends to zero and the whole
+  // coefficient to 1/pi^2. That limit is reached numerically rather than
+  // symbolically here: cos(pi) is exactly -1 in double, so the numerator is
+  // exactly zero and no cancellation is left to go wrong.
+  const number_t k = 1.0 / th2 - (1.0 + c) / (2.0 * th * s);
+  return Mat3::Identity() + 0.5 * W + k * W * W;
+}
+
 Mat3 Preintegral::RAt(const Vec3 &bg_new) const {
   return R * SO3::exp(dR_dbg * (bg_new - bg)).matrix();
 }

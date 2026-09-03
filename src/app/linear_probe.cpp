@@ -25,6 +25,7 @@
 #include "opencv2/imgcodecs.hpp"
 
 #include "camera_manager.h"
+#include "init_ba.h"
 #include "init_linear.h"
 #include "init_window.h"
 #include "loader.h"
@@ -50,6 +51,25 @@ DEFINE_double(baz, 0.0, "Accel bias prior z.");
 DEFINE_double(prior_thresh, 0.30,
               "Gravity/prior disagreement (rad) above which the constrained "
               "solve is taken as branch-flipped; <=0 disables the check.");
+DEFINE_bool(ba, false,
+            "Also run Stage B (the bundle adjustment) and print its columns "
+            "after Stage A's, so a caller parsing only Stage A keeps working.");
+// Stage B knobs. Every one of these is applied *only if it was passed on the
+// command line*, so that an unflagged run measures the shipped `BAOptions`
+// defaults rather than whatever value happens to be written below. Repeating the
+// defaults here would be a trap, and was one: with `sigma_ba_prior` declared 0 to
+// match an older library default, an unflagged run silently measured the
+// unpriored solve -- 4.5 degrees of gravity tilt -- and reported it as the
+// shipping configuration. The values below are therefore only what `--help`
+// shows; `Set` decides what takes effect.
+DEFINE_double(sigma_pix, 1.0, "Stage B image noise, pixels.");
+DEFINE_double(cauchy, 3.0, "Stage B Cauchy scale, in units of sigma_pix; 0 off.");
+DEFINE_int32(ba_iters, 30, "Stage B iteration budget.");
+DEFINE_double(sigma_yaw, 1e-3, "Stage B world-yaw gauge sigma, radians.");
+DEFINE_double(sigma_bg_prior, 0.0,
+              "Stage B gyro-bias prior sigma, rad/s; 0 disables.");
+DEFINE_double(sigma_ba_prior, 0.01,
+              "Stage B accel-bias prior sigma, m/s^2; 0 disables.");
 DEFINE_bool(header, false, "Print a column header before the row.");
 
 using namespace xivo;
@@ -144,5 +164,42 @@ int main(int argc, char **argv) {
          res.v(1), res.v(2), res.g(0), res.g(1), res.g(2), g_prior(0),
          g_prior(1), g_prior(2), res.residual, res.prior_disagreement,
          res.gravity_flipped ? 1 : 0, res.g_cond);
+
+  if (FLAGS_ba) {
+    BAState seed;
+    if (!SeedBAState(prob, res, &seed)) {
+      printf("  BA_SEED_FAILED\n");
+      return 1;
+    }
+    // Override only what the caller actually asked for; see the note at the flag
+    // declarations. `is_default` is false exactly when the flag appeared on the
+    // command line, which is the distinction the value alone cannot make.
+    BAOptions bopt;
+    const auto Set = [](const char *name, auto *dst, auto value) {
+      if (!gflags::GetCommandLineFlagInfoOrDie(name).is_default)
+        *dst = value;
+    };
+    Set("sigma_pix", &bopt.sigma_pix, FLAGS_sigma_pix);
+    Set("cauchy", &bopt.cauchy_c, FLAGS_cauchy);
+    Set("ba_iters", &bopt.max_iterations, FLAGS_ba_iters);
+    Set("sigma_yaw", &bopt.sigma_yaw, FLAGS_sigma_yaw);
+    Set("sigma_bg_prior", &bopt.sigma_bg_prior, FLAGS_sigma_bg_prior);
+    Set("sigma_ba_prior", &bopt.sigma_ba_prior, FLAGS_sigma_ba_prior);
+    const BAResult b = SolveInitBA(prob, seed, bopt);
+    const Vec3 bv = b.state.VelocityInBody(0), bg_b = b.state.GravityInBody(0);
+    if (FLAGS_header)
+      printf("%-26s %9s %9s %9s %9s %9s %9s %10s %10s %10s %9s %9s %9s "
+             "%8s %8s %8s %4s %4s %4s\n",
+             "#ba", "b_vx", "b_vy", "b_vz", "b_gx", "b_gy", "b_gz", "b_bgx",
+             "b_bgy", "b_bgz", "b_bax", "b_bay", "b_baz", "b_pix", "b_pmed",
+             "b_imu", "b_it", "b_rj", "b_ok");
+    printf("%-26s %9.5f %9.5f %9.5f %9.5f %9.5f %9.5f %10.6f %10.6f %10.6f "
+           "%9.5f %9.5f %9.5f %8.3f %8.3f %8.3f %4d %4d %4d\n",
+           FLAGS_seq.c_str(), bv(0), bv(1), bv(2), bg_b(0), bg_b(1), bg_b(2),
+           b.state.bg(0), b.state.bg(1), b.state.bg(2), b.state.ba(0),
+           b.state.ba(1), b.state.ba(2), b.pixel_rms, b.pixel_median,
+           b.imu_rms, b.iterations,
+           b.rejections, b.ok ? 1 : 0);
+  }
   return 0;
 }

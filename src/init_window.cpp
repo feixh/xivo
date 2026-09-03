@@ -137,7 +137,10 @@ bool InitWindowTracker::Build(const Vec3 &bg, const Vec3 &ba,
   if (index.size() < 4)
     return false;
 
-  prob->cams.push_back(InitCamera{opt_.Rbc, opt_.Tbc});
+  InitCamera cam{opt_.Rbc, opt_.Tbc, 1};
+  if (auto *c = CameraManager::instance(opt_.cam_id))
+    cam.focal = c->GetFocalLength();
+  prob->cams.push_back(cam);
   prob->gravity = opt_.gravity;
   prob->num_tracks = static_cast<int>(index.size());
   prob->frames.resize(frame_t_.size());
@@ -145,6 +148,9 @@ bool InitWindowTracker::Build(const Vec3 &bg, const Vec3 &ba,
     prob->frames[k].t = frame_t_[k];
     prob->frames[k].pre =
         Preintegrate(imu_, frame_t_.front(), frame_t_[k], bg, ba);
+    if (k > 0)
+      prob->frames[k].pre_prev =
+          Preintegrate(imu_, frame_t_[k - 1], frame_t_[k], bg, ba);
   }
   for (size_t k = 0; k < frame_obs_.size(); ++k) {
     for (const auto &o : frame_obs_[k]) {
