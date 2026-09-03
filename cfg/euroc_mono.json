@@ -403,5 +403,25 @@
     "min_samples": 10
   },
   "MH_max_strikes": 1,
-  "gravity_init_max_accel_dev": 0.1
+  "gravity_init_max_accel_dev": 0.1,
+  "dynamic_init": {
+    "comment": "Detect whether the rig is moving at turn-on and, if it is, initialize velocity/gravity/gyro-bias from a window bundle adjustment instead of an accelerometer average. See notes-n-prompts/report-dynamic-init.md.",
+    "comment2": "Off here so the committed EuRoC baseline is unchanged; M5 turns it on after evaluating it. With `enabled` false nothing in this block is read.",
+    "enabled": false,
+    "comment3": "Startup latency: the filter is held back until the detector decides, and on a dynamic verdict until `window_frames` images have been tracked. 31 frames is 1.5 s at EuRoC's 20 Hz; `max_wait_sec` is the hard cap and a timeout falls back to the static path.",
+    "max_wait_sec": 3.0,
+    "window_frames": 31,
+    "window_max_tracks": 160,
+    "min_frames": 12,
+    "comment4": "Detector thresholds, in m/s^2 of accelerometer sd and px of best-fit-rotation flow residual. Measured separation over EuRoC + TUM-VI: 15 static sequences peak at 0.258 / 0.090, the two moving ones floor at 0.497 / 0.610.",
+    "imu_thresh": 0.35,
+    "flow_thresh": 0.25,
+    "detect_window_sec": 0.5,
+    "detect_horizon_sec": 2.0,
+    "comment5": "Bundle adjustment, and the two gates that send a failed solve back to the static path.",
+    "sigma_pix": 1.0,
+    "ba_iters": 30,
+    "max_pixel_median": 1.5,
+    "max_speed": 5.0
+  }
 }

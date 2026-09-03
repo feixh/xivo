@@ -131,6 +131,7 @@ add_library(xest STATIC
         init_linear.cpp
         init_ba.cpp
         init_window.cpp
+        init_dispatch.cpp
         imu.cpp)
 if (IS_MAC)
   target_link_libraries(xest INTERFACE ${deps} "-Wl, -framework OpenGL")

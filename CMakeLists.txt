@@ -121,7 +121,15 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/lib${XIVO_OUTPUT_SUFFIX})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${XIVO_OUTPUT_DIR}/lib${XIVO_OUTPUT_SUFFIX})
 
 # disable logging whose severity level is below the given integer
-add_definitions(-DGOOGLE_STRIP_LOG=1)
+# (0 = keep INFO, 1 = WARNING and above, 2 = ERROR and above). The default of 1
+# compiles out every LOG(INFO), which is where all of the initialization
+# summaries live -- gravity init, the dynamic-init dispatch decision, the loaded
+# calibration. They are unreachable in a delivered build even with
+# GLOG_minloglevel=0, because the call sites are gone rather than filtered, so
+# reconfigure with -DXIVO_STRIP_LOG=0 to get them back when diagnosing a run.
+set(XIVO_STRIP_LOG "1" CACHE STRING
+    "compile out LOG() calls below this severity (0=INFO, 1=WARNING, 2=ERROR)")
+add_definitions(-DGOOGLE_STRIP_LOG=${XIVO_STRIP_LOG})
 
 # add_definitions(-DEIGEN_DEFAULT_TO_ROW_MAJOR)
 

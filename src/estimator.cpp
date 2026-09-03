@@ -689,6 +689,55 @@ Estimator::Estimator(const Json::Value &cfg)
   gravity_init_R_run_.setIdentity();
   gravity_init_seen_ = 0;
   vision_initialized_ = false;
+
+  // Dynamic initialization. Off unless the config asks for it, and never in
+  // simulation -- `simulation_` declares gravity initialized before the first
+  // message arrives, so there is no initialization left to do differently.
+  // `get` rather than `operator[]`: the latter would insert a null `dynamic_init`
+  // member into `cfg_` on every config that does not have one.
+  if (const Json::Value dyn = cfg_.get("dynamic_init", Json::Value());
+      !simulation_ && dyn.get("enabled", false).asBool()) {
+    InitDispatcher::Options dopt;
+    dopt.enabled = true;
+    dopt.max_wait_sec = dyn.get("max_wait_sec", 3.0).asDouble();
+    dopt.min_frames = dyn.get("min_frames", 12).asInt();
+    dopt.min_track_frames = dyn.get("min_track_frames", 2).asInt();
+    dopt.max_pixel_median = dyn.get("max_pixel_median", 1.5).asDouble();
+    dopt.max_speed = dyn.get("max_speed", 5.0).asDouble();
+
+    const int cam_id = 0; // the window is monocular; see `VisualStereo::image`.
+    dopt.detect.cam_id = cam_id;
+    dopt.detect.Rbc = X_.Rbc.matrix();
+    dopt.detect.window_sec = dyn.get("detect_window_sec", 0.5).asDouble();
+    dopt.detect.horizon_sec = dyn.get("detect_horizon_sec", 2.0).asDouble();
+    dopt.detect.imu_thresh = dyn.get("imu_thresh", 0.35).asDouble();
+    dopt.detect.flow_thresh = dyn.get("flow_thresh", 0.25).asDouble();
+    dopt.detect.min_tracks = dyn.get("detect_min_tracks", 15).asInt();
+
+    dopt.window.cam_id = cam_id;
+    dopt.window.Rbc = X_.Rbc.matrix();
+    dopt.window.Tbc = X_.Tbc;
+    dopt.window.gravity = g_.norm();
+    dopt.window.max_frames = dyn.get("window_frames", 31).asInt();
+    dopt.window.frame_gap = dyn.get("window_frame_gap", 0.0).asDouble();
+    dopt.window.max_tracks = dyn.get("window_max_tracks", 160).asInt();
+
+    dopt.ba.sigma_pix = dyn.get("sigma_pix", BAOptions{}.sigma_pix).asDouble();
+    dopt.ba.max_iterations =
+        dyn.get("ba_iters", BAOptions{}.max_iterations).asInt();
+    // `sigma_ba_prior` is deliberately not configurable: it is not a tuning knob
+    // but the statement that `ba` is not estimated over a window this short. See
+    // the measurements at its declaration in init_ba.h.
+
+    init_dispatch_ = std::make_unique<InitDispatcher>(dopt);
+    LOG(INFO) << "dynamic initialization enabled: window="
+              << dopt.window.max_frames << " frames, max_wait="
+              << dopt.max_wait_sec << " s, flow_thresh="
+              << dopt.detect.flow_thresh << " px, imu_thresh="
+              << dopt.detect.imu_thresh << " m/s^2";
+  }
+  init_buf_.clear();
+  init_have_t0_ = false;
   // reset measurement counter
   imu_counter_ = 0;
   vision_counter_ = 0;
@@ -729,7 +778,7 @@ void Estimator::Run() {
       }
       if (msg != nullptr) {
         // std::cout << "executing\n";
-        msg->Execute(this);
+        Dispatch(std::move(msg));
       } else {
         std::this_thread::sleep_for(std::chrono::microseconds(200));
       }
@@ -1448,11 +1497,149 @@ void Estimator::MaintainBuffer() {
   if (!async_run_) {
     // execute here
     if (buf_.initialized && buf_.size() > InternalBuffer::MAX_SIZE) {
-      buf_.front()->Execute(this);
+      // Pop before dispatching, so that `Dispatch` may take ownership of the
+      // message and hold it for a later replay. `cmp` dereferences the pointers
+      // it compares, so the heap cannot be left holding a moved-from slot even
+      // for the duration of one call. The reorder is invisible: no `Execute`
+      // touches `buf_`, and the asynchronous path above has always popped first.
+      std::unique_ptr<internal::Message> msg = std::move(buf_.front());
       std::pop_heap(buf_.begin(), buf_.end(), cmp);
       buf_.pop_back();
+      Dispatch(std::move(msg));
     }
   }
+}
+
+number_t Estimator::InitWindowTime(const timestamp_t &ts) const {
+  return std::chrono::duration<number_t>(ts - init_t0_).count();
+}
+
+void Estimator::Dispatch(std::unique_ptr<internal::Message> msg) {
+  if (init_dispatch_ == nullptr || !init_dispatch_->waiting()) {
+    msg->Execute(this);
+    return;
+  }
+
+  // Only the three message types that feed the filter's initialization are
+  // diverted. `VisualTrackerOnly` runs the tracker and never reads filter state,
+  // and the point-cloud types are simulation-only (where the dispatcher is not
+  // built at all), so holding either back would add latency and buy nothing.
+  auto *imu = dynamic_cast<internal::Inertial *>(msg.get());
+  auto *vis = dynamic_cast<internal::HasImage *>(msg.get());
+  if (imu == nullptr && vis == nullptr) {
+    msg->Execute(this);
+    return;
+  }
+
+  if (!init_have_t0_) {
+    init_t0_ = msg->ts();
+    init_have_t0_ = true;
+  }
+  const number_t t = InitWindowTime(msg->ts());
+
+  if (imu != nullptr) {
+    // The window's IMU model is `Cg*w - bg` / `Ca*a - ba`, the same one
+    // `ComposeMotion` propagates with, so the intrinsics go on here and the
+    // biases stay in for the solver to find. `clamp_signals_` is deliberately not
+    // applied: it is a robustness guard on the *filter's* propagation, and the
+    // replay below still sees it.
+    init_dispatch_->AddImu(t, imu_.Cg() * imu->gyro(), imu_.Ca() * imu->accel());
+  } else {
+    init_dispatch_->AddImage(t, vis->image());
+  }
+  init_buf_.push_back(std::move(msg));
+
+  if (init_dispatch_->Decide().path != InitDecision::Path::kWaiting)
+    FinishInit();
+}
+
+void Estimator::FinishInit() {
+  const InitDecision d = init_dispatch_->decision();
+  // Move the buffer out before replaying. `Execute` goes to the `*Internal`
+  // entry points and so cannot re-enter `Dispatch` today, but iterating a member
+  // container while calling into the filter is the kind of thing that stays
+  // correct only by accident; a local makes it correct by construction.
+  std::vector<std::unique_ptr<internal::Message>> pending;
+  pending.swap(init_buf_);
+
+  size_t first = 0;
+  if (d.path == InitDecision::Path::kDynamic) {
+    // Walk up to the handoff, remembering the last IMU sample there: that is the
+    // sample the filter's propagation clock and its `curr_/last_` accelerometer
+    // and gyro state have to start from, exactly as `InertialMeasInternal` sets
+    // them when the static path succeeds.
+    timestamp_t seed_ts{};
+    Vec3 seed_gyro = Vec3::Zero(), seed_accel = Vec3::Zero();
+    bool have_seed = false;
+    for (; first < pending.size(); ++first) {
+      if (InitWindowTime(pending[first]->ts()) > d.t_handoff)
+        break;
+      if (auto *m = dynamic_cast<internal::Inertial *>(pending[first].get())) {
+        seed_ts = m->ts();
+        seed_gyro = m->gyro();
+        seed_accel = m->accel();
+        have_seed = true;
+      }
+    }
+    if (have_seed) {
+      SeedFromDynamicInit(d, seed_ts, seed_gyro, seed_accel);
+    } else {
+      // Cannot happen with a window that solved -- it was preintegrated over
+      // these very samples -- but if it ever did, replaying everything is the
+      // one option that leaves a consistent filter.
+      LOG(ERROR) << "dynamic init: no IMU sample at or before the handoff; "
+                 << "falling back to the static path";
+      first = 0;
+    }
+  }
+
+  LOG(INFO) << "dynamic init: replaying " << pending.size() - first << " of "
+            << pending.size() << " buffered messages";
+  for (size_t i = first; i < pending.size(); ++i)
+    pending[i]->Execute(this);
+}
+
+void Estimator::SeedFromDynamicInit(const InitDecision &d,
+                                    const timestamp_t &ts, const Vec3 &gyro,
+                                    const Vec3 &accel) {
+  // Same construction as `InitializeGravity`, fed a measured gravity direction
+  // instead of an accelerometer average: find Rsg with `Rsb * a + Rsg * g_ == 0`
+  // where `a` is the specific force a stationary rig would read here, which is
+  // `-gravity_body`. Dropping the third component of the logarithm removes the
+  // yaw that `FromTwoVectors` leaves arbitrary, exactly as the static path does,
+  // so the two paths agree on the output convention.
+  const Vec3 accel_equiv = -d.gravity_body;
+  Eigen::AngleAxis<number_t> AAg(
+      Eigen::Quaternion<number_t>::FromTwoVectors(-g_, accel_equiv));
+  Vec3 Wsg(AAg.axis() * AAg.angle());
+  Wsg(2) = 0;
+  X_.Rsg = SO3::exp(Wsg);
+
+  // `Vsb` is a *spatial* vector (`ComposeMotion`: `Tsb += V dt`), while the
+  // decision reports the velocity in the handoff frame's body coordinates.
+  // `X_.Rsb` is the identity on every shipped config, which is the assumption the
+  // static path's `Rsg` construction also makes; rotating explicitly costs
+  // nothing and keeps this correct if that ever stops being true.
+  X_.Vsb = X_.Rsb * d.Vsb;
+  X_.bg = d.bg;
+  X_.ba = d.ba;
+
+  // The propagation clock, mirroring the static path's handoff.
+  curr_imu_time_ = last_time_ = ts;
+  curr_accel_ = last_accel_ = accel;
+  curr_gyro_ = last_gyro_ = gyro;
+  gravity_initialized_ = true;
+  gravity_init_buf_.clear();
+  gravity_init_R_buf_.clear();
+
+  LOG(INFO) << "===== dynamic init handoff =====";
+  LOG(INFO) << "Wsg=" << Wsg.transpose();
+  LOG(INFO) << "Vsb=" << X_.Vsb.transpose() << " |Vsb|=" << X_.Vsb.norm();
+  LOG(INFO) << "bg=" << X_.bg.transpose() << " ba=" << X_.ba.transpose();
+  LOG(INFO) << "The norm below should be small";
+  LOG(INFO) << "|Rsb*a+Rg*g|="
+            << (X_.Rsb * accel_equiv + X_.Rsg * g_).norm();
+  LOG(INFO) << "IMU initialized (dynamic)";
 }
 
 void Estimator::VisualMeas(const timestamp_t &ts_raw, const cv::Mat &img) {

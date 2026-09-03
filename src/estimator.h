@@ -27,6 +27,7 @@
 #include "ekf_update.h"
 #include "graph.h"
 #include "imu.h"
+#include "init_dispatch.h"
 #include "tracker.h"
 #include "visualize.h"
 #include "mapper.h"
@@ -51,10 +52,24 @@ protected:
   timestamp_t ts_;
 };
 
-class Visual : public Message {
+/** Interface for the payload the dynamic initializer needs to look at *without*
+ *  executing the message. `InitDispatcher` diverts messages before the filter
+ *  sees them, so the divert has to be able to read an image or an IMU triple out
+ *  of a buffered message; making that an explicit interface keeps the alternative
+ *  -- friending the estimator to the message internals, or downcasting to each
+ *  concrete type in turn -- out of the dispatch path. */
+class HasImage {
+public:
+  virtual ~HasImage() = default;
+  /** The primary (left) image. Never a copy: `cv::Mat` is refcounted. */
+  virtual const cv::Mat &image() const = 0;
+};
+
+class Visual : public Message, public HasImage {
 public:
   Visual(const timestamp_t &ts, const cv::Mat &img) : Message{ts}, img_{img} {}
   void Execute(EstimatorPtr est);
+  const cv::Mat &image() const override { return img_; }
 
 private:
   cv::Mat img_;
@@ -63,11 +78,15 @@ private:
 /** A synchronized stereo pair. `img_` is the left/primary image -- the same one
  * `Visual` would carry -- so the two paths differ only by the extra right
  * image. */
-class VisualStereo : public Message {
+class VisualStereo : public Message, public HasImage {
 public:
   VisualStereo(const timestamp_t &ts, const cv::Mat &img, const cv::Mat &img_r)
       : Message{ts}, img_{img}, img_r_{img_r} {}
   void Execute(EstimatorPtr est);
+  /** The left image only. The initialization window is monocular even on a
+   *  stereo rig -- it triangulates over the window's own baseline, so the
+   *  stereo baseline would add scale it does not need. */
+  const cv::Mat &image() const override { return img_; }
 
 private:
   cv::Mat img_, img_r_;
@@ -120,6 +139,9 @@ public:
   Inertial(const timestamp_t &ts, const Vec3 &gyro, const Vec3 &accel)
       : Message{ts}, gyro_{gyro}, accel_{accel} {}
   void Execute(EstimatorPtr est);
+  /** Raw, as measured: neither `Cg`/`Ca` nor the biases have been applied. */
+  const Vec3 &gyro() const { return gyro_; }
+  const Vec3 &accel() const { return accel_; }
 
 private:
   Vec3 gyro_, accel_;
@@ -1054,6 +1076,50 @@ private:
   } buf_;
   bool async_run_; // if true, run in a separate thread
   void MaintainBuffer();
+
+  // ---- dynamic initialization (M4) -------------------------------------------
+  //
+  // The whole mechanism hangs off one pointer. Null unless `dynamic_init.enabled`
+  // is set, and when it is null `Dispatch` is a plain `Execute` -- no extra
+  // branch reached, no state added, nothing allocated. That is what makes "off is
+  // exactly the old behaviour" checkable by reading rather than by measuring.
+
+  /** Decides static vs dynamic and owns the pre-init window. */
+  std::unique_ptr<InitDispatcher> init_dispatch_;
+  /** Messages held back while `init_dispatch_` is deciding, in the order they
+   *  came off the timestamp heap. On the static path all of them are replayed; on
+   *  the dynamic path those at or before the handoff are dropped, their
+   *  information having gone into the bundle adjustment instead. */
+  std::vector<std::unique_ptr<internal::Message>> init_buf_;
+  /** Origin of the dispatcher's window clock: the timestamp of the first message
+   *  diverted into it. */
+  timestamp_t init_t0_{};
+  bool init_have_t0_{false};
+
+  /** Route one message: into the initializer while it is still deciding,
+   *  otherwise straight to `Execute`. The single funnel both the synchronous and
+   *  the asynchronous execution paths go through. */
+  void Dispatch(std::unique_ptr<internal::Message> msg);
+  /** Seconds from `init_t0_` to `ts`. Called once when a message is diverted and
+   *  again when it is considered for replay; because both callers evaluate the
+   *  identical expression, comparing the result against `t_handoff` splits the
+   *  buffer exactly rather than to within an epsilon. */
+  number_t InitWindowTime(const timestamp_t &ts) const;
+  /** Act on a settled decision: seed the filter if it went dynamic, then replay
+   *  whatever the decision says is still owed to the filter. */
+  void FinishInit();
+  /** Seed `X_` and the propagation clock from a dynamic initialization, in place
+   *  of what `InitializeGravity` would have done. `seed_imu` is the last IMU
+   *  sample at or before the handoff instant, raw as measured. */
+  void SeedFromDynamicInit(const InitDecision &d, const timestamp_t &ts,
+                           const Vec3 &gyro, const Vec3 &accel);
+
+public:
+  /** The dynamic initializer, or null if it is disabled. Exposed read-only so a
+   *  caller can log which path was taken and why; there is nothing to set. */
+  const InitDispatcher *init_dispatch() const { return init_dispatch_.get(); }
+
+private:
 
   own<std::thread *> worker_;
   /** Set by the destructor to break the worker's loop. Without it, `Run()`'s
