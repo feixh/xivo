@@ -164,6 +164,15 @@ struct BAOptions {
    *  features out of the problem. See the comment at the clamp in init_ba.cpp. */
   number_t min_depth{0.05};
 
+  /** Also report the marginal covariance of the handoff state (`BAResult::cov`).
+   *  Off by default because it costs one extra residual accumulation plus an
+   *  LDLT of the reduced system -- 25-40 ms on a 41-frame window, next to a
+   *  300-1300 ms solve -- and nothing on the shipped path reads it. `linear_probe
+   *  -cov` is the only caller that sets it: M6 measured whether the filter should
+   *  start from this matrix instead of its config priors, and the answer was no.
+   *  See notes-n-prompts/notes-dyninit/m6-covariance.md. */
+  bool want_covariance{false};
+
   int max_iterations{30};
   /** Stop when one accepted step improves the cost by less than this fraction. */
   number_t cost_tol{1e-10};
@@ -202,6 +211,25 @@ struct BAResult {
   int obs_used{0};
   int tracks_used{0};
   const char *why{"not run"};
+
+  /** Marginal covariance of `(v_last, bg, ba)`, in that order, at the converged
+   *  state: the corresponding 9x9 block of the inverse of the Schur-complemented
+   *  reduced information matrix, undamped, with the translation gauge pinned the
+   *  way `SolveStep` pins it. Velocity is in `W`; `BAState::VelocityInBody`'s
+   *  rotation applies to it as `R_k' C R_k`, and because a change of gauge maps
+   *  `R_k -> Q R_k` and `C -> Q C Q'`, the body-frame covariance is
+   *  gauge-invariant while this one is not.
+   *
+   *  Only populated when `BAOptions::want_covariance` is set, and then only if
+   *  the reduced system factorized -- read `cov_ok`, not the matrix. **It is the
+   *  covariance of this cost function, not of the true error**: the IMU edges are
+   *  whitened by the diagonal approximation documented at `BAOptions::sigma_g`,
+   *  and `ba` is priored rather than estimated, so its block reports the prior
+   *  back. M6 measured how far that is from the truth -- 10-500x too tight, and
+   *  worst exactly where the window is hard -- which is why nothing consumes it;
+   *  see notes-n-prompts/notes-dyninit/m6-covariance.md. */
+  Mat9 cov{Mat9::Zero()};
+  bool cov_ok{false};
 };
 
 /** Turn Stage A's answer into a Stage B seed.

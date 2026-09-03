@@ -527,6 +527,72 @@ bool SolveStep(const Evaluator &ev, const Normal &nrm, number_t lambda,
   return true;
 }
 
+/** Marginal covariance of `(v_{K-1}, bg, ba)` from the normal equations at the
+ *  converged state.
+ *
+ *  The same reduction `SolveStep` performs -- Schur out the tracks, pin `p_0` --
+ *  but with `lambda = 0`, because damping is a step-size device and leaving it in
+ *  would report a covariance that shrinks as LM happens to have tightened. Only
+ *  nine columns of the inverse are needed, so this solves against a selection
+ *  matrix rather than inverting the whole reduced block.
+ *
+ *  The ridge below is not damping in disguise: it is 1e-12 relative, which is
+ *  there so that a track whose 3x3 block is singular to working precision -- two
+ *  observations on a near-degenerate baseline -- does not sink the whole
+ *  factorization. `SolveStep` gets the same protection from `lambda`, which at
+ *  zero it would lose. */
+bool ReducedMarginal(const Evaluator &ev, const Normal &nrm, int K, Mat9 *cov) {
+  const int M = nrm.M;
+  if (M < 9 * K + 6 || K < 2)
+    return false;
+  MatX S = nrm.Hcc;
+
+  const auto &tracks = ev.tracks();
+  for (int n : tracks) {
+    Mat3 A = nrm.Hff[n];
+    const number_t fl = std::max<number_t>(nrm.diag_f[n].maxCoeff(), 1e-30) * 1e-12;
+    for (int d = 0; d < 3; ++d)
+      A(d, d) += fl;
+    Eigen::FullPivLU<Mat3> lu(A);
+    if (!lu.isInvertible())
+      return false;
+    const Mat3 Ainv = lu.inverse();
+    const auto &fr = ev.frames(n);
+    for (size_t a = 0; a < fr.size(); ++a) {
+      const Eigen::Matrix<number_t, 9, 3> CaT_Ainv =
+          nrm.Hfc[n][a].transpose() * Ainv;
+      for (size_t b = 0; b < fr.size(); ++b)
+        S.block<9, 9>(9 * fr[a], 9 * fr[b]).noalias() -=
+            CaT_Ainv * nrm.Hfc[n][b];
+    }
+  }
+
+  for (int i = Ip(0); i < Ip(0) + 3; ++i) {
+    S.row(i).setZero();
+    S.col(i).setZero();
+    S(i, i) = 1;
+  }
+
+  MatX E = MatX::Zero(M, 9);
+  for (int i = 0; i < 3; ++i) {
+    E(Iv(K - 1) + i, i) = 1;   // velocity at the handoff frame
+    E(9 * K + i, 3 + i) = 1;   // bg
+    E(9 * K + 3 + i, 6 + i) = 1; // ba
+  }
+  Eigen::LDLT<MatX> ldlt(0.5 * (S + S.transpose()));
+  if (ldlt.info() != Eigen::Success)
+    return false;
+  const MatX X = ldlt.solve(E);
+  if (!X.allFinite())
+    return false;
+  const Mat9 C = E.transpose() * X;
+  *cov = 0.5 * (C + C.transpose());
+  // A negative variance means the reduced system was not positive definite, which
+  // LDLT will factor anyway. Report it as a failure rather than hand a caller a
+  // covariance it cannot use.
+  return cov->diagonal().minCoeff() > 0;
+}
+
 } // namespace
 
 bool SeedBAState(const InitProblem &prob, const LinearInitResult &lin,
@@ -664,7 +730,12 @@ BAResult SolveInitBA(const InitProblem &prob, const BAState &seed,
   }
 
   Stats fin;
-  res.cost_final = ev.Evaluate(st, nullptr, &fin);
+  // The final accumulation is needed only for the covariance: `nrm` is stale
+  // whenever the loop exited on convergence, since the accepted step that
+  // converged did not re-evaluate it.
+  res.cost_final = ev.Evaluate(st, opt.want_covariance ? &nrm : nullptr, &fin);
+  if (opt.want_covariance)
+    res.cov_ok = ReducedMarginal(ev, nrm, ev.K(), &res.cov);
   res.state = st;
   res.obs_used = fin.pix_obs;
   res.pixel_rms = fin.pix_obs > 0 ? std::sqrt(fin.pix_sq_px / fin.pix_obs) : 0;

@@ -486,6 +486,7 @@
     "sigma_pix": 1.0,
     "ba_iters": 30,
     "max_pixel_median": 1.5,
-    "max_speed": 5.0
+    "max_speed": 5.0,
+    "comment6": "Not a knob but a record, so that this is not re-attempted blind. M6 asked whether the bundle adjustment's own marginal covariance over (Vsb, bg, ba) is a better initial P than the P.Vsb / P.bg / P.ba priors above, since it knows whether the window it just solved was easy or hard. Measured, and the answer is no. Scored against groundtruth over 22 EuRoC windows the marginal's sigmas are 10-500x smaller than the errors they describe, and are worst calibrated exactly where the window is hard -- the one place a seeded covariance would have had to earn its place -- so the matrix carries no per-window information (rank correlation with the true error, mid-flight: +0.01 velocity, -0.22 gyro bias, -0.47 accel bias), while the config priors above already score rms |e|/sigma of 0.97 / 1.42 / 0.88. Seeding it anyway, inflated by the measured rms |e|/sigma and clamped at the config prior, cost +0.007 m stereo and +0.006 m mono of mean ATE over the nine mid-flight windows where it fires (n=3). The covariance is still computed on demand by bin/linear_probe -cov, which is how those numbers are reproduced; nothing in the filter reads it. See notes-n-prompts/notes-dyninit/m6-covariance.md."
   }
 }

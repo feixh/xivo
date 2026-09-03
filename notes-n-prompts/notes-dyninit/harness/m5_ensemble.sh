@@ -43,6 +43,12 @@
 # identical control. That one patch is not redundant: once M5 ships the feature on,
 # a control that merely left the base config alone would be an `on` arm.
 #
+# --base-name / --base-patch move the *control*. The default control is the feature
+# off, which is the question M5 asked; a later milestone asking whether one more
+# thing on top of the shipped feature helps has to compare against the shipped
+# feature, not against its absence, or every number it prints is the M5 effect
+# again. M6 uses `--base-name on --base-patch dynamic_init.enabled=true`.
+#
 # n=3 over all eleven sequences in both modes takes ~15 min; n=10 ~45 min.
 set -euo pipefail
 
@@ -58,6 +64,8 @@ SEQS="MH_01_easy MH_02_easy MH_03_medium MH_04_difficult MH_05_difficult V1_01_e
 TAG=""
 OUT=""
 PATCHES=()
+BASE_NAME="off"
+BASE_PATCHES=()
 ONLY=""
 START_SEC=""
 
@@ -69,6 +77,8 @@ while [ $# -gt 0 ]; do
     --tag)     TAG="$2"; shift 2 ;;
     --out)     OUT="$2"; shift 2 ;;
     --patch)   PATCHES+=("$2"); shift 2 ;;
+    --base-name)  BASE_NAME="$2"; shift 2 ;;
+    --base-patch) BASE_PATCHES+=("$2"); shift 2 ;;
     --only)    ONLY="$2"; shift 2 ;;   # off | on | report
     --start-sec) START_SEC="$2"; shift 2 ;;
     -h|--help) awk 'NR>1 && /^#/; NR>1 && !/^#/ {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -76,8 +86,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 OUT="${OUT:-$WORKSPACE/results/dyninit/m5-n$MEMBERS}"
-OFF_ARM="off"
+OFF_ARM="$BASE_NAME"
 ON_ARM="on${TAG:+_$TAG}"
+# Default control: the feature off. Anything else the caller asked for.
+[ ${#BASE_PATCHES[@]} -gt 0 ] || BASE_PATCHES=('dynamic_init.enabled=false')
 
 mkdir -p "$OUT"
 run_arm() { # run_arm <name> <patch...>
@@ -93,10 +105,10 @@ run_arm() { # run_arm <name> <patch...>
 }
 
 case "$ONLY" in
-  off)    run_arm "$OFF_ARM" 'dynamic_init.enabled=false' ;;
+  off)    run_arm "$OFF_ARM" "${BASE_PATCHES[@]}" ;;
   on)     run_arm "$ON_ARM" 'dynamic_init.enabled=true' "${PATCHES[@]+"${PATCHES[@]}"}" ;;
   report) ;;
-  "")     [ -s "$OUT/$OFF_ARM/summary.csv" ] || run_arm "$OFF_ARM" 'dynamic_init.enabled=false'
+  "")     [ -s "$OUT/$OFF_ARM/summary.csv" ] || run_arm "$OFF_ARM" "${BASE_PATCHES[@]}"
           run_arm "$ON_ARM" 'dynamic_init.enabled=true' "${PATCHES[@]+"${PATCHES[@]}"}" ;;
   *) echo "--only must be off, on or report" >&2; exit 1 ;;
 esac
@@ -107,7 +119,7 @@ for mode in $( [ "$MODE" = both ] && echo "stereo mono" || echo "$MODE" ); do
   echo
   echo "################ $mode, n=$MEMBERS ################"
   python3 "$OV/agg_ensemble.py" --mode "$mode" \
-    --arm off "$OUT/$OFF_ARM" --arm "$ON_ARM" "$OUT/$ON_ARM" \
+    --arm "$OFF_ARM" "$OUT/$OFF_ARM" --arm "$ON_ARM" "$OUT/$ON_ARM" \
     --csv "$OUT/agg_${mode}_${ON_ARM}.csv"
 done
 
@@ -151,10 +163,11 @@ for m in (['stereo', 'mono'] if mode == 'both' else [mode]):
     seqs = [s for s in a if s in b]
     if not seqs:
         continue
-    print(f'\n--- {m}: delta ATE (on - off)'
+    print(f'\n--- {m}: delta ATE ({on_arm} - {off_arm})'
           + (', and the static null control' if DYN is not None
              else f', all starts {start:g} s in'))
-    print(f'{"sequence":<18}{"off":>16}{"on":>16}{"delta":>10}{"+-sem":>9}  branch')
+    print(f'{"sequence":<18}{off_arm:>16}{on_arm:>16}'
+          f'{"delta":>10}{"+-sem":>9}  branch')
     stat, dyn = [], []
     div_off = div_on = 0
     for s in sorted(seqs):

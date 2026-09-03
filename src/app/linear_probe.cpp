@@ -77,6 +77,12 @@ DEFINE_int32(at_frame, 0,
              "**last** frame -- that is the instant the filter is about to call "
              "`Rsb = I` -- so 0 scores a quantity nothing consumes. The default "
              "stays 0 so that the M2/M3 numbers remain reproducible.");
+DEFINE_bool(cov, false,
+            "Also report Stage B's marginal covariance over the three seeded "
+            "quantities, as extra `#cov` lines: nine sigmas, then the full 9x9. "
+            "Rotated into the **last** frame's body coordinates -- the frame the "
+            "handoff speaks in, and the one whose velocity block is "
+            "gauge-invariant -- irrespective of `-at_frame`.");
 DEFINE_bool(header, false, "Print a column header before the row.");
 
 using namespace xivo;
@@ -192,6 +198,7 @@ int main(int argc, char **argv) {
     Set("sigma_yaw", &bopt.sigma_yaw, FLAGS_sigma_yaw);
     Set("sigma_bg_prior", &bopt.sigma_bg_prior, FLAGS_sigma_bg_prior);
     Set("sigma_ba_prior", &bopt.sigma_ba_prior, FLAGS_sigma_ba_prior);
+    bopt.want_covariance = FLAGS_cov;
     const BAResult b = SolveInitBA(prob, seed, bopt);
     const int at = FLAGS_at_frame < 0 ? b.state.num_frames() + FLAGS_at_frame
                                       : FLAGS_at_frame;
@@ -216,6 +223,26 @@ int main(int argc, char **argv) {
     if (FLAGS_at_frame != 0)
       printf("#at_frame %d of %d, t=%.4f s\n", at, b.state.num_frames(),
              prob.frames[at].t);
+    if (FLAGS_cov) {
+      if (!b.cov_ok) {
+        printf("#cov ok=0\n");
+      } else {
+        // Body frame of the last frame, for velocity; `bg` and `ba` are body
+        // quantities already. See BAResult::cov for why the rotation matters.
+        Mat9 T = Mat9::Identity();
+        T.block<3, 3>(0, 0) = b.state.R.back().transpose();
+        const Mat9 C = T * b.cov * T.transpose();
+        const Vec9 s = C.diagonal().cwiseSqrt();
+        printf("#cov ok=1 s_v=%.6e %.6e %.6e s_bg=%.6e %.6e %.6e "
+               "s_ba=%.6e %.6e %.6e\n",
+               s(0), s(1), s(2), s(3), s(4), s(5), s(6), s(7), s(8));
+        printf("#cov9");
+        for (int i = 0; i < 9; ++i)
+          for (int j = 0; j < 9; ++j)
+            printf(" %.6e", C(i, j));
+        printf("\n");
+      }
+    }
   }
   return 0;
 }

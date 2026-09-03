@@ -659,3 +659,98 @@ TEST(InitBA, DefaultPriorHoldsTheAccelBiasNearZero) {
   EXPECT_LT((unpriored.state.bg - tr.bg).norm(), 1.0e-3);
 }
 
+
+// ---------------------------------------------------------------------------
+// the marginal covariance
+// ---------------------------------------------------------------------------
+
+TEST(InitBA, MarginalCovarianceMatchesTheDenseHessian) {
+  // `BAResult::cov` is computed by Schur-complementing the tracks out and solving
+  // the reduced system against a nine-column selection matrix. That is a
+  // different computation from what a marginal covariance *means*, so this test
+  // asks for the meaning: invert the whole Hessian, tracks included, and read the
+  // same nine rows and columns off it. The dense side comes from
+  // `InitBALinearize`, i.e. from the accumulation the solver itself runs, so a
+  // derivative error would cancel on both sides -- deliberately, since the
+  // derivatives have their own test above and what is under test here is the
+  // elimination and the gauge handling.
+  const InitCamera cam = EurocishCam();
+  const number_t t0 = 0.4, span = 0.8;
+  const int K = 9;
+  const Truth tr = EurocishTruth(kEurocBg, kEurocBa);
+  const auto pts = MakeScene(60, 12);
+  const InitProblem prob = MakeProblem(tr, pts, cam, t0, span, K, Vec3::Zero(),
+                                       Vec3::Zero(), PixelSigma(), 5);
+  const BAState truth = TrueState(tr, pts, t0, span, K);
+  const BAState seed =
+      TiltedSeed(truth, Vec3{0.05, -0.04, 0}, Vec3{0.25, -0.2, 0.1},
+                 Vec3::Zero(), Vec3::Zero());
+
+  BAOptions opt; // shipped defaults, including `sigma_ba_prior`
+  opt.sigma_pix = 0.3;
+  // No robust loss. Under Cauchy the reweighted normal equations are not the
+  // Hessian of any one quadratic, so "the" covariance would not be well defined
+  // and the two sides would be entitled to disagree.
+  opt.cauchy_c = 0;
+  opt.want_covariance = true;
+  const BAResult res = SolveInitBA(prob, seed, opt);
+  ASSERT_TRUE(res.ok) << res.why;
+  ASSERT_TRUE(res.cov_ok) << "no covariance was produced";
+
+  VecX r;
+  MatX J;
+  std::vector<int> tcol;
+  // `seed` as the gauge reference, not `res.state`: the yaw prior's Jacobian is a
+  // function of `R_0 R_ref_0'` (init_ba.cpp), so referencing it anywhere else is a
+  // different Hessian -- by 1e-3 relative here, which is exactly the size of
+  // disagreement that would otherwise be blamed on the elimination.
+  ASSERT_TRUE(InitBALinearize(prob, res.state, opt, seed, &r, &J, &tcol));
+  MatX H = J.transpose() * J;
+  // The same translation gauge the solver pins: `p_0` held exactly, by zeroing
+  // its rows and columns. Without this H is singular and the comparison would be
+  // between two arbitrary pseudo-inverses.
+  for (int i = 3; i < 6; ++i) {
+    H.row(i).setZero();
+    H.col(i).setZero();
+    H(i, i) = 1;
+  }
+  const MatX dense_full = H.inverse();
+  // Column layout, from init_ba.h: frame k at [9k, 9k+9) as (dtheta, dp, dv),
+  // then bg, then ba. The reported order is (v at the last frame, bg, ba).
+  int sel[9];
+  for (int i = 0; i < 3; ++i) {
+    sel[i] = 9 * (K - 1) + 6 + i;
+    sel[3 + i] = 9 * K + i;
+    sel[6 + i] = 9 * K + 3 + i;
+  }
+  Mat9 dense;
+  for (int i = 0; i < 9; ++i)
+    for (int j = 0; j < 9; ++j)
+      dense(i, j) = dense_full(sel[i], sel[j]);
+
+  ASSERT_GT(dense.diagonal().minCoeff(), 0);
+  // Correlation-scaled, because the three blocks differ by four orders of
+  // magnitude (m/s against rad/s) and an absolute tolerance would be a test of
+  // the velocity block alone. The tolerance is 1e-4 rather than roundoff because
+  // the two sides are not the same arithmetic: the dense side inverts a 267x267
+  // Hessian that carries this window's near-flat scale/accel-bias direction (see
+  // `RecoversTheExactStateFromATiltedSeed`), while the sparse side eliminates the
+  // tracks first. Measured worst disagreement 6e-6, i.e. 16x inside the gate --
+  // and a wrong elimination or a mismatched gauge misses by 1e-3, which this
+  // catches: referencing the yaw prior to the wrong state does exactly that.
+  for (int i = 0; i < 9; ++i)
+    for (int j = 0; j < 9; ++j) {
+      const number_t scale = std::sqrt(dense(i, i) * dense(j, j));
+      EXPECT_NEAR(res.cov(i, j) / scale, dense(i, j) / scale, 1e-4)
+          << "entry (" << i << ", " << j << ")";
+    }
+
+  // And the matrix is not trivially the prior handed back: on this window the
+  // velocity is determined far better than the 0.5 m/s the filter's config
+  // assumes, which is exactly the property M6 went on to measure against real
+  // groundtruth (and found does not hold there -- see m6-covariance.md).
+  EXPECT_LT(std::sqrt(res.cov.diagonal().head<3>().maxCoeff()), 0.1);
+  // `ba` is priored, not estimated, so its sigma cannot exceed the prior by much.
+  EXPECT_LT(std::sqrt(res.cov.diagonal().tail<3>().maxCoeff()),
+            1.5 * opt.sigma_ba_prior);
+}
