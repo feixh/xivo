@@ -403,5 +403,26 @@
     "min_samples": 10
   },
   "MH_max_strikes": 1,
-  "gravity_init_max_accel_dev": 0.1
+  "gravity_init_max_accel_dev": 0.1,
+  "dynamic_init": {
+    "comment": "Detect whether the rig is moving at turn-on and, if it is, initialize velocity/gravity/gyro-bias from a window bundle adjustment instead of an accelerometer average. See notes-n-prompts/report-dynamic-init.md.",
+    "comment2": "On: measured as n=10 jitter ensembles over all eleven sequences in both modes. From a table start it is neutral -- the nine static sequences take the static path in both arms and move only by this comparison's own gating noise (mean |delta| 0.006 m stereo, 0.009 m mono), and MH_01/MH_02, the only two EuRoC sequences that leave the table already moving, by +0.007 m. From a mid-flight start (`pyxivo.py -start_sec 55`), which is what it is for, it removes every divergence: with it off 29 of 110 stereo runs and 40 of 110 mono runs exceed 100 m, with it on none do, and the sequences that finish either way improve by 0.014 m (stereo) / 0.24 m (mono) on average. The metric that moves most is orientation, because a mis-seeded gravity is a global tilt and `ate_002`'s Horn alignment is blind to one: absolute orientation error (`ov_eval posyaw`) improves by 0.54 deg (stereo) / 3.82 deg (mono) mid-flight, best case mono V1_02 at 25.3 -> 2.3 deg, whose accelerometer average is 13.1 deg from gravity where the solve is 0.8 deg from it. Cost is one-off, and it is not small: ~0.89 s of extra compute on a dynamic start (0.39 s of buffered tracking plus a 0.50 s solve) and ~0.26 s on a static one, one core. It is paid while the filter is held back, so it fits inside real time on a 20 Hz stream, but the handoff instant is a latency spike -- see the cost section of m5-eval.md. See notes-n-prompts/notes-dyninit/m5-eval.md.",
+    "enabled": true,
+    "comment3": "Startup latency: the filter is held back until the detector decides, and on a dynamic verdict until `window_frames` images have been tracked. 41 frames is 2.0 s at EuRoC's 20 Hz; `max_wait_sec` is the hard cap and a timeout falls back to the static path. 31 frames ties on the mean but its worst surviving run is far worse (V2_03 stereo 5.56 m against 0.16 m), so the window is set on the worst case, not the average.",
+    "max_wait_sec": 3.0,
+    "window_frames": 41,
+    "window_max_tracks": 160,
+    "min_frames": 12,
+    "comment4": "Detector thresholds, in m/s^2 of accelerometer sd and px of best-fit-rotation flow residual. Measured separation over EuRoC + TUM-VI: 15 static sequences peak at 0.258 / 0.090, the two moving ones floor at 0.497 / 0.610.",
+    "imu_thresh": 0.35,
+    "flow_thresh": 0.25,
+    "detect_window_sec": 0.5,
+    "detect_horizon_sec": 2.0,
+    "comment5": "Bundle adjustment, and the two gates that send a failed solve back to the static path. `sigma_pix` is really the vision-to-IMU weight ratio, and it also moves the residual that `max_pixel_median` tests: shrinking it to 0.25 improves the seed wherever the solve is accepted either way, but it also pulls mono MH_05 under the gate, and that solve is worse than the static fallback it displaces (0.57 -> 0.94 m ATE). Left at 1.0 so the rejections stay correct -- MH_04, whose window is genuinely bad at 9.8-17.2 px, is rejected at every value.",
+    "sigma_pix": 1.0,
+    "ba_iters": 30,
+    "max_pixel_median": 1.5,
+    "max_speed": 5.0,
+    "comment6": "Not a knob but a record, so that this is not re-attempted blind. M6 asked whether the bundle adjustment's own marginal covariance over (Vsb, bg, ba) is a better initial P than the P.Vsb / P.bg / P.ba priors above, since it knows whether the window it just solved was easy or hard. Measured, and the answer is no. Scored against groundtruth over 22 EuRoC windows the marginal's sigmas are 10-500x smaller than the errors they describe, and are worst calibrated exactly where the window is hard -- the one place a seeded covariance would have had to earn its place -- so the matrix carries no per-window information (rank correlation with the true error, mid-flight: +0.01 velocity, -0.22 gyro bias, -0.47 accel bias), while the config priors above already score rms |e|/sigma of 0.97 / 1.42 / 0.88. Seeding it anyway, inflated by the measured rms |e|/sigma and clamped at the config prior, cost +0.007 m stereo and +0.006 m mono of mean ATE over the nine mid-flight windows where it fires (n=3). The covariance is still computed on demand by bin/linear_probe -cov, which is how those numbers are reproduced; nothing in the filter reads it. See notes-n-prompts/notes-dyninit/m6-covariance.md."
+  }
 }

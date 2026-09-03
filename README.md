@@ -524,6 +524,93 @@ methodological findings, and the commands to reproduce each table — is
 [`notes-n-prompts/report-xivo-vs-openvins-euroc.md`](notes-n-prompts/report-xivo-vs-openvins-euroc.md);
 per-milestone notes are in `notes-n-prompts/notes-euroc/`.
 
+### Dynamic initialization: starting while already moving
+
+The brief: XIVO must initialize correctly when the platform is **already moving** at
+the first sample — detect static vs. dynamic, keep today's path when it is static,
+and when it is not, solve a small bundle adjustment for the initial velocity and the
+bias terms and hand that to the filter. OpenVINS' `ov_init` as a reference.
+
+The old initializer averaged 20 accelerometer samples and set gravity from them;
+`Vsb`, `bg` and `ba` were never estimated, so they stayed at zero. That is correct
+if and only if the rig is at rest, and **2 of 11 EuRoC sequences are not**: MH_01
+asserts zero velocity while doing 0.671 m/s, MH_02 while doing 0.481. The one
+existing guard cannot fix it in principle — specific force is `R'(a - g)`, so at
+constant velocity the accelerometer magnitude reads *exactly* `|g|`. Accelerometer
+statistics detect acceleration, never velocity.
+
+What was added: a two-cue motion detector (min-over-windows accel sd **and** the
+residual of a rotation fitted from the images), a closed-form linear initializer
+that enforces `|g|` via a secular equation, a hand-rolled Eigen Levenberg–Marquardt
+bundle adjustment with Schur complement over a 2.0 s / 41-frame window solving
+jointly for every frame's pose and velocity, both IMU biases and every feature, and
+a divert-and-replay dispatcher that holds the estimator's messages while the
+decision is made. No new dependency — `find_package(Ceres)` was deliberately not
+added. `dynamic_init.enabled` is **on** in both `cfg/euroc_*.json`; `ctest` 26/26.
+
+Every public VIO dataset starts on a table, so 9 of 11 EuRoC sequences can only
+measure the feature's *cost*. `pyxivo.py -start_sec 55` turns the estimator on
+mid-flight — still EuRoC, still with ground truth, only the initial condition is
+hard — where the accelerometer average is **0.83–23.98°** away from gravity. n=10
+jitter ensembles per arm, both modes, `ate_002`:
+
+| | stereo off | stereo on | mono off | mono on |
+| --- | --- | --- | --- | --- |
+| **divergence census** (members > 100 m) | **29 of 110** | **0 of 110** | **40 of 110** | **0 of 110** |
+| mean ATE, sequences comparable either way | — | −0.0138 ± 0.0142 m | — | −0.2443 ± 0.1632 m |
+| **absolute orientation, `ov_eval posyaw`** | — | **−0.54 ± 0.33°** | — | **−3.82 ± 3.22°** |
+
+**69 of 220 mid-flight runs diverge without dynamic initialization and 0 with it**,
+and no run diverges that did not diverge before. Orientation is where the effect
+lives, which is not an accident: `ate_002` Horn-aligns and is blind to a global
+rotation, and a global tilt is exactly what the static initializer gets wrong at a
+moving start. The clearest single number is mono V1_02, **25.31° → 2.28°**, whose
+accelerometer average is 13.09° from gravity where the BA's is 0.78°.
+
+At a table start the feature is free and does nothing — +0.0065 m on the two moving
+sequences against a nine-sequence null control of +0.0003 ± 0.0032 m — which is the
+no-regression check, and the detector is **22 for 22** across both start conditions
+with a factor of 21 between the two classes. The static path is bit-identical, and
+proved so rather than argued: with the temporal calibration frozen, **18 of 18**
+EuRoC rows and **12 of 12** TUM-VI room rows are byte-identical pose for pose.
+
+Four qualifications:
+
+- **The cost is a one-off, and the memory is not the solver's.** ~0.9 s of one-core
+  compute on a dynamic start, ~0.26 s on a static one, for −0.8% (stereo) / −2.1%
+  (mono) of end-to-end throughput; subtracting the one-off leaves a per-frame
+  residual of zero. Peak RSS is +8 MB, and a `max_wait_sec = 0` arm — dispatcher
+  live, zero images tracked — recovers all of it, so the 8 MB is the pre-init KLT,
+  not the bundle adjustment.
+- **It declines to try when it cannot fit the window.** MH_04 (9.8 px reprojection
+  median) and MH_05 (1.65 px) fail the 1.5 px acceptance gate mid-flight and fall
+  back to the static path *byte-identically*. Both are the gate working: pulling
+  MH_05's median under the gate by lowering `sigma_pix` makes mono MH_05 go
+  0.574 → 1.144 m, because the filter then accepts a seed worse than the fallback
+  it displaces.
+- **Seeding the filter's covariance from the BA's own marginal was built, measured
+  and reverted.** Over 22 windows the marginal is 10–500× too tight and *worst
+  calibrated exactly where the window is hard*, ranking windows at Spearman +0.01 /
+  −0.22 / −0.47, while the shipped priors already score rms |e|/σ of 0.97 / 1.42 /
+  0.88. Seeding it cost ten of ten headline metrics (stereo ATE 0.078 → 0.083 m).
+  There is no `seed_covariance` knob; the covariance remains available to
+  `bin/linear_probe -cov`, which is how those numbers reproduce.
+- **The mid-flight numbers come from a start-time device, not a second dataset.**
+  `-start_sec 55` is EuRoC with a hard initial condition, which is the closest thing
+  to dynamic-start data that a public benchmark with ground truth provides.
+
+Run it as usual — the feature is on in the shipped configs — and ask the detector or
+the dispatcher directly when initialization misbehaves:
+
+    ./bin/init_probe -cfg cfg/euroc_stereo.json -root /path/to/euroc \
+      -dataset euroc -seq MH_01_easy -dispatch
+
+The full write-up — the algorithm, every measurement, the nine rejected
+alternatives, the two bugs the instruments found, the protocol and the commands for
+each table — is
+[`notes-n-prompts/report-dynamic-init.md`](notes-n-prompts/report-dynamic-init.md);
+per-milestone notes are in `notes-n-prompts/notes-dyninit/`.
+
 ---
 ## [LICENSE AND DISCLAIMER ARE COPIED FROM THE ORIGINAL REPO]
 

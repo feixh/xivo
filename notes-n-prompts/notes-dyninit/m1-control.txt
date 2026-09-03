@@ -1,0 +1,22 @@
+M1 regression control -- EuRoC stereo, n=3, worktree xivo-dyninit
+=================================================================
+against experiments/results/euroc_m6_final/fast/stereo members r0-r2
+(auto @ 8d2d052, the branch point for auto-dyninit)
+
+The detector is not called from Estimator, so this is a check that adding a
+translation unit to `xest`, relinking, and adding a second app target changed
+nothing -- not a check of the detector. It is worth running anyway: relinking can
+change inlining and therefore floating-point association, and this filter is
+chaotic enough (sd 0.007 m from a 1e-6 m/s velocity perturbation) that a
+one-ulp difference in the covariance update would show up in the third digit
+of ATE.
+
+Byte comparison of the trajectory files -- strictly stronger than comparing
+metrics, since the metrics are functions of these:
+  traj.txt + dump/euroc_<seq>_cam0 over 11 seqs x 3 members: 66/66 byte-identical
+
+Metric cells -- ate_002, ov_ate_pos_m, ov_ate_ori_deg, ov_rpe8_pos_m,
+ov_rpe8_ori_deg over 11 sequences x 3 members = 165:
+  165/165 identical (0 mismatches)
+
+ctest in xivo-dyninit/build: 24/24 passed (23 at the branch point, plus InitDetect)
