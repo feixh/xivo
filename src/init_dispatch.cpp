@@ -6,6 +6,59 @@
 
 namespace xivo {
 
+namespace {
+using Clock = std::chrono::steady_clock;
+/// Milliseconds since `t0`, on a clock that cannot be stepped by NTP.
+number_t MsSince(const Clock::time_point &t0) {
+  return std::chrono::duration<number_t, std::milli>(Clock::now() - t0).count();
+}
+} // namespace
+
+InitDispatcher::Options InitDispatcher::OptionsFromJson(const Json::Value &dyn,
+                                                       const Mat3 &Rbc,
+                                                       const Vec3 &Tbc,
+                                                       number_t gravity) {
+  Options opt;
+  opt.max_wait_sec = dyn.get("max_wait_sec", opt.max_wait_sec).asDouble();
+  opt.min_frames = dyn.get("min_frames", opt.min_frames).asInt();
+  opt.min_track_frames =
+      dyn.get("min_track_frames", opt.min_track_frames).asInt();
+  opt.max_pixel_median =
+      dyn.get("max_pixel_median", opt.max_pixel_median).asDouble();
+  opt.max_speed = dyn.get("max_speed", opt.max_speed).asDouble();
+
+  const int cam_id = 0; // the window is monocular; see `VisualStereo::image`.
+  opt.detect.cam_id = cam_id;
+  opt.detect.Rbc = Rbc;
+  opt.detect.window_sec =
+      dyn.get("detect_window_sec", opt.detect.window_sec).asDouble();
+  opt.detect.horizon_sec =
+      dyn.get("detect_horizon_sec", opt.detect.horizon_sec).asDouble();
+  opt.detect.imu_thresh = dyn.get("imu_thresh", opt.detect.imu_thresh).asDouble();
+  opt.detect.flow_thresh =
+      dyn.get("flow_thresh", opt.detect.flow_thresh).asDouble();
+  opt.detect.min_tracks =
+      dyn.get("detect_min_tracks", opt.detect.min_tracks).asInt();
+
+  opt.window.cam_id = cam_id;
+  opt.window.Rbc = Rbc;
+  opt.window.Tbc = Tbc;
+  opt.window.gravity = gravity;
+  opt.window.max_frames =
+      dyn.get("window_frames", opt.window.max_frames).asInt();
+  opt.window.frame_gap =
+      dyn.get("window_frame_gap", opt.window.frame_gap).asDouble();
+  opt.window.max_tracks =
+      dyn.get("window_max_tracks", opt.window.max_tracks).asInt();
+
+  opt.ba.sigma_pix = dyn.get("sigma_pix", opt.ba.sigma_pix).asDouble();
+  opt.ba.max_iterations = dyn.get("ba_iters", opt.ba.max_iterations).asInt();
+  // `sigma_ba_prior` is deliberately not configurable: it is not a tuning knob
+  // but the statement that `ba` is not estimated over a window this short. See
+  // the measurements at its declaration in init_ba.h.
+  return opt;
+}
+
 InitDispatcher::InitDispatcher() : InitDispatcher(Options{}) {}
 
 InitDispatcher::InitDispatcher(const Options &opt)
@@ -32,9 +85,11 @@ void InitDispatcher::AddImu(number_t t, const Vec3 &gyro, const Vec3 &accel) {
 void InitDispatcher::AddImage(number_t t, const cv::Mat &gray) {
   if (decided_)
     return;
+  const auto tic = Clock::now();
   if (t0_ < 0)
     t0_ = t;
   t_last_ = t;
+  ++num_images_;
   // The detector is asked once and its answer is cached, so it stops consuming
   // images as soon as it has one. Two reasons, and the second is the important
   // one: it saves a KLT per frame over the rest of the window, and it makes the
@@ -44,6 +99,7 @@ void InitDispatcher::AddImage(number_t t, const cv::Mat &gray) {
   if (decision_.verdict.kind == MotionVerdict::kUndecided)
     detect_.AddImage(t, gray);
   win_.AddImage(t, gray);
+  buffer_ms_ += MsSince(tic);
 }
 
 const InitDecision &InitDispatcher::Decide() {
@@ -72,6 +128,15 @@ const InitDecision &InitDispatcher::Decide() {
   case MotionVerdict::kDynamic:
     if (!win_.Full() && !timed_out)
       break; // keep filling; the verdict is already cached
+    if (!win_.ImuCoversFrames() && !timed_out)
+      // The window filled on an image whose timestamp coincides with an IMU
+      // sample that has not been handed over yet -- the common case, not a rare
+      // one, since on EuRoC every image coincides with one and the tie order is
+      // unspecified at both callers. Wait for it: one more message, <=5 ms at
+      // 200 Hz, and the decision stops depending on that order. Without this the
+      // solve is attempted against a window `Build` cannot preintegrate to its
+      // own last frame, and a moving platform is demoted to the static path.
+      break;
     if (win_.num_frames() < opt_.min_frames) {
       // A dynamic verdict the window cannot act on. Falling back to static is
       // wrong -- the platform *is* moving -- but it is wrong in the direction
@@ -80,12 +145,16 @@ const InitDecision &InitDispatcher::Decide() {
       TakeStatic("dynamic verdict, too few frames tracked");
       break;
     }
-    if (SolveDynamic()) {
-      decision_.path = InitDecision::Path::kDynamic;
-      decided_ = true;
-    } else {
-      // `why` was set by SolveDynamic.
-      decision_.path = InitDecision::Path::kStatic;
+    {
+      // Timed here rather than inside `SolveDynamic`, which returns from eight
+      // places: a rejected solve costs its compute too, and the cost of the
+      // rejection is exactly what MH_04 and MH_05 pay.
+      const auto tic = Clock::now();
+      const bool solved = SolveDynamic();
+      solve_ms_ = MsSince(tic);
+      // `why` was set by SolveDynamic if it failed.
+      decision_.path = solved ? InitDecision::Path::kDynamic
+                              : InitDecision::Path::kStatic;
       decided_ = true;
     }
     break;
@@ -109,6 +178,9 @@ const InitDecision &InitDispatcher::Decide() {
               << " imu=" << decision_.verdict.imu_samples;
     LOG(INFO) << "window frames=" << win_.num_frames()
               << " span=" << win_.Span() << " waited=" << Elapsed() << " s";
+    LOG(INFO) << "cost: buffer=" << buffer_ms_ << " ms over " << num_images_
+              << " images, solve=" << solve_ms_ << " ms, total="
+              << buffer_ms_ + solve_ms_ << " ms (one-off)";
     if (decision_.path == InitDecision::Path::kDynamic) {
       LOG(INFO) << "v_b=" << decision_.Vsb.transpose() << " |v|="
                 << decision_.Vsb.norm();

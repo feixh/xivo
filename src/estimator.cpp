@@ -697,37 +697,12 @@ Estimator::Estimator(const Json::Value &cfg)
   // member into `cfg_` on every config that does not have one.
   if (const Json::Value dyn = cfg_.get("dynamic_init", Json::Value());
       !simulation_ && dyn.get("enabled", false).asBool()) {
-    InitDispatcher::Options dopt;
+    // Every knob, and every default, lives in `InitDispatcher::OptionsFromJson`
+    // -- so `bin/init_probe -dispatch`, which measures this feature's verdict and
+    // its cost, is configured by the same code that configures the filter.
+    InitDispatcher::Options dopt =
+        InitDispatcher::OptionsFromJson(dyn, X_.Rbc.matrix(), X_.Tbc, g_.norm());
     dopt.enabled = true;
-    dopt.max_wait_sec = dyn.get("max_wait_sec", 3.0).asDouble();
-    dopt.min_frames = dyn.get("min_frames", 12).asInt();
-    dopt.min_track_frames = dyn.get("min_track_frames", 2).asInt();
-    dopt.max_pixel_median = dyn.get("max_pixel_median", 1.5).asDouble();
-    dopt.max_speed = dyn.get("max_speed", 5.0).asDouble();
-
-    const int cam_id = 0; // the window is monocular; see `VisualStereo::image`.
-    dopt.detect.cam_id = cam_id;
-    dopt.detect.Rbc = X_.Rbc.matrix();
-    dopt.detect.window_sec = dyn.get("detect_window_sec", 0.5).asDouble();
-    dopt.detect.horizon_sec = dyn.get("detect_horizon_sec", 2.0).asDouble();
-    dopt.detect.imu_thresh = dyn.get("imu_thresh", 0.35).asDouble();
-    dopt.detect.flow_thresh = dyn.get("flow_thresh", 0.25).asDouble();
-    dopt.detect.min_tracks = dyn.get("detect_min_tracks", 15).asInt();
-
-    dopt.window.cam_id = cam_id;
-    dopt.window.Rbc = X_.Rbc.matrix();
-    dopt.window.Tbc = X_.Tbc;
-    dopt.window.gravity = g_.norm();
-    dopt.window.max_frames = dyn.get("window_frames", 31).asInt();
-    dopt.window.frame_gap = dyn.get("window_frame_gap", 0.0).asDouble();
-    dopt.window.max_tracks = dyn.get("window_max_tracks", 160).asInt();
-
-    dopt.ba.sigma_pix = dyn.get("sigma_pix", BAOptions{}.sigma_pix).asDouble();
-    dopt.ba.max_iterations =
-        dyn.get("ba_iters", BAOptions{}.max_iterations).asInt();
-    // `sigma_ba_prior` is deliberately not configurable: it is not a tuning knob
-    // but the statement that `ba` is not estimated over a window this short. See
-    // the measurements at its declaration in init_ba.h.
 
     init_dispatch_ = std::make_unique<InitDispatcher>(dopt);
     LOG(INFO) << "dynamic initialization enabled: window="

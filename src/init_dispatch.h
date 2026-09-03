@@ -50,10 +50,13 @@
 // business. That keeps this file testable without a filter.
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <vector>
 
 #include <opencv2/core.hpp>
+
+#include "json/json.h"
 
 #include "alias.h"
 #include "init_ba.h"
@@ -142,6 +145,17 @@ public:
     number_t max_speed{5.0};
   };
 
+  /** Read the `dynamic_init` block of an estimator config into `Options`.
+   *
+   *  Lives here rather than in the estimator so that a probe and the filter are
+   *  configured by the same code: every default below is a number M5 tuned, and
+   *  a tool that measured the cost or the verdict of a *reimplementation* of this
+   *  mapping would be measuring something the shipped filter does not run.
+   *  `enabled` is not read here -- the caller decides whether to construct a
+   *  dispatcher at all, and the estimator additionally refuses in simulation. */
+  static Options OptionsFromJson(const Json::Value &dyn, const Mat3 &Rbc,
+                                 const Vec3 &Tbc, number_t gravity);
+
   InitDispatcher();
   explicit InitDispatcher(const Options &opt);
 
@@ -176,6 +190,23 @@ public:
   int num_frames() const { return win_.num_frames(); }
   const Options &opt() const { return opt_; }
 
+  /** What initialization cost in compute, milliseconds, split the way it is paid.
+   *
+   *  `buffer_ms` is the work done inside `AddImage` while the verdict is pending
+   *  -- the detector's KLT and the window's -- over `num_images()` frames.
+   *  `solve_ms` is one call: the window build, Stage A and Stage B, timed whether
+   *  they succeeded or were rejected, since a rejected solve costs its time too.
+   *  Both are one-off. After the handoff `decided_` short-circuits every entry
+   *  point, so neither can appear in the steady-state per-frame budget -- which is
+   *  the claim this header makes at the top, and these two numbers are how M5
+   *  measures it instead of asserting it.
+   *
+   *  The IMU path is deliberately not timed: `AddImu` is two `push_back`s, and a
+   *  pair of clock reads costs more than the work they would be measuring. */
+  number_t buffer_ms() const { return buffer_ms_; }
+  number_t solve_ms() const { return solve_ms_; }
+  int num_images() const { return num_images_; }
+
 private:
   /** Run Stage A then Stage B on the buffered window and fill `decision_`.
    *  Returns false (and leaves a reason in `decision_.why`) if any stage failed
@@ -189,6 +220,9 @@ private:
   InitDecision decision_;
   number_t t0_{-1};
   number_t t_last_{-1};
+  number_t buffer_ms_{0};
+  number_t solve_ms_{0};
+  int num_images_{0};
   /** Set once `Decide()` has committed, so the solve cannot run twice. */
   bool decided_{false};
 };

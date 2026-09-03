@@ -32,6 +32,7 @@
 
 #include "core.h"
 #include "init_detect.h"
+#include "init_dispatch.h"
 
 using namespace xivo;
 
@@ -387,4 +388,121 @@ TEST_F(InitDetectTest, FallsBackToTheImuWhenThereIsNoTexture) {
   EXPECT_EQ(v.frame_pairs, 0) << "a blank image should yield no tracks";
   EXPECT_LT(v.flow_px, 0) << "no opinion is encoded as a negative residual";
   EXPECT_EQ(v.kind, MotionVerdict::kDynamic) << "accel sd " << v.accel_sd;
+}
+
+// ---------------------------------------------------------------------------
+// The dispatcher, on the one thing about it that plain message order can break.
+//
+// Here rather than in a file of its own because the case needs a *moving*
+// synthetic sequence -- rendered images and an IMU stream that agree -- and this
+// translation unit is the one that has it, along with the EuRoC camera in
+// CameraManager slot 0 that both the detector and the window read through.
+// ---------------------------------------------------------------------------
+namespace {
+
+/** Run a whole `InitDispatcher` over the shaken-and-already-moving sequence,
+ *  handing each image over either just *before* or just after the IMU sample it
+ *  shares a timestamp with.
+ *
+ *  That tie is not hypothetical: at 200 Hz and 20 Hz every tenth IMU sample
+ *  lands on an image, exactly as on EuRoC (measured: 3682 of 3682 images on
+ *  MH_01), and neither caller pins the order -- `DataLoader` sorts with a
+ *  non-stable `std::sort` and `Estimator::MaintainBuffer` orders a heap on the
+ *  timestamp alone. Both orders must therefore reach the same decision, and
+ *  since the window and the IMU buffer end up holding exactly the same samples
+ *  either way, "the same" means to the last bit.
+ */
+InitDecision RunDispatchOrder(bool image_first, const std::vector<Vec3> &pts,
+                              CameraManager *cam) {
+  InitDispatcher::Options opt;
+  opt.enabled = true;
+  opt.detect = DefaultOpts();
+  opt.window.cam_id = 0;
+  opt.window.Rbc = Mat3::Identity(); // the fixture's geometry: camera == body
+  opt.window.Tbc = Vec3::Zero();
+  opt.window.gravity = 9.81;
+  // 21 frames is 1.0 s at 20 Hz, so the window fills half a second before the
+  // synthetic sequence runs out -- and `max_wait_sec` stays out of reach, which
+  // matters because a timeout would solve regardless and hide the bug.
+  opt.window.max_frames = 21;
+  opt.max_wait_sec = 3.0;
+
+  InitDispatcher disp{opt};
+  const Vec3 omega{0, 0.1, 0}, vel{0.5, 0, 0}, accel{2.0, 0, 1.0};
+  const Vec3 g_w{0.0, 0.0, -9.81};
+  const number_t w = 2 * M_PI * 1.5;
+  auto accel_at = [&](number_t t) { return Vec3{accel * std::sin(w * t)}; };
+  auto pos_at = [&](number_t t) {
+    return Vec3{vel * t + accel * (t - std::sin(w * t) / w) / w};
+  };
+  auto feed_image = [&](number_t tc) {
+    disp.AddImage(tc, Render(pts, SO3::exp(omega * tc).matrix(), pos_at(tc),
+                             cam));
+    disp.Decide();
+  };
+
+  const int n_imu = static_cast<int>(kDur * kImuRate);
+  const int n_cam = static_cast<int>(kDur * kCamRate);
+  int ic = 0;
+  for (int i = 0; i < n_imu && disp.waiting(); ++i) {
+    const number_t t = i / kImuRate;
+    // The image at 1.0 s and the IMU sample at 1.0 s are the same double, so
+    // `<` and `<=` here are exactly the two orders under test.
+    while (image_first && ic < n_cam &&
+           static_cast<number_t>(ic) / kCamRate <= t)
+      feed_image(ic++ / kCamRate);
+    const Mat3 R_wb = SO3::exp(omega * t).matrix();
+    disp.AddImu(t, omega, R_wb.transpose() * (accel_at(t) - g_w));
+    disp.Decide();
+    while (!image_first && ic < n_cam &&
+           static_cast<number_t>(ic) / kCamRate <= t)
+      feed_image(ic++ / kCamRate);
+  }
+  return disp.decision();
+}
+
+} // namespace
+
+TEST_F(InitDetectTest, DispatchDoesNotDependOnCoincidentMessageOrder) {
+  const InitDecision imu_first = RunDispatchOrder(false, pts_, cam_);
+  const InitDecision img_first = RunDispatchOrder(true, pts_, cam_);
+
+  // Both must actually get somewhere, or the comparison below is vacuous.
+  ASSERT_EQ(imu_first.path, InitDecision::Path::kDynamic)
+      << "why: " << imu_first.why;
+  // Before the `ImuCoversFrames` check in `Decide` this was `static` with
+  // "window build failed": the window had filled on an image the preintegration
+  // could not yet reach, so a platform the detector had already called moving was
+  // handed to the static initializer.
+  ASSERT_EQ(img_first.path, InitDecision::Path::kDynamic)
+      << "why: " << img_first.why;
+
+  EXPECT_STREQ(imu_first.why, img_first.why);
+
+  // What the two orders do *not* have to agree on, bit for bit: the handoff
+  // instant. An image that arrives before the first IMU sample is dropped from
+  // the window by `InitWindowTracker::AddImage` -- there is no interval to
+  // preintegrate it over -- so leading with the images costs the frame at t=0 and
+  // the window closes one frame later. Pinned rather than hidden, because it is
+  // the honest remainder of this asymmetry and a change that made the leading
+  // frame usable should have to update it here.
+  EXPECT_EQ(imu_first.t_handoff, 1.0);
+  EXPECT_EQ(img_first.t_handoff, 1.0 + 1.0 / kCamRate);
+
+  // And what must agree: the physics. The two windows cover different 1.0 s of a
+  // rig being shaken at 1.5 Hz, so their velocities are different quantities and
+  // comparing them to each other is meaningless -- each is checked against the
+  // exact truth at its own handoff instead. The bound is loose on purpose (the
+  // solve's accuracy is what the M2/M3 suites pin); this only has to fail if one
+  // order quietly produces a garbage seed the other does not.
+  const Vec3 vel{0.5, 0, 0}, accel{2.0, 0, 1.0};
+  const number_t w = 2 * M_PI * 1.5;
+  auto truth_speed = [&](number_t t) {
+    return (vel + accel * (1 - std::cos(w * t)) / w).norm();
+  };
+  for (const auto *d : {&imu_first, &img_first}) {
+    EXPECT_NEAR(d->Vsb.norm(), truth_speed(d->t_handoff), 0.15)
+        << "seed speed at t=" << d->t_handoff << ": " << d->Vsb.transpose();
+    EXPECT_LT(d->bg.norm(), 0.05) << "the synthetic gyro has no bias";
+  }
 }

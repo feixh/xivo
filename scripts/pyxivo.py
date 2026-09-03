@@ -51,6 +51,18 @@ parser.add_argument('-mode', default='eval',
 parser.add_argument(
     '-save_full_cov', default=False, action='store_true',
     help='save the entire covariance matrix, not just that of the motion state, if set')
+parser.add_argument(
+    '-start_sec', default=0.0, type=float,
+    help='drop all images and IMU samples in the first N seconds of the '
+         'sequence, so the estimator is turned on mid-flight. Default 0 feeds '
+         'the sequence whole and is bit-identical to having no flag. This exists '
+         'to test initialization: every public dataset is recorded from a rig '
+         'sitting on a table, so a start-at-zero run only ever exercises the '
+         'static initializer, while starting the same data 20 s in poses the '
+         'hard problem -- unknown velocity, unknown attitude, an accelerometer '
+         'reading that is nothing like gravity -- on data that still has '
+         'groundtruth. Evaluation is unaffected: the trajectory is timestamped '
+         'as always and evaluate_ate.py associates only the overlapping poses.')
 
 
 def main(args):
@@ -223,6 +235,30 @@ def main(args):
             permuted.extend(imu_v[6 * k:6 * k + 6])
         imu_v = permuted
         del order, permuted
+
+    # Mid-flight start. Applied after both streams are sorted and relative to the
+    # first IMU sample, which is the same epoch every other tool in this workspace
+    # measures from (init_dispatch's window, seed_error.py, linear_probe -start),
+    # so a `-start_sec 20` here and a `-start 20` there mean the same instant.
+    if args.start_sec > 0.0:
+        cut = imu_ts[0] + int(args.start_sec * 1e9)
+        n_img0, n_imu0 = len(frames), len(imu_ts)
+        frames = [f for f in frames if f[0] >= cut]
+        keep = [k for k in range(n_imu0) if imu_ts[k] >= cut]
+        imu_ts = array.array('q', (imu_ts[k] for k in keep))
+        trimmed = array.array('d')
+        for k in keep:
+            trimmed.extend(imu_v[6 * k:6 * k + 6])
+        imu_v = trimmed
+        del keep, trimmed
+        if not frames or not imu_ts:
+            raise ValueError('-start_sec {} leaves no data ({} images, {} imu '
+                             'samples)'.format(args.start_sec, len(frames),
+                                               len(imu_ts)))
+        print('start_sec {}: dropped {}/{} images and {}/{} imu samples; first '
+              'sample now at {}'.format(args.start_sec, n_img0 - len(frames),
+                                        n_img0, n_imu0 - len(imu_ts), n_imu0,
+                                        imu_ts[0]))
 
     if stereo:
         n_left = len(glob.glob(os.path.join(img_dir, '*.png')))

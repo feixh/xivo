@@ -70,6 +70,13 @@ DEFINE_double(sigma_bg_prior, 0.0,
               "Stage B gyro-bias prior sigma, rad/s; 0 disables.");
 DEFINE_double(sigma_ba_prior, 0.01,
               "Stage B accel-bias prior sigma, m/s^2; 0 disables.");
+DEFINE_int32(at_frame, 0,
+             "Which window frame Stage B's state is reported at; -1 is the last. "
+             "This is not a display detail. Stage A only ever speaks about frame "
+             "0, but `InitDispatcher::SolveDynamic` seeds the filter from the "
+             "**last** frame -- that is the instant the filter is about to call "
+             "`Rsb = I` -- so 0 scores a quantity nothing consumes. The default "
+             "stays 0 so that the M2/M3 numbers remain reproducible.");
 DEFINE_bool(header, false, "Print a column header before the row.");
 
 using namespace xivo;
@@ -186,7 +193,13 @@ int main(int argc, char **argv) {
     Set("sigma_bg_prior", &bopt.sigma_bg_prior, FLAGS_sigma_bg_prior);
     Set("sigma_ba_prior", &bopt.sigma_ba_prior, FLAGS_sigma_ba_prior);
     const BAResult b = SolveInitBA(prob, seed, bopt);
-    const Vec3 bv = b.state.VelocityInBody(0), bg_b = b.state.GravityInBody(0);
+    const int at = FLAGS_at_frame < 0 ? b.state.num_frames() + FLAGS_at_frame
+                                      : FLAGS_at_frame;
+    if (at < 0 || at >= b.state.num_frames()) {
+      printf("  BA_FRAME_OUT_OF_RANGE %d of %d\n", at, b.state.num_frames());
+      return 1;
+    }
+    const Vec3 bv = b.state.VelocityInBody(at), bg_b = b.state.GravityInBody(at);
     if (FLAGS_header)
       printf("%-26s %9s %9s %9s %9s %9s %9s %10s %10s %10s %9s %9s %9s "
              "%8s %8s %8s %4s %4s %4s\n",
@@ -200,6 +213,9 @@ int main(int argc, char **argv) {
            b.state.ba(1), b.state.ba(2), b.pixel_rms, b.pixel_median,
            b.imu_rms, b.iterations,
            b.rejections, b.ok ? 1 : 0);
+    if (FLAGS_at_frame != 0)
+      printf("#at_frame %d of %d, t=%.4f s\n", at, b.state.num_frames(),
+             prob.frames[at].t);
   }
   return 0;
 }

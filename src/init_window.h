@@ -79,6 +79,22 @@ public:
   int num_live() const { return static_cast<int>(prev_ids_.size()); }
   const Options &opt() const { return opt_; }
 
+  /** True if the buffered IMU reaches the last frame, so that `Build` can
+   *  preintegrate the window end to end.
+   *
+   *  Worth asking before solving rather than after failing, because on EuRoC
+   *  *every* image timestamp coincides exactly with an IMU sample (measured: 3682
+   *  of 3682 on MH_01), and which of the two the caller hands over first is
+   *  decided by an unstable `std::sort` in `DataLoader` and by a timestamp-only
+   *  heap in `Estimator::MaintainBuffer`. If the image wins that tie the window
+   *  fills one sample short of its own last frame and `Build` returns false --
+   *  which the dispatcher can only read as "this window is unusable", silently
+   *  demoting a moving platform to the static path. */
+  bool ImuCoversFrames() const {
+    return !imu_.empty() && !frame_t_.empty() &&
+           imu_.back().t >= frame_t_.back();
+  }
+
   /** Assemble the solver problem, preintegrating each frame from frame 0 at the
    *  given bias prior. Tracks seen in fewer than `min_track_frames` frames are
    *  dropped. Returns false if there is not enough to solve. */
